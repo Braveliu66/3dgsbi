@@ -1,0 +1,760 @@
+from __future__ import annotations
+
+import asyncio
+import io
+import json
+import mimetypes
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import redis
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from pydantic import BaseModel
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session, selectinload
+
+from app.algorithms import license_notice_for, normalize_preview_pipeline, runtime_preflight, seed_algorithm_registry
+from app.config import get_settings
+from app.database import Base, SessionLocal, engine, get_db
+from app.models import AlgorithmRegistry, Artifact, Feedback, MediaAsset, Project, Task, TaskEvent, User, utc_now
+from app.resources import collect_resources
+from app.security import (
+    create_access_token,
+    create_artifact_token,
+    get_current_user,
+    hash_password,
+    require_admin,
+    verify_artifact_token,
+    verify_password,
+)
+from app.storage import Storage, safe_filename, storage_key
+
+settings = get_settings()
+storage = Storage(settings)
+app = FastAPI(title=settings.app_name)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origin_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class RegisterPayload(BaseModel):
+    username: str
+    password: str
+    email: str | None = None
+
+
+class LoginPayload(BaseModel):
+    username: str
+    password: str
+
+
+class ProjectCreatePayload(BaseModel):
+    name: str
+    input_type: str
+    tags: list[str] = []
+
+
+class TaskCreatePayload(BaseModel):
+    options: dict[str, Any] = {}
+
+
+class FeedbackPayload(BaseModel):
+    title: str
+    content: str
+    project_id: str | None = None
+
+
+def iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
+
+
+def user_dict(user: User) -> dict[str, Any]:
+    return {"id": user.id, "username": user.username, "email": user.email, "role": user.role, "created_at": iso(user.created_at)}
+
+
+def auth_response(user: User) -> dict[str, Any]:
+    return {"access_token": create_access_token(user.id), "token_type": "bearer", "user": user_dict(user)}
+
+
+def media_dict(item: MediaAsset) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "project_id": item.project_id,
+        "kind": item.kind,
+        "object_uri": item.object_uri,
+        "thumbnail_uri": item.thumbnail_uri,
+        "file_name": item.file_name,
+        "file_size": item.file_size,
+        "width": item.width,
+        "height": item.height,
+        "duration_seconds": item.duration_seconds,
+        "quality_flags": item.quality_flags or {},
+        "source_version": item.source_version,
+        "created_at": iso(item.created_at),
+    }
+
+
+def task_dict(task: Task) -> dict[str, Any]:
+    return {
+        "id": task.id,
+        "project_id": task.project_id,
+        "type": task.type,
+        "status": task.status,
+        "priority": task.priority,
+        "progress": task.progress,
+        "worker_id": task.worker_id,
+        "options": task.options or {},
+        "current_stage": task.current_stage,
+        "eta_seconds": task.eta_seconds,
+        "error_code": task.error_code,
+        "error_message": task.error_message,
+        "metrics": task.metrics or {},
+        "logs": task.logs or [],
+        "created_at": iso(task.created_at),
+        "started_at": iso(task.started_at),
+        "finished_at": iso(task.finished_at),
+    }
+
+
+def artifact_dict(item: Artifact) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "project_id": item.project_id,
+        "task_id": item.task_id,
+        "kind": item.kind,
+        "object_uri": item.object_uri,
+        "file_name": item.file_name,
+        "file_size": item.file_size,
+        "checksum": item.checksum,
+        "metadata": item.metadata_json or {},
+        "source_version": item.source_version,
+        "created_at": iso(item.created_at),
+    }
+
+
+def project_dict(project: Project, include_children: bool = False) -> dict[str, Any]:
+    payload = {
+        "id": project.id,
+        "owner_id": project.owner_id,
+        "name": project.name,
+        "input_type": project.input_type,
+        "status": project.status,
+        "tags": project.tags or [],
+        "total_size_bytes": project.total_size_bytes,
+        "preview_image_uri": project.preview_image_uri,
+        "error_message": project.error_message,
+        "source_version": project.source_version,
+        "preview_source_version": project.preview_source_version,
+        "created_at": iso(project.created_at),
+        "updated_at": iso(project.updated_at),
+    }
+    if include_children:
+        payload["media"] = [media_dict(item) for item in project.media]
+        payload["tasks"] = [task_dict(item) for item in project.tasks]
+        payload["artifacts"] = [artifact_dict(item) for item in project.artifacts]
+    return payload
+
+
+def emit_event(db: Session, project_id: str, event: str, payload: dict[str, Any], task_id: str | None = None) -> None:
+    db.add(TaskEvent(project_id=project_id, task_id=task_id, event=event, payload=payload))
+
+
+def owned_project(db: Session, project_id: str, user: User, include_children: bool = False) -> Project:
+    statement = select(Project).where(Project.id == project_id)
+    if include_children:
+        statement = statement.options(selectinload(Project.media), selectinload(Project.tasks), selectinload(Project.artifacts))
+    project = db.scalar(statement)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if user.role != "admin" and project.owner_id != user.id:
+        raise HTTPException(status_code=403, detail="Project access denied")
+    return project
+
+
+def media_key(project: Project, media_id: str, file_name: str, kind: str) -> str:
+    folder = "images" if kind == "image" else "video"
+    return storage_key("users", project.owner_id, "projects", project.id, "raw", folder, f"{media_id}-{safe_filename(file_name)}")
+
+
+def thumbnail_key(project: Project, media_id: str) -> str:
+    return storage_key("users", project.owner_id, "projects", project.id, "thumbs", f"{media_id}.jpg")
+
+
+def create_thumbnail(uri: str, project: Project, media_id: str) -> tuple[str | None, int | None, int | None]:
+    try:
+        from PIL import Image, ImageOps
+
+        with storage.open_file(uri) as handle:
+            image = Image.open(handle)
+            image = ImageOps.exif_transpose(image)
+            width, height = image.size
+            image.thumbnail((420, 420))
+            if image.mode not in ("RGB", "L"):
+                image = image.convert("RGB")
+            output = io.BytesIO()
+            image.save(output, format="JPEG", quality=86)
+            thumb_uri = storage.write_bytes(thumbnail_key(project, media_id), output.getvalue())
+            return thumb_uri, width, height
+    except Exception:
+        return None, None, None
+
+
+def get_redis() -> redis.Redis:
+    return redis.Redis.from_url(settings.redis_url, decode_responses=True)
+
+
+def enqueue_preview_task(task_id: str) -> None:
+    get_redis().rpush(settings.preview_queue_name, task_id)
+
+
+def seed_database(db: Session) -> None:
+    admin = db.scalar(select(User).where(User.username == settings.admin_username))
+    if not admin:
+        db.add(
+            User(
+                username=settings.admin_username,
+                email=settings.admin_email,
+                password_hash=hash_password(settings.admin_password),
+                role="admin",
+            )
+        )
+    seed_algorithm_registry(db, settings)
+    db.commit()
+
+
+@app.on_event("startup")
+def startup() -> None:
+    Base.metadata.create_all(bind=engine)
+    storage.ensure_bucket()
+    with SessionLocal() as db:
+        seed_database(db)
+
+
+@app.get("/health")
+def health() -> dict[str, Any]:
+    return {"ok": True, "service": settings.app_name}
+
+
+@app.post("/api/auth/register")
+def register(payload: RegisterPayload, db: Session = Depends(get_db)) -> dict[str, Any]:
+    username = payload.username.strip()
+    if len(username) < 2 or len(payload.password) < 6:
+        raise HTTPException(status_code=400, detail="用户名至少 2 位，密码至少 6 位")
+    if db.scalar(select(User).where(User.username == username)):
+        raise HTTPException(status_code=409, detail="用户名已存在")
+    user = User(username=username, email=payload.email, password_hash=hash_password(payload.password), role="user")
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return auth_response(user)
+
+
+@app.post("/api/auth/login")
+def login(payload: LoginPayload, db: Session = Depends(get_db)) -> dict[str, Any]:
+    user = db.scalar(select(User).where(User.username == payload.username.strip()))
+    if not user or not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+    return auth_response(user)
+
+
+@app.post("/api/auth/logout")
+def logout() -> dict[str, bool]:
+    return {"ok": True}
+
+
+@app.get("/api/me")
+def me(user: User = Depends(get_current_user)) -> dict[str, Any]:
+    return user_dict(user)
+
+
+@app.get("/api/system/resources")
+def system_resources(_: User = Depends(get_current_user)) -> dict[str, Any]:
+    return collect_resources()
+
+
+@app.get("/api/admin/system/resources")
+def admin_resources(_: User = Depends(require_admin)) -> dict[str, Any]:
+    return collect_resources()
+
+
+@app.get("/api/projects/summary")
+def project_summary(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, int]:
+    statement = select(Project).where(Project.owner_id == user.id)
+    projects = db.scalars(statement).all()
+    active = {"PREVIEW_RUNNING", "FINE_QUEUED", "FINE_RUNNING", "PREPROCESSING", "UPLOADING"}
+    return {
+        "total": len(projects),
+        "running": sum(1 for item in projects if item.status in active),
+        "completed": sum(1 for item in projects if item.status == "COMPLETED"),
+        "failed": sum(1 for item in projects if item.status == "FAILED"),
+        "total_size_bytes": sum(item.total_size_bytes for item in projects),
+    }
+
+
+@app.get("/api/projects")
+def list_projects(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    projects = db.scalars(
+        select(Project)
+        .where(Project.owner_id == user.id)
+        .options(selectinload(Project.media), selectinload(Project.tasks), selectinload(Project.artifacts))
+        .order_by(Project.updated_at.desc())
+    ).all()
+    return {"projects": [project_dict(item, include_children=True) for item in projects]}
+
+
+@app.post("/api/projects")
+def create_project(payload: ProjectCreatePayload, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    if payload.input_type not in {"images", "video", "camera"}:
+        raise HTTPException(status_code=400, detail="Unsupported input_type")
+    project = Project(
+        owner_id=user.id,
+        name=payload.name.strip() or "新建重建项目",
+        input_type=payload.input_type,
+        tags=payload.tags,
+        status="CREATED",
+    )
+    db.add(project)
+    db.commit()
+    db.refresh(project)
+    return project_dict(project, include_children=True)
+
+
+@app.post("/api/camera/sessions")
+def create_camera_session(payload: dict[str, Any] | None = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    payload = payload or {}
+    project = Project(owner_id=user.id, name=payload.get("name") or "Realtime camera", input_type="camera", tags=payload.get("tags") or [])
+    db.add(project)
+    db.commit()
+    db.refresh(project)
+    return project_dict(project, include_children=True)
+
+
+@app.get("/api/projects/{project_id}")
+def get_project(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return project_dict(owned_project(db, project_id, user, include_children=True), include_children=True)
+
+
+@app.delete("/api/projects/{project_id}")
+def delete_project(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, bool]:
+    project = owned_project(db, project_id, user, include_children=True)
+    for media in project.media:
+        storage.delete(media.object_uri)
+        storage.delete(media.thumbnail_uri)
+    for artifact in project.artifacts:
+        storage.delete(artifact.object_uri)
+    db.delete(project)
+    db.commit()
+    return {"deleted": True}
+
+
+@app.post("/api/projects/{project_id}/media")
+async def upload_media(
+    project_id: str,
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    project = owned_project(db, project_id, user)
+    content_type = file.content_type or mimetypes.guess_type(file.filename or "")[0] or ""
+    kind = "image" if content_type.startswith("image/") else "video" if content_type.startswith("video/") else None
+    if kind is None:
+        suffix = Path(file.filename or "").suffix.lower()
+        kind = "image" if suffix in {".jpg", ".jpeg", ".png", ".webp", ".bmp"} else "video"
+    if project.input_type == "images" and kind != "image":
+        raise HTTPException(status_code=400, detail="图片项目只能上传图片")
+    if project.input_type == "video" and kind != "video":
+        raise HTTPException(status_code=400, detail="视频项目只能上传视频")
+
+    media = MediaAsset(project_id=project.id, kind=kind, object_uri="", file_name=safe_filename(file.filename or "upload.bin"))
+    db.add(media)
+    db.flush()
+    uri, size = await storage.save_upload(file, media_key(project, media.id, media.file_name, kind),)
+    media.object_uri = uri
+    media.file_size = size
+    project.total_size_bytes += size
+    project.source_version += 1
+    media.source_version = project.source_version
+    project.status = "UPLOADING"
+    project.updated_at = utc_now()
+    if kind == "image":
+        thumb_uri, width, height = create_thumbnail(uri, project, media.id)
+        media.thumbnail_uri = thumb_uri
+        media.width = width
+        media.height = height
+        if thumb_uri and not project.preview_image_uri:
+            project.preview_image_uri = media.thumbnail_uri
+    db.commit()
+    db.refresh(media)
+    return media_dict(media)
+
+
+@app.get("/api/projects/{project_id}/media")
+def list_media(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    project = owned_project(db, project_id, user, include_children=True)
+    return {"media": [media_dict(item) for item in project.media]}
+
+
+@app.get("/api/projects/{project_id}/media/stats")
+def media_stats(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    project = owned_project(db, project_id, user, include_children=True)
+    media = project.media
+    return {
+        "image_count": sum(1 for item in media if item.kind == "image"),
+        "video_count": sum(1 for item in media if item.kind == "video"),
+        "total_size_bytes": sum(item.file_size for item in media),
+        "source_version": project.source_version,
+    }
+
+
+@app.delete("/api/projects/{project_id}/media/{media_id}")
+def delete_media(project_id: str, media_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    project = owned_project(db, project_id, user, include_children=True)
+    media = next((item for item in project.media if item.id == media_id), None)
+    if not media:
+        raise HTTPException(status_code=404, detail="Media not found")
+    storage.delete(media.object_uri)
+    storage.delete(media.thumbnail_uri)
+    project.total_size_bytes = max(0, project.total_size_bytes - media.file_size)
+    project.source_version += 1
+    project.updated_at = utc_now()
+    if project.preview_image_uri == media.thumbnail_uri:
+        project.preview_image_uri = None
+    if not [item for item in project.media if item.id != media_id]:
+        project.status = "CREATED"
+    elif project.preview_source_version is not None and project.preview_source_version != project.source_version:
+        project.status = "PREPROCESSING"
+    db.delete(media)
+    db.commit()
+    return {"deleted": True, "source_version": project.source_version}
+
+
+@app.post("/api/projects/{project_id}/tasks/preview")
+def create_preview_task(
+    project_id: str,
+    payload: TaskCreatePayload,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    project = owned_project(db, project_id, user, include_children=True)
+    if not project.media:
+        raise HTTPException(status_code=400, detail="请先上传真实素材")
+    if project.input_type == "images" and not any(item.kind == "image" for item in project.media):
+        raise HTTPException(status_code=400, detail="图片预览至少需要 1 张图片")
+    if project.input_type == "video" and not any(item.kind == "video" for item in project.media):
+        raise HTTPException(status_code=400, detail="视频预览需要上传视频文件")
+    pipeline = normalize_preview_pipeline(str((payload.options or {}).get("preview_pipeline") or ""), project.input_type)
+    task = Task(
+        project_id=project.id,
+        type="preview",
+        status="queued",
+        priority=90,
+        progress=0,
+        current_stage="queued",
+        eta_seconds=None,
+        options={**(payload.options or {}), "preview_pipeline": pipeline, "source_version": project.source_version},
+    )
+    project.status = "PREVIEW_RUNNING"
+    project.error_message = None
+    db.add(task)
+    db.flush()
+    emit_event(db, project.id, "task_queued", task_dict(task), task.id)
+    db.commit()
+    try:
+        enqueue_preview_task(task.id)
+    except Exception as exc:
+        task.status = "failed"
+        task.error_code = "QUEUE_UNAVAILABLE"
+        task.error_message = f"Redis queue unavailable: {exc}"
+        task.finished_at = utc_now()
+        project.status = "FAILED"
+        project.error_message = task.error_message
+        emit_event(db, project.id, "task_failed", task_dict(task), task.id)
+        db.commit()
+    db.refresh(task)
+    return task_dict(task)
+
+
+@app.post("/api/projects/{project_id}/tasks/fine")
+def create_fine_task(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    project = owned_project(db, project_id, user)
+    task = Task(
+        project_id=project.id,
+        type="fine",
+        status="failed",
+        progress=0,
+        current_stage="not_configured",
+        error_code="ALGORITHM_NOT_CONFIGURED",
+        error_message="精细重建 worker-fine 尚未启用。本批次只启用图片/视频极速预览。",
+        finished_at=utc_now(),
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return task_dict(task)
+
+
+@app.get("/api/tasks/{task_id}")
+def get_task(task_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    owned_project(db, task.project_id, user)
+    return task_dict(task)
+
+
+@app.post("/api/tasks/{task_id}/cancel")
+def cancel_task(task_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    project = owned_project(db, task.project_id, user)
+    if task.status in {"queued", "running"}:
+        task.status = "canceled"
+        task.finished_at = utc_now()
+        task.error_message = "用户取消任务"
+        project.status = "CANCELED"
+        emit_event(db, project.id, "task_failed", task_dict(task), task.id)
+        db.commit()
+    return task_dict(task)
+
+
+@app.get("/api/projects/{project_id}/artifacts")
+def list_artifacts(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    project = owned_project(db, project_id, user, include_children=True)
+    return {"artifacts": [artifact_dict(item) for item in project.artifacts]}
+
+
+def artifact_url(artifact: Artifact) -> str:
+    presigned = storage.presigned_get_url(artifact.object_uri, settings.artifact_token_expire_seconds)
+    if presigned:
+        return presigned
+    token = create_artifact_token(artifact.id)
+    return f"/api/artifacts/{artifact.id}/file?token={token}"
+
+
+@app.get("/api/artifacts/{artifact_id}/download-url")
+def artifact_download_url(artifact_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    artifact = db.get(Artifact, artifact_id)
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    owned_project(db, artifact.project_id, user)
+    return {"url": artifact_url(artifact), "expires_in_seconds": settings.artifact_token_expire_seconds}
+
+
+@app.get("/api/artifacts/{artifact_id}/file")
+def artifact_file(artifact_id: str, token: str = Query(...), db: Session = Depends(get_db)):
+    verify_artifact_token(token, artifact_id)
+    artifact = db.get(Artifact, artifact_id)
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    if artifact.object_uri.startswith("s3://"):
+        raise HTTPException(status_code=400, detail="Use presigned S3 URL")
+    path = storage.local_path(artifact.object_uri)
+    return FileResponse(path, filename=artifact.file_name)
+
+
+@app.get("/api/media/{media_id}/thumbnail")
+def media_thumbnail(media_id: str, token: str | None = Query(default=None), db: Session = Depends(get_db)):
+    media = db.get(MediaAsset, media_id)
+    if not media or not media.thumbnail_uri:
+        raise HTTPException(status_code=404, detail="Thumbnail not found")
+    if media.thumbnail_uri.startswith("/api/media/"):
+        key = thumbnail_key(media.project, media.id)
+        uri = storage.uri_for_key(key)
+    else:
+        uri = media.thumbnail_uri
+    if uri.startswith("s3://"):
+        url = storage.presigned_get_url(uri, settings.artifact_token_expire_seconds)
+        if url:
+            return RedirectResponse(url)
+        raise HTTPException(status_code=400, detail="S3 thumbnail URL unavailable")
+    path = storage.local_path(uri)
+    return FileResponse(path, media_type="image/jpeg")
+
+
+@app.get("/api/media/{media_id}/file")
+def media_file(media_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    media = db.get(MediaAsset, media_id)
+    if not media:
+        raise HTTPException(status_code=404, detail="Media not found")
+    owned_project(db, media.project_id, user)
+    if media.object_uri.startswith("s3://"):
+        url = storage.presigned_get_url(media.object_uri, settings.artifact_token_expire_seconds)
+        if url:
+            return RedirectResponse(url)
+    return FileResponse(storage.local_path(media.object_uri), filename=media.file_name)
+
+
+@app.get("/api/projects/{project_id}/viewer-config")
+def viewer_config(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    project = owned_project(db, project_id, user, include_children=True)
+    preview_artifacts = [item for item in project.artifacts if item.kind == "preview_spz"]
+    fresh = [item for item in preview_artifacts if item.source_version == project.source_version]
+    if fresh:
+        artifact = sorted(fresh, key=lambda item: item.created_at, reverse=True)[0]
+        return {
+            "status": "ready",
+            "mode": "single",
+            "source": "preview",
+            "artifact_id": artifact.id,
+            "model_url": artifact_url(artifact),
+            "format": "spz",
+            "progressive": False,
+        }
+    if preview_artifacts:
+        return {
+            "status": "unavailable",
+            "message": "素材已删除或补传，当前预览产物已过期，请重新启动预览。",
+            "stale": True,
+        }
+    return {"status": "unavailable", "message": "暂无真实 preview.spz 产物。"}
+
+
+@app.post("/api/feedback")
+def create_feedback(payload: FeedbackPayload, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    feedback = Feedback(user_id=user.id, project_id=payload.project_id, title=payload.title, content=payload.content)
+    db.add(feedback)
+    db.commit()
+    return {"ok": True, "id": feedback.id}
+
+
+@app.get("/api/algorithms")
+def public_algorithms(db: Session = Depends(get_db)) -> dict[str, Any]:
+    items = db.scalars(select(AlgorithmRegistry).order_by(AlgorithmRegistry.name)).all()
+    return {"algorithms": [algorithm_dict(item) for item in items]}
+
+
+@app.get("/api/admin/algorithms")
+def admin_algorithms(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, Any]:
+    items = db.scalars(select(AlgorithmRegistry).order_by(AlgorithmRegistry.name)).all()
+    return {"algorithms": [algorithm_dict(item) for item in items]}
+
+
+def algorithm_dict(item: AlgorithmRegistry) -> dict[str, Any]:
+    return {
+        "name": item.name,
+        "repo_url": item.repo_url,
+        "license": item.license,
+        "commit_hash": item.commit_hash,
+        "weight_source": item.weight_source,
+        "local_path": item.local_path,
+        "enabled": item.enabled,
+        "notes": item.notes,
+        "commands": item.commands or {},
+        "weight_paths": item.weight_paths or [],
+        "source_type": item.source_type,
+        "bundled": item.source_type == "bundled",
+        "license_notice": license_notice_for(item.name),
+    }
+
+
+@app.get("/api/admin/runtime/preflight")
+def preflight(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return runtime_preflight(db, settings)
+
+
+@app.get("/api/admin/tasks")
+def admin_tasks(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, Any]:
+    tasks = db.scalars(select(Task).order_by(Task.created_at.desc()).limit(100)).all()
+    return {"tasks": [task_dict(item) for item in tasks]}
+
+
+@app.get("/api/admin/workers")
+def admin_workers(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, Any]:
+    from app.models import WorkerHeartbeat
+
+    workers = db.scalars(select(WorkerHeartbeat).order_by(WorkerHeartbeat.last_seen_at.desc())).all()
+    return {
+        "workers": [
+            {
+                "worker_id": item.worker_id,
+                "hostname": item.hostname,
+                "gpu_index": item.gpu_index,
+                "gpu_name": item.gpu_name,
+                "gpu_memory_total": item.gpu_memory_total,
+                "gpu_memory_used": item.gpu_memory_used,
+                "gpu_utilization": item.gpu_utilization,
+                "current_task_id": item.current_task_id,
+                "last_seen_at": iso(item.last_seen_at),
+            }
+            for item in workers
+        ]
+    }
+
+
+@app.get("/api/projects/{project_id}/events")
+async def project_events(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    project = owned_project(db, project_id, user, include_children=True)
+
+    async def stream():
+        yield sse("project_snapshot", project_dict(project, include_children=True))
+        last_id = db.scalar(select(func.max(TaskEvent.id)).where(TaskEvent.project_id == project_id)) or 0
+        while True:
+            with SessionLocal() as event_db:
+                events = event_db.scalars(
+                    select(TaskEvent).where(TaskEvent.project_id == project_id, TaskEvent.id > last_id).order_by(TaskEvent.id)
+                ).all()
+                for event in events:
+                    last_id = event.id
+                    yield sse(event.event, event.payload)
+            await asyncio.sleep(1)
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@app.post("/api/projects/{project_id}/camera/chunks")
+async def camera_chunk(
+    project_id: str,
+    file: UploadFile = File(...),
+    segment_index: int = Query(...),
+    segment_start_seconds: float = Query(...),
+    segment_end_seconds: float | None = Query(default=None),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    project = owned_project(db, project_id, user)
+    media = MediaAsset(project_id=project.id, kind="video", object_uri="", file_name=safe_filename(file.filename or "camera.webm"))
+    db.add(media)
+    db.flush()
+    key = storage_key("users", project.owner_id, "projects", project.id, "raw", "video", f"camera-{segment_index:04d}.webm")
+    uri, size = await storage.save_upload(file, key)
+    media.object_uri = uri
+    media.file_size = size
+    media.quality_flags = {"segment_index": segment_index, "segment_start_seconds": segment_start_seconds, "segment_end_seconds": segment_end_seconds}
+    project.total_size_bytes += size
+    project.source_version += 1
+    task = Task(
+        project_id=project.id,
+        type="preview",
+        status="queued",
+        priority=95,
+        current_stage="camera_segment_queued",
+        options={"preview_pipeline": "lingbot_spz", "segment_index": segment_index, "source_version": project.source_version},
+    )
+    db.add(task)
+    db.commit()
+    try:
+        enqueue_preview_task(task.id)
+    except Exception:
+        pass
+    return {"media": media_dict(media), "task": task_dict(task)}
+
+
+@app.post("/api/projects/{project_id}/camera/finish")
+def camera_finish(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    project = owned_project(db, project_id, user, include_children=True)
+    project.updated_at = utc_now()
+    db.commit()
+    return project_dict(project, include_children=True)
+
+
+def sse(event: str, payload: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"

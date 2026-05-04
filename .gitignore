@@ -1,0 +1,14 @@
+backend/data/
+data/
+frontend/.next/
+frontend/node_modules/
+backend/app/preview/tools/node_modules/
+frontend/*.tsbuildinfo
+*.log
+repo-cache/*
+!repo-cache/README.md
+model-cache/*
+!model-cache/README.md
+*.pyc
+__pycache__/
+*.part

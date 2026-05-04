@@ -1,16 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { Download, FileArchive, Film, Images, PauseCircle, PlayCircle, ScrollText, Trash2 } from "lucide-react";
+import { Download, FileArchive, Film, Images, PauseCircle, PlayCircle, ScrollText, Trash2, X } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
-import { api, artifactUrl, formatBytes } from "@/lib/api";
+import { api, artifactUrl, formatBytes, mediaFileUrl, mediaThumbnailUrl } from "@/lib/api";
 import { formatDateTime, inputTypeLabel, isActiveTask, projectStatusLabel, taskStatusLabel, taskTypeLabel } from "@/lib/labels";
 import type { Artifact, Project, Task, ViewerConfig } from "@/lib/types";
 import { SplatViewer } from "@/components/SplatViewer";
 import { TaskProgress } from "@/components/TaskProgress";
 
-const MEDIA_LIST_THRESHOLD = 18;
 const LOG_LIST_THRESHOLD = 12;
 
 export default function ProjectDetailPage() {
@@ -20,6 +19,7 @@ export default function ProjectDetailPage() {
   const [viewer, setViewer] = useState<ViewerConfig | null>(null);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [logTask, setLogTask] = useState<Task | null>(null);
+  const [selectedMedia, setSelectedMedia] = useState<NonNullable<Project["media"]>[number] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -48,7 +48,6 @@ export default function ProjectDetailPage() {
   const media = project?.media ?? [];
   const tasks = project?.tasks ?? [];
   const logs = latestTask?.logs ?? [];
-  const showMediaList = media.length > MEDIA_LIST_THRESHOLD;
   const showCompactLogs = logs.length > LOG_LIST_THRESHOLD;
   const canStartFine = Boolean(project && !isActiveTask(latestTask) && (project.status === "PREVIEW_READY" || project.status === "COMPLETED"));
 
@@ -94,6 +93,21 @@ export default function ProjectDetailPage() {
       router.push("/projects");
     } catch (err) {
       setError(err instanceof Error ? err.message : "删除项目失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteMedia(mediaId: string) {
+    if (!project) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.deleteMedia(project.id, mediaId);
+      if (selectedMedia?.id === mediaId) setSelectedMedia(null);
+      await loadProject(project.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "删除素材失败");
     } finally {
       setBusy(false);
     }
@@ -216,29 +230,41 @@ export default function ProjectDetailPage() {
 
               <section className="stack">
                 <h3>媒体数据</h3>
-                {showMediaList ? (
-                  <div className="media-list">
-                    <div className="list-row header" style={{ gridTemplateColumns: "minmax(0, 1fr) 76px 92px" }}>
-                      <span>文件名</span><span>类型</span><span>大小</span>
-                    </div>
-                    {media.map((item) => (
-                      <div className="list-row" style={{ gridTemplateColumns: "minmax(0, 1fr) 76px 92px" }} key={item.id}>
-                        <span className="truncate" title={item.file_name}>{item.file_name}</span>
-                        <span>{item.kind === "image" ? "图片" : "视频"}</span>
-                        <span className="muted small">{formatBytes(item.file_size)}</span>
+                <div className="media-grid dense">
+                  {media.map((item) => {
+                    const thumb = mediaThumbnailUrl(item);
+                    return (
+                      <div
+                        className="media-tile selectable"
+                        title={`${item.file_name} · ${formatBytes(item.file_size)}`}
+                        key={item.id}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => item.kind === "image" ? setSelectedMedia(item) : undefined}
+                        onKeyDown={(event) => {
+                          if ((event.key === "Enter" || event.key === " ") && item.kind === "image") setSelectedMedia(item);
+                        }}
+                      >
+                        {thumb ? <img src={thumb} alt={item.file_name} /> : item.kind === "image" ? <Images size={22} /> : <Film size={22} />}
+                        <span className="media-name" title={item.file_name}>{item.file_name}</span>
+                        <span className="media-kind">{item.kind === "image" ? "图片" : "视频"}</span>
+                        <button
+                          className="media-delete"
+                          type="button"
+                          aria-label="删除素材"
+                          disabled={busy}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void deleteMedia(item.id);
+                          }}
+                        >
+                          <Trash2 size={14} />
+                        </button>
                       </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="media-grid">
-                    {media.map((item) => (
-                      <div className="media-tile" title={`${item.file_name} · ${formatBytes(item.file_size)}`} key={item.id}>
-                        {item.kind === "image" ? <Images size={22} /> : <Film size={22} />}
-                      </div>
-                    ))}
-                    {!media.length ? <div className="empty-state" style={{ gridColumn: "1 / -1" }}>暂无媒体</div> : null}
-                  </div>
-                )}
+                    );
+                  })}
+                  {!media.length ? <div className="empty-state" style={{ gridColumn: "1 / -1" }}>暂无媒体</div> : null}
+                </div>
               </section>
 
               <section className="stack">
@@ -284,6 +310,24 @@ export default function ProjectDetailPage() {
             <div className="panel-body scrollable stack">
               {logTask.error_message ? <div className="error-box">{logTask.error_message}</div> : null}
               <pre className="code-view">{formatTaskLog(logTask)}</pre>
+            </div>
+          </section>
+        </div>
+      ) : null}
+      {selectedMedia ? (
+        <div className="modal-backdrop" onClick={() => setSelectedMedia(null)}>
+          <section className="modal-panel image-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="panel-head">
+              <div>
+                <h2 className="truncate" title={selectedMedia.file_name}>{selectedMedia.file_name}</h2>
+                <p className="muted small">{formatBytes(selectedMedia.file_size)}</p>
+              </div>
+              <button className="icon-button" type="button" onClick={() => setSelectedMedia(null)} aria-label="关闭">
+                <X size={17} />
+              </button>
+            </div>
+            <div className="image-preview-body">
+              <img src={mediaFileUrl(selectedMedia)} alt={selectedMedia.file_name} />
             </div>
           </section>
         </div>

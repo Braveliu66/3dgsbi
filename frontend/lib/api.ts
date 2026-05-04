@@ -65,7 +65,7 @@ export const api = {
     request<AuthResponse>("/api/auth/login", { method: "POST", body: JSON.stringify(payload), auth: false }),
   logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
   me: () => request<User>("/api/me"),
-  resources: () => request<{ cpu: Record<string, unknown>; memory: Record<string, unknown>; gpu: Record<string, unknown>; workers?: Record<string, unknown> }>("/api/admin/system/resources"),
+  resources: () => request<{ cpu: Record<string, unknown>; memory: Record<string, unknown>; gpu: Record<string, unknown>; workers?: Record<string, unknown> }>("/api/system/resources"),
   algorithms: () => request<{ algorithms: AlgorithmEntry[] }>("/api/algorithms", { auth: false }),
   adminAlgorithms: () => request<{ algorithms: AlgorithmEntry[] }>("/api/admin/algorithms"),
   runtimePreflight: () => request<RuntimePreflight>("/api/admin/runtime/preflight"),
@@ -102,6 +102,8 @@ export const api = {
     body.append("file", file);
     return request<MediaAsset>(`/api/projects/${projectId}/media`, { method: "POST", body });
   },
+  deleteMedia: (projectId: string, mediaId: string) =>
+    request<{ deleted: boolean; source_version?: number }>(`/api/projects/${projectId}/media/${mediaId}`, { method: "DELETE" }),
   media: (projectId: string) => request<{ media: MediaAsset[] }>(`/api/projects/${projectId}/media`),
   mediaStats: (projectId: string) => request<Record<string, unknown>>(`/api/projects/${projectId}/media/stats`),
   startPreview: (projectId: string, options: Record<string, unknown> = {}) =>
@@ -126,6 +128,21 @@ export function projectEventsUrl(projectId: string): string {
 export function artifactUrl(path: string): string {
   if (path.startsWith("http")) return path;
   return `${API_BASE}${path}`;
+}
+
+export function mediaThumbnailUrl(media: MediaAsset): string | null {
+  if (!media.thumbnail_uri && media.kind !== "image") return null;
+  return authenticatedAssetPath(`/api/media/${media.id}/thumbnail`);
+}
+
+export function mediaFileUrl(media: MediaAsset): string {
+  return authenticatedAssetPath(`/api/media/${media.id}/file`);
+}
+
+function authenticatedAssetPath(path: string): string {
+  const token = getToken();
+  const suffix = token ? `${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}` : "";
+  return `${API_BASE}${path}${suffix}`;
 }
 
 export function formatBytes(value: number | undefined | null): string {

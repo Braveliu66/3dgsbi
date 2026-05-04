@@ -1,9 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { AlertTriangle, CheckCircle2, Eye, FileUp, Film, FolderOpen, Images, Loader2, Play, RefreshCw, Wand2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Eye, FileUp, Film, FolderOpen, Images, Loader2, Play, RefreshCw, Trash2, Wand2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, formatBytes } from "@/lib/api";
+import { api, formatBytes, mediaFileUrl, mediaThumbnailUrl } from "@/lib/api";
 import { formatDateTime, inputTypeLabel, isActiveTask, projectStatusLabel } from "@/lib/labels";
 import { rememberTaskId } from "@/lib/taskTracking";
 import type { MediaAsset, Project, Task, ViewerConfig } from "@/lib/types";
@@ -12,20 +12,19 @@ import { TaskProgress } from "@/components/TaskProgress";
 
 const MIN_INPUT_FRAMES = 1;
 const MAX_INPUT_FRAMES = 800;
-const MEDIA_LIST_THRESHOLD = 18;
-
 export default function UploadPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const thumbsRef = useRef<Record<string, string>>({});
   const [name, setName] = useState("新建重建项目");
   const [inputType, setInputType] = useState<Project["input_type"]>("images");
-  const [previewPipeline, setPreviewPipeline] = useState<"edgs" | "litevggt_spark">("edgs");
+  const [previewPipeline, setPreviewPipeline] = useState<"litevggt_edgs" | "litevggt_spz">("litevggt_edgs");
   const [tags, setTags] = useState("preview, research");
   const [project, setProject] = useState<Project | null>(null);
   const [media, setMedia] = useState<MediaAsset[]>([]);
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
   const [task, setTask] = useState<Task | null>(null);
   const [viewer, setViewer] = useState<ViewerConfig | null>(null);
+  const [selectedMedia, setSelectedMedia] = useState<MediaAsset | null>(null);
   const [busy, setBusy] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -34,7 +33,6 @@ export default function UploadPage() {
   const imageCount = media.filter((item) => item.kind === "image").length;
   const canStartPreview = Boolean(project && media.length > 0 && (inputType === "video" || imageCount >= MIN_INPUT_FRAMES) && !isActiveTask(task));
   const canStartFine = Boolean(project && media.length > 0 && !isActiveTask(task));
-  const showMediaList = media.length > MEDIA_LIST_THRESHOLD;
 
   useEffect(() => {
     return () => {
@@ -135,6 +133,26 @@ export default function UploadPage() {
     }
   }
 
+  async function deleteMedia(item: MediaAsset) {
+    if (!project) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.deleteMedia(project.id, item.id);
+      if (thumbsRef.current[item.id]) {
+        URL.revokeObjectURL(thumbsRef.current[item.id]);
+        delete thumbsRef.current[item.id];
+        setThumbs({ ...thumbsRef.current });
+      }
+      if (selectedMedia?.id === item.id) setSelectedMedia(null);
+      await refreshProject(project.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "删除素材失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function startFine() {
     if (!project) return;
     setBusy(true);
@@ -199,11 +217,11 @@ export default function UploadPage() {
                 <select
                   className="select"
                   value={previewPipeline}
-                  onChange={(event) => setPreviewPipeline(event.target.value as "edgs" | "litevggt_spark")}
+                  onChange={(event) => setPreviewPipeline(event.target.value as "litevggt_edgs" | "litevggt_spz")}
                   disabled={Boolean(task && isActiveTask(task))}
                 >
-                  <option value="edgs">LiteVGGT + EDGS + Spark-SPZ</option>
-                  <option value="litevggt_spark">LiteVGGT + Spark-SPZ 粗预览</option>
+                  <option value="litevggt_edgs">LiteVGGT + EDGS + Spark-SPZ</option>
+                  <option value="litevggt_spz">LiteVGGT 直接出 Spark-SPZ</option>
                 </select>
               ) : (
                 <input className="input" value="LingBot-Map + Spark-SPZ" disabled />
@@ -240,29 +258,41 @@ export default function UploadPage() {
               <div className="panel stat flat"><span className="muted small">大小</span><strong>{formatBytes(totalBytes)}</strong></div>
             </div>
 
-            {showMediaList ? (
-              <div className="media-list">
-                <div className="list-row header" style={{ gridTemplateColumns: "minmax(0, 1.3fr) 90px 96px" }}>
-                  <span>文件名</span><span>类型</span><span>大小</span>
-                </div>
-                {media.map((item) => (
-                  <div className="list-row" style={{ gridTemplateColumns: "minmax(0, 1.3fr) 90px 96px" }} key={item.id}>
-                    <span className="truncate" title={item.file_name}>{item.file_name}</span>
-                    <span>{inputTypeLabel(item.kind === "image" ? "images" : "video")}</span>
-                    <span className="muted small">{formatBytes(item.file_size)}</span>
+            <div className="media-grid dense">
+              {media.map((item) => {
+                const thumb = thumbs[item.id] ?? mediaThumbnailUrl(item);
+                return (
+                  <div
+                    className="media-tile selectable"
+                    title={`${item.file_name} · ${formatBytes(item.file_size)}`}
+                    key={item.id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => item.kind === "image" ? setSelectedMedia(item) : undefined}
+                    onKeyDown={(event) => {
+                      if ((event.key === "Enter" || event.key === " ") && item.kind === "image") setSelectedMedia(item);
+                    }}
+                  >
+                    {thumb ? <img src={thumb} alt={item.file_name} /> : item.kind === "image" ? <Images size={24} /> : <Film size={24} />}
+                    <span className="media-name" title={item.file_name}>{item.file_name}</span>
+                    <span className="media-kind">{item.kind === "image" ? "图片" : "视频"}</span>
+                    <button
+                      className="media-delete"
+                      type="button"
+                      aria-label="删除素材"
+                      disabled={busy}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void deleteMedia(item);
+                      }}
+                    >
+                      <Trash2 size={14} />
+                    </button>
                   </div>
-                ))}
-              </div>
-            ) : (
-              <div className="media-grid">
-                {media.map((item) => (
-                  <div className="media-tile" title={`${item.file_name} · ${formatBytes(item.file_size)}`} key={item.id}>
-                    {thumbs[item.id] ? <img src={thumbs[item.id]} alt={item.file_name} /> : item.kind === "image" ? <Images size={24} /> : <Film size={24} />}
-                  </div>
-                ))}
-                {media.length === 0 ? <div className="empty-state" style={{ gridColumn: "1 / -1" }}>等待上传真实素材</div> : null}
-              </div>
-            )}
+                );
+              })}
+              {media.length === 0 ? <div className="empty-state" style={{ gridColumn: "1 / -1" }}>等待上传真实素材</div> : null}
+            </div>
 
             {inputType === "images" && imageCount > 0 && imageCount < MIN_INPUT_FRAMES ? (
               <div className="error-box"><AlertTriangle size={16} /> 启动预览前至少上传 {MIN_INPUT_FRAMES} 张图片。</div>
@@ -295,6 +325,7 @@ export default function UploadPage() {
             {viewer?.status === "ready" ? <span className="status-pill ready">SPZ</span> : <span className="status-pill">{task ? task.status : "idle"}</span>}
           </div>
           <div className="panel-body scrollable" style={{ padding: 0 }}>
+            {viewer?.stale ? <div className="notice-box preview-stale">{viewer.message}</div> : null}
             {viewer?.status === "ready" ? (
               <SplatViewer modelUrl={viewer.model_url} segments={viewer.segments} />
             ) : (
@@ -316,6 +347,24 @@ export default function UploadPage() {
           </div>
         </div>
       </section>
+      {selectedMedia ? (
+        <div className="modal-backdrop" onClick={() => setSelectedMedia(null)}>
+          <section className="modal-panel image-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="panel-head">
+              <div>
+                <h2 className="truncate" title={selectedMedia.file_name}>{selectedMedia.file_name}</h2>
+                <p className="muted small">{formatBytes(selectedMedia.file_size)}</p>
+              </div>
+              <button className="icon-button" type="button" onClick={() => setSelectedMedia(null)} aria-label="关闭">
+                <X size={17} />
+              </button>
+            </div>
+            <div className="image-preview-body">
+              <img src={mediaFileUrl(selectedMedia)} alt={selectedMedia.file_name} />
+            </div>
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }

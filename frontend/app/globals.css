@@ -837,7 +837,12 @@ p { line-height: 1.55; }
   gap: 10px;
 }
 
+.media-grid.dense {
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+}
+
 .media-tile {
+  position: relative;
   min-width: 0;
   aspect-ratio: 1;
   display: grid;
@@ -849,10 +854,69 @@ p { line-height: 1.55; }
   background: var(--surface-soft);
 }
 
+.media-tile.selectable {
+  cursor: zoom-in;
+}
+
+.media-tile.selectable:hover {
+  border-color: rgba(31, 111, 88, 0.42);
+  box-shadow: inset 0 0 0 2px rgba(31, 111, 88, 0.08);
+}
+
 .media-tile img {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+.media-name {
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  bottom: 6px;
+  z-index: 2;
+  min-width: 0;
+  overflow: hidden;
+  padding: 3px 5px;
+  border-radius: calc(var(--radius) - 2px);
+  color: #fffaf0;
+  background: rgba(15, 21, 18, 0.62);
+  font-size: 11px;
+  font-weight: 760;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.media-kind {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
+  padding: 2px 6px;
+  border-radius: 999px;
+  color: var(--accent-deep);
+  background: rgba(220, 236, 227, 0.9);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.media-delete {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 3;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(166, 63, 53, 0.24);
+  border-radius: var(--radius);
+  color: var(--danger);
+  background: rgba(247, 222, 217, 0.94);
+}
+
+.preview-stale {
+  margin: 12px;
 }
 
 .media-list,
@@ -1127,6 +1191,26 @@ p { line-height: 1.55; }
   overflow: hidden;
   background: var(--surface);
   box-shadow: var(--shadow);
+}
+
+.modal-panel.image-modal {
+  width: min(1100px, 100%);
+}
+
+.image-preview-body {
+  display: grid;
+  place-items: center;
+  min-height: min(68vh, 680px);
+  padding: 12px;
+  overflow: auto;
+  background: var(--dark);
+}
+
+.image-preview-body img {
+  max-width: 100%;
+  max-height: min(68vh, 680px);
+  object-fit: contain;
+  border-radius: var(--radius);
 }
 
 .code-view {

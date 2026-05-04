@@ -1,0 +1,93 @@
+services:
+  postgres:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_DB: three_dgs
+      POSTGRES_USER: three_dgs
+      POSTGRES_PASSWORD: three_dgs
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-bookworm
+    ports:
+      - "6379:6379"
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://three_dgs:three_dgs@postgres:5432/three_dgs
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_BACKEND: s3
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET: three-dgs
+      SECRET_KEY: change-this-for-deploy
+      MODEL_CACHE_DIR: /model-cache
+    depends_on:
+      - postgres
+      - redis
+      - minio
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./model-cache:/model-cache
+
+  worker-preview:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+      target: worker-preview
+    environment:
+      DATABASE_URL: postgresql+psycopg://three_dgs:three_dgs@postgres:5432/three_dgs
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_BACKEND: s3
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET: three-dgs
+      SECRET_KEY: change-this-for-deploy
+      MODEL_CACHE_DIR: /model-cache
+    depends_on:
+      - backend
+      - redis
+      - minio
+    gpus: all
+    volumes:
+      - ./model-cache:/model-cache
+      - worker-work:/app/data/work
+
+  frontend:
+    build:
+      context: frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    depends_on:
+      - backend
+    ports:
+      - "3001:3000"
+
+volumes:
+  postgres-data:
+  minio-data:
+  worker-work:

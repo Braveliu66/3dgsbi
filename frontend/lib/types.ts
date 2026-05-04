@@ -35,6 +35,8 @@ export interface Project {
   total_size_bytes: number;
   preview_image_uri?: string | null;
   error_message?: string | null;
+  source_version?: number;
+  preview_source_version?: number | null;
   created_at: string;
   updated_at: string;
   media?: MediaAsset[];
@@ -54,6 +56,7 @@ export interface MediaAsset {
   height?: number | null;
   duration_seconds?: number | null;
   quality_flags?: Record<string, unknown>;
+  source_version?: number;
   created_at: string;
 }
 
@@ -87,6 +90,7 @@ export interface Artifact {
   file_size: number;
   checksum?: string | null;
   metadata?: Record<string, unknown>;
+  source_version?: number;
   created_at: string;
 }
 
@@ -123,6 +127,7 @@ export interface ViewerConfig {
   progressive?: boolean;
   format?: "spz";
   message?: string;
+  stale?: boolean;
 }
 
 export interface AlgorithmEntry {
@@ -137,6 +142,8 @@ export interface AlgorithmEntry {
   commands?: Record<string, string[]>;
   weight_paths?: string[];
   source_type?: string;
+  bundled?: boolean;
+  license_notice?: string | null;
 }
 
 export interface RuntimePreflightAlgorithm {
@@ -149,6 +156,13 @@ export interface RuntimePreflightAlgorithm {
   local_path?: string | null;
   weight_paths: string[];
   commands: Record<string, string[]>;
+  source_type?: string;
+  bundled?: boolean;
+  license_notice?: string | null;
+  weights_ready?: boolean;
+  extensions_ready?: boolean;
+  spz_converter_ready?: boolean;
+  module?: Record<string, unknown>;
   issues: string[];
 }
 
@@ -159,6 +173,7 @@ export interface RuntimePreflight {
   transformer_engine: Record<string, unknown>;
   edgs_cuda_extensions?: Record<string, unknown>;
   lingbot_runtime?: Record<string, unknown>;
+  spz_converter?: Record<string, unknown>;
   algorithms: RuntimePreflightAlgorithm[];
   errors: string[];
   warnings: string[];
