@@ -115,6 +115,7 @@ ENV NVTE_FRAMEWORK=pytorch
 COPY backend/requirements.txt /tmp/backend/requirements.txt
 COPY worker/requirements.txt /tmp/worker/requirements.txt
 COPY worker/patches/lmrs-fastgs-compact-box.patch /tmp/lmrs-fastgs-compact-box.patch
+COPY worker/patches/fastgs-cuda-metric-accumulation.patch /tmp/fastgs-cuda-metric-accumulation.patch
 RUN <<'EOF'
 set -eu
 command -v nvcc
@@ -237,16 +238,30 @@ retry_pip() {
     attempt=$((attempt + 1))
   done
 }
+retry_git() {
+  attempt=1
+  while [ "$attempt" -le 5 ]; do
+    if git -c http.version=HTTP/1.1 -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 "$@"; then
+      return 0
+    fi
+    if [ "$attempt" -eq 5 ]; then
+      return 1
+    fi
+    echo "git $1 failed, retrying in $((attempt * 20)) seconds ($attempt/5)"
+    sleep $((attempt * 20))
+    attempt=$((attempt + 1))
+  done
+}
 CACHED_LMRS=/repo-cache/lm-rs/source
 if [ ! -d "$CACHED_LMRS/.git" ]; then
   rm -rf "$CACHED_LMRS"
-  git clone "$LMRS_REPO_URL" "$CACHED_LMRS"
+  retry_git clone "$LMRS_REPO_URL" "$CACHED_LMRS"
 fi
-git -C "$CACHED_LMRS" fetch --all --tags --prune
-git -C "$CACHED_LMRS" checkout "$LMRS_REPO_COMMIT"
-git -C "$CACHED_LMRS" submodule update --init --recursive submodules/simple-knn submodules/diff-gaussian-rasterization
-git -C "$CACHED_LMRS/submodules/diff-gaussian-rasterization" checkout "$LMRS_RASTERIZER_COMMIT"
-git -C "$CACHED_LMRS/submodules/diff-gaussian-rasterization" submodule update --init --recursive
+retry_git -C "$CACHED_LMRS" fetch --all --tags --prune
+retry_git -C "$CACHED_LMRS" checkout "$LMRS_REPO_COMMIT"
+retry_git -C "$CACHED_LMRS" submodule update --init --recursive submodules/simple-knn submodules/diff-gaussian-rasterization
+retry_git -C "$CACHED_LMRS/submodules/diff-gaussian-rasterization" checkout "$LMRS_RASTERIZER_COMMIT"
+retry_git -C "$CACHED_LMRS/submodules/diff-gaussian-rasterization" submodule update --init --recursive
 LMRS_GLM="$CACHED_LMRS/submodules/diff-gaussian-rasterization/third_party/glm"
 VENDORED_GLM=/app/app/preview/vendor/edgs/gaussian_splatting/submodules/diff-gaussian-rasterization/third_party/glm
 if [ ! -f "$LMRS_GLM/glm/glm.hpp" ]; then
@@ -258,13 +273,20 @@ test -f "$LMRS_GLM/glm/glm.hpp"
 rm -rf "$LMRS_ROOT"
 mkdir -p "$(dirname "$LMRS_ROOT")"
 cp -a "$CACHED_LMRS" "$LMRS_ROOT"
-git -C "$LMRS_ROOT/submodules/diff-gaussian-rasterization" apply /tmp/lmrs-fastgs-compact-box.patch
+apply_rasterizer_patch() {
+  patch_file="$1"
+  if ! git -C "$LMRS_ROOT/submodules/diff-gaussian-rasterization" apply --reverse --check "$patch_file" >/dev/null 2>&1; then
+    git -C "$LMRS_ROOT/submodules/diff-gaussian-rasterization" apply "$patch_file"
+  fi
+}
+apply_rasterizer_patch /tmp/lmrs-fastgs-compact-box.patch
+apply_rasterizer_patch /tmp/fastgs-cuda-metric-accumulation.patch
 retry_pip --no-build-isolation "$LMRS_ROOT/submodules/diff-gaussian-rasterization"
 retry_pip --no-build-isolation "$LMRS_ROOT/submodules/simple-knn"
 retry_pip --no-build-isolation /app/app/preview/vendor/edgs/gaussian_splatting/submodules/fused-ssim
 find "$LMRS_ROOT" -name .git -prune -exec rm -rf {} +
 find "$LMRS_ROOT" -name .git -type f -delete
-PYTHONPATH=/app:/app/app/preview/vendor/edgs:/app/app/preview/vendor/edgs/gaussian_splatting:/app/app/preview/vendor/edgs/roma:$LMRS_ROOT:/app/app/preview/vendor/litevggt \
+PYTHONPATH=/app:/app/app/preview/vendor/edgs:/app/app/preview/vendor/edgs/gaussian_splatting:/app/app/preview/vendor/edgs/roma:/app/app/preview/vendor/litevggt \
   python - <<'PY'
 import torch
 import torchvision
@@ -275,7 +297,6 @@ import diff_gaussian_rasterization
 import simple_knn
 import fused_ssim
 from transformer_engine.common.recipe import DelayedScaling, Format
-from source.trainer import EDGSTrainer
 from romatch.utils.local_correlation import local_correlation
 from vggt.models.vggt import VGGT
 from scene import GaussianModel
@@ -283,9 +304,11 @@ from scene import GaussianModel
 assert torch.__version__.startswith("2.7.1"), torch.__version__
 assert torchvision.__version__.startswith("0.22.1"), torchvision.__version__
 ext = diff_gaussian_rasterization._C
-for name in ("get_JTv", "get_Diag", "get_JTJv"):
+for name in ("get_JTv", "get_Diag", "get_JTJv", "fastgs_accumulate_metrics"):
     assert hasattr(ext, name), name
+assert hasattr(diff_gaussian_rasterization._RasterizeGaussians, "fastgs_accumulate_metrics")
 assert getattr(diff_gaussian_rasterization, "MOBILEGS_COMPACT_BOX", False)
+assert getattr(diff_gaussian_rasterization, "MOBILEGS_FASTGS_METRIC", False)
 x = torch.randn(1, 2, 2, 2)
 local_correlation(x, x, 1, torch.zeros(1, 2, 2, 2), use_custom_corr=False)
 import app.fine.runner

@@ -95,6 +95,7 @@ class DeblurMLPConfig:
     num_moments: int = 4
     lambda_s: float = 0.01
     lambda_p: float = 0.01
+    min_clamp: float = 0.9
     max_clamp: float = 1.1
     lr: float = 1e-3
 
@@ -123,6 +124,7 @@ class DeblurMLPState:
             "deblur_mlp_num_moments": self.config.num_moments,
             "deblur_mlp_lambda_s": self.config.lambda_s,
             "deblur_mlp_lambda_p": self.config.lambda_p,
+            "deblur_mlp_min_clamp": self.config.min_clamp,
             "deblur_mlp_max_clamp": self.config.max_clamp,
             "deblur_mlp_lr": self.config.lr,
         }
@@ -149,7 +151,8 @@ def build_deblur_mlp_state(blur_mode: str, options: dict[str, Any], *, device: t
         num_moments=read_int(options.get("fine_deblur_num_moments"), 4, minimum=1, maximum=8),
         lambda_s=read_float(options.get("fine_deblur_lambda_s"), 0.01, minimum=0.0, maximum=0.1),
         lambda_p=read_float(options.get("fine_deblur_lambda_p"), 0.01, minimum=0.0, maximum=0.1),
-        max_clamp=read_float(options.get("fine_deblur_max_clamp"), 1.1, minimum=1.0, maximum=1.5),
+        min_clamp=read_float(options.get("fine_deblur_min_clamp"), 0.9, minimum=0.5, maximum=1.0),
+        max_clamp=read_float(options.get("fine_deblur_max_clamp"), 1.1, minimum=1.0, maximum=1.8),
         lr=read_float(options.get("fine_deblur_gtnet_lr"), 1e-3, minimum=1e-6, maximum=1e-1),
     )
     model = GTnet(
@@ -221,8 +224,8 @@ def predict_deblur_transforms(
         rotations.detach(),
         viewdirs,
     )
-    scale_delta = torch.clamp(config.lambda_s * scale_delta + (1.0 - config.lambda_s), min=1.0, max=config.max_clamp)
-    rotation_delta = torch.clamp(config.lambda_s * rotation_delta + (1.0 - config.lambda_s), min=1.0, max=config.max_clamp)
+    scale_delta = torch.clamp(1.0 + config.lambda_s * scale_delta, min=config.min_clamp, max=config.max_clamp)
+    rotation_delta = torch.clamp(1.0 + config.lambda_s * rotation_delta, min=config.min_clamp, max=config.max_clamp)
     if position_delta is not None:
         position_delta = config.lambda_p * position_delta
     return scale_delta, rotation_delta, position_delta

@@ -56,8 +56,8 @@ class DeblurMLPTests(unittest.TestCase):
         self.assertEqual(tuple(scale_delta.shape), (4, 12))
         self.assertEqual(tuple(rotation_delta.shape), (4, 16))
         self.assertEqual(tuple(position_delta.shape), (4, 9))
-        self.assertTrue(bool(torch.all(scale_delta >= 1.0)))
-        self.assertTrue(bool(torch.all(rotation_delta >= 1.0)))
+        self.assertTrue(bool(torch.all(scale_delta >= 0.9)))
+        self.assertTrue(bool(torch.all(rotation_delta >= 0.9)))
 
     def test_defocus_state_disables_position_moments(self) -> None:
         state = build_deblur_mlp_state("defocus", {"fine_deblur_width": 16, "fine_deblur_hidden": 2}, device="cpu")
@@ -65,6 +65,7 @@ class DeblurMLPTests(unittest.TestCase):
         self.assertTrue(state.enabled)
         self.assertFalse(state.config.use_position)
         self.assertEqual(state.metrics()["deblur_algorithm"], "Deblurring-3DGS_GTnet")
+        self.assertEqual(state.metrics()["deblur_mlp_min_clamp"], 0.9)
 
     def test_gtnet_optimizer_group_survives_topology_wrappers(self) -> None:
         class DummyGaussians:

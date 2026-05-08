@@ -15,6 +15,7 @@ $repos = @(
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $cache = Join-Path $root "repo-cache"
 $lmrsCompactBoxPatch = Join-Path $root "worker/patches/lmrs-fastgs-compact-box.patch"
+$fastgsMetricPatch = Join-Path $root "worker/patches/fastgs-cuda-metric-accumulation.patch"
 New-Item -ItemType Directory -Force -Path $cache | Out-Null
 
 foreach ($repo in $repos) {
@@ -34,6 +35,10 @@ foreach ($repo in $repos) {
     git -C $rasterizer apply --reverse --check $lmrsCompactBoxPatch 2>$null
     if ($LASTEXITCODE -ne 0) {
       git -C $rasterizer apply $lmrsCompactBoxPatch
+    }
+    git -C $rasterizer apply --reverse --check $fastgsMetricPatch 2>$null
+    if ($LASTEXITCODE -ne 0) {
+      git -C $rasterizer apply $fastgsMetricPatch
     }
   }
 }

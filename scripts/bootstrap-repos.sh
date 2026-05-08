@@ -8,6 +8,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CACHE="$ROOT/repo-cache"
 LMRS_COMPACT_BOX_PATCH="$ROOT/worker/patches/lmrs-fastgs-compact-box.patch"
+FASTGS_METRIC_PATCH="$ROOT/worker/patches/fastgs-cuda-metric-accumulation.patch"
 mkdir -p "$CACHE"
 
 clone_checkout() {
@@ -28,6 +29,9 @@ clone_checkout() {
     git -C "$path/submodules/diff-gaussian-rasterization" submodule update --init --recursive
     if ! git -C "$path/submodules/diff-gaussian-rasterization" apply --reverse --check "$LMRS_COMPACT_BOX_PATCH" >/dev/null 2>&1; then
       git -C "$path/submodules/diff-gaussian-rasterization" apply "$LMRS_COMPACT_BOX_PATCH"
+    fi
+    if ! git -C "$path/submodules/diff-gaussian-rasterization" apply --reverse --check "$FASTGS_METRIC_PATCH" >/dev/null 2>&1; then
+      git -C "$path/submodules/diff-gaussian-rasterization" apply "$FASTGS_METRIC_PATCH"
     fi
   fi
 }

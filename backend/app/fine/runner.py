@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from app.config import get_settings
+from app.fine.local_3dgs.scene_quality import assess_litevggt_scene_quality
+from app.fine.local_3dgs.sparse_compensation import compensate_sparse_point_cloud
 from app.fine.litevggt_sfm import build_litevggt_colmap_scene
 from app.fine.option_utils import read_float, read_int
 from app.fine.preprocess import build_pycolmap_scene, prepare_mobile_images
@@ -55,12 +57,15 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         min_images=3,
     )
     blur_mode = str(ctx.options.get("fine_blur_mode") or blur.mode)
-    lm_default = iterations if deblur_mlp_enabled_by_default(blur_mode, ctx.options) else min(15_000, iterations)
+    lm_default = iterations
     lm_start_iter = read_int(explicit_lm_start_iter, lm_default, minimum=1, maximum=iterations)
 
     scene_dir = ctx.work_dir / "fine_scene"
     output_dir = ctx.work_dir / "fine_mobilegs"
     scene_result = build_scene(ctx, train_input_dir, scene_dir, colmap_features, colmap_max_size, colmap_threads)
+    if scene_result.backend == "litevggt_colmap_no_exif":
+        scene_result.metrics.update(assess_litevggt_scene_quality(scene_result.scene_dir).metrics)
+    scene_result.metrics.update(compensate_sparse_point_cloud(scene_result.scene_dir, ctx.options).metrics)
 
     ctx_progress(ctx, "fine_mobilegs_train_start", 42, f"training MobileGS with {scene_result.backend} initialization")
     from app.fine.mobilegs_trainer import train_mobile_3dgs
@@ -139,7 +144,7 @@ def build_scene(
             input_dir,
             scene_dir,
             checkpoint_path=litevggt_weight,
-            keep_ratio=read_float(ctx.options.get("fine_litevggt_keep_ratio"), 0.08, minimum=0.001, maximum=1.0),
+            keep_ratio=read_float(ctx.options.get("fine_litevggt_keep_ratio"), 0.12, minimum=0.001, maximum=1.0),
             max_points=read_int(ctx.options.get("fine_litevggt_max_points"), 1_000_000, minimum=10_000, maximum=15_000_000),
             progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
         )
@@ -186,12 +191,8 @@ def assert_runtime_ready() -> None:
     if missing:
         raise FineFailure("FINE_RUNTIME_UNAVAILABLE", f"MobileGS fine runtime dependency missing: {'; '.join(missing)}")
     rasterizer = __import__("diff_gaussian_rasterization")
-    extension = getattr(rasterizer, "_C", None)
-    lmrs_missing = [name for name in ("get_JTv", "get_Diag", "get_JTJv") if not hasattr(extension, name)]
-    if lmrs_missing:
-        raise FineFailure("LMRS_MATRIX_FREE_UNAVAILABLE", f"LM-RS rasterizer symbols missing: {', '.join(lmrs_missing)}")
-    if not bool(getattr(rasterizer, "MOBILEGS_COMPACT_BOX", False)):
-        raise FineFailure("COMPACT_BOX_UNAVAILABLE", "LM-RS rasterizer is missing the MobileGS FastGS Compact Box patch")
+    if not hasattr(rasterizer, "GaussianRasterizer"):
+        raise FineFailure("FINE_RUNTIME_UNAVAILABLE", "diff_gaussian_rasterization is missing GaussianRasterizer")
 
 
 def deblur_mlp_enabled_by_default(blur_mode: str, options: dict[str, Any]) -> bool:

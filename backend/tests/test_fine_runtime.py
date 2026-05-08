@@ -40,33 +40,67 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertNotIn("romatch", fine_status_block)
         self.assertIn("litevggt", fine_status_block)
 
-    def test_trainer_uses_lmrs_phase_two(self) -> None:
+    def test_trainer_uses_local_runtime_not_lmrs_repo_training(self) -> None:
         trainer_source = (BACKEND_ROOT / "app" / "fine" / "mobilegs_trainer.py").read_text(encoding="utf-8")
-        lmrs_source = (BACKEND_ROOT / "app" / "fine" / "lmrs_runtime.py").read_text(encoding="utf-8")
 
-        self.assertIn("gauss_newton_step", trainer_source)
-        self.assertIn("fine_lmrs_phase_start", trainer_source)
-        self.assertIn("CGOptimizer", trainer_source)
-        self.assertIn("get_JTv", lmrs_source)
-        self.assertIn("cgState.set_scene_size", lmrs_source)
-        self.assertNotIn("Phase 2 wrapper is not enabled", trainer_source)
+        self.assertIn("local_3dgs_runtime", trainer_source)
+        self.assertIn("FastGS_local_multiview_score", trainer_source)
+        self.assertIn("LM-RS_local_matrix_free", trainer_source)
+        self.assertIn("lmrs_phase_iterations", trainer_source)
+        self.assertIn("policy.cuda_metric_calls > 0", trainer_source)
+        self.assertIn("fine_lmrs_enabled", trainer_source)
+        self.assertIn("LM-RS temporarily isolated due to unstable local backend", trainer_source)
+        self.assertIn("fine_lmrs_lambda_dssim", trainer_source)
+        self.assertIn("Scene(dataset, gaussians, shuffle=True)", trainer_source)
+        self.assertNotIn("Scene(dataset, gaussians, opt", trainer_source)
+        self.assertNotIn("resolve_lmrs_root", trainer_source)
+        self.assertNotIn("prepend_sys_path", trainer_source)
+        self.assertNotIn("/opt/lm-rs", trainer_source)
+        self.assertNotIn("gauss_newton_step", trainer_source)
+
+    def test_lmrs_is_isolated_by_default(self) -> None:
+        runner_source = (BACKEND_ROOT / "app" / "fine" / "runner.py").read_text(encoding="utf-8")
+        trainer_source = (BACKEND_ROOT / "app" / "fine" / "mobilegs_trainer.py").read_text(encoding="utf-8")
+
+        self.assertIn("lm_default = iterations", runner_source)
+        self.assertNotIn("min(15_000, iterations)", runner_source)
+        self.assertIn('read_bool((options or {}).get("fine_lmrs_enabled"), False)', trainer_source)
+        self.assertIn('"active": False', trainer_source)
+        self.assertIn("LM-RS temporarily isolated due to unstable local backend", trainer_source)
 
     def test_compact_box_patch_is_build_input(self) -> None:
         patch_source = (BACKEND_ROOT.parent / "worker" / "patches" / "lmrs-fastgs-compact-box.patch").read_text(encoding="utf-8")
+        metric_patch = (BACKEND_ROOT.parent / "worker" / "patches" / "fastgs-cuda-metric-accumulation.patch").read_text(encoding="utf-8")
 
         self.assertIn("duplicateToTilesTouched", patch_source)
         self.assertIn("MOBILEGS_COMPACT_BOX", patch_source)
+        self.assertIn("fastgs_accumulate_metrics", metric_patch)
+        self.assertIn("MOBILEGS_FASTGS_METRIC", metric_patch)
         dockerfile = (BACKEND_ROOT.parent / "worker" / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("get_JTv", dockerfile)
+        self.assertIn("fastgs_accumulate_metrics", dockerfile)
+        self.assertIn("fastgs-cuda-metric-accumulation.patch", dockerfile)
+        self.assertIn("retry_git", dockerfile)
         self.assertIn("submodule update --init --recursive", dockerfile)
         self.assertIn("LMRS_GLM", dockerfile)
         self.assertIn("glm/glm.hpp", dockerfile)
         self.assertIn("VENDORED_GLM", dockerfile)
+        self.assertNotIn("source.trainer", dockerfile)
+        self.assertIn("fastgs-cuda-metric-accumulation.patch", (BACKEND_ROOT.parent / "scripts" / "bootstrap-repos.sh").read_text(encoding="utf-8"))
+        self.assertIn("fastgs-cuda-metric-accumulation.patch", (BACKEND_ROOT.parent / "scripts" / "bootstrap-repos.ps1").read_text(encoding="utf-8"))
 
     def test_fine_code_is_split_by_integration_boundary(self) -> None:
         fine_root = BACKEND_ROOT / "app" / "fine"
 
         self.assertTrue((fine_root / "fastgs_policy.py").exists())
+        self.assertTrue((fine_root / "local_3dgs" / "runtime.py").exists())
+        self.assertTrue((fine_root / "local_3dgs" / "scene_quality.py").exists())
+        self.assertTrue((fine_root / "local_3dgs" / "sparse_compensation.py").exists())
+        self.assertTrue((fine_root / "local_3dgs" / "cg_state.py").exists())
+        self.assertTrue((fine_root / "local_3dgs" / "cg_solver.py").exists())
+        self.assertTrue((fine_root / "local_3dgs" / "cg_optimizer.py").exists())
+        self.assertTrue((fine_root / "local_3dgs" / "lmrs_step.py").exists())
+        self.assertTrue((fine_root / "local_3dgs" / "render.py").exists())
         self.assertTrue((fine_root / "lmrs_runtime.py").exists())
         self.assertTrue((fine_root / "option_utils.py").exists())
 
@@ -148,6 +182,9 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn('backend="litevggt_colmap_no_exif"', source)
         self.assertIn("processed[:real_count]", source)
         self.assertIn('"litevggt_padding_images"', source)
+        runner_source = (BACKEND_ROOT / "app" / "fine" / "runner.py").read_text(encoding="utf-8")
+        self.assertIn("fine_litevggt_keep_ratio", runner_source)
+        self.assertIn("0.12", runner_source)
 
     def test_deblur_mlp_replaces_scaling_heuristic(self) -> None:
         trainer_source = (BACKEND_ROOT / "app" / "fine" / "mobilegs_trainer.py").read_text(encoding="utf-8")
@@ -159,6 +196,7 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("FourierEmbedding", deblur_source)
         self.assertIn("position_delta", deblur_source)
         self.assertIn("render_with_deblur_mlp", trainer_source)
+        self.assertIn("fine_deblur_min_clamp", deblur_source)
 
     def test_deblur_auto_controls_lmrs_default(self) -> None:
         *_, deblur_mlp_enabled_by_default, _ = import_fine_runtime()
