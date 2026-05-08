@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Any
 
 from app.config import get_settings
-from app.fine.local_3dgs.scene_quality import assess_litevggt_scene_quality
+from app.fine.amb3r_sfm import AMB3R_COMMIT, amb3r_weight_path, build_amb3r_colmap_scene
+from app.fine.local_3dgs.scene_quality import assess_sfm_scene_quality
 from app.fine.local_3dgs.sparse_compensation import compensate_sparse_point_cloud
-from app.fine.litevggt_sfm import build_litevggt_colmap_scene
 from app.fine.option_utils import read_float, read_int
 from app.fine.preprocess import build_pycolmap_scene, prepare_mobile_images
 from app.fine.types import FineContext, FineFailure, FineResult
@@ -23,7 +23,7 @@ from app.preview.utils import image_files
 PIPELINE_NAME = "mobilegs_lmrs"
 
 SOURCE_COMMITS_FINE = {
-    "LiteVGGT": SOURCE_COMMITS["LiteVGGT"],
+    "AMB3R": AMB3R_COMMIT,
     "Spark": SOURCE_COMMITS["Spark"],
     "LM-RS": "cb40c7c06c2a60f8314ce095ad7b4513fbb33319",
     "LM-RS Rasterizer": "c2529d3bb13bc38271710785c015a89d9d623237",
@@ -63,8 +63,8 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
     scene_dir = ctx.work_dir / "fine_scene"
     output_dir = ctx.work_dir / "fine_mobilegs"
     scene_result = build_scene(ctx, train_input_dir, scene_dir, colmap_features, colmap_max_size, colmap_threads)
-    if scene_result.backend == "litevggt_colmap_no_exif":
-        scene_result.metrics.update(assess_litevggt_scene_quality(scene_result.scene_dir).metrics)
+    if scene_result.backend == "amb3r_sfm_colmap_no_exif":
+        scene_result.metrics.update(assess_sfm_scene_quality(scene_result.scene_dir, prefix="amb3r").metrics)
     scene_result.metrics.update(compensate_sparse_point_cloud(scene_result.scene_dir, ctx.options).metrics)
 
     ctx_progress(ctx, "fine_mobilegs_train_start", 42, f"training MobileGS with {scene_result.backend} initialization")
@@ -100,7 +100,7 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
 
     metrics = {
         "pipeline": PIPELINE_NAME,
-        "algorithm": "mobilegs_litevggt_deblurmlp_lmrs",
+        "algorithm": "mobilegs_amb3r_deblurmlp_lmrs",
         "source_version": ctx.source_version,
         "source_commits": SOURCE_COMMITS_FINE,
         "input_images": image_count,
@@ -138,16 +138,21 @@ def build_scene(
     colmap_max_size: int,
     colmap_threads: int,
 ):
-    litevggt_weight = ctx.model_cache_dir / "litevggt" / "te_dict.pt"
-    if str(ctx.options.get("fine_sfm_backend") or "litevggt").lower() != "pycolmap":
-        return build_litevggt_colmap_scene(
+    sfm_backend = str(ctx.options.get("fine_sfm_backend") or "amb3r").strip().lower()
+    if sfm_backend in {"amb3r", "amb3r_sfm", "litevggt"}:
+        result = build_amb3r_colmap_scene(
             input_dir,
             scene_dir,
-            checkpoint_path=litevggt_weight,
-            keep_ratio=read_float(ctx.options.get("fine_litevggt_keep_ratio"), 0.12, minimum=0.001, maximum=1.0),
-            max_points=read_int(ctx.options.get("fine_litevggt_max_points"), 1_000_000, minimum=10_000, maximum=15_000_000),
+            checkpoint_path=amb3r_weight_path(ctx.model_cache_dir),
+            keep_ratio=read_float(ctx.options.get("fine_amb3r_keep_ratio", ctx.options.get("fine_litevggt_keep_ratio")), 0.12, minimum=0.001, maximum=1.0),
+            max_points=read_int(ctx.options.get("fine_amb3r_max_points", ctx.options.get("fine_litevggt_max_points")), 1_000_000, minimum=10_000, maximum=15_000_000),
             progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
         )
+        if sfm_backend == "litevggt":
+            result.metrics["sfm_backend_requested_alias"] = "litevggt_deprecated_maps_to_amb3r"
+        return result
+    if sfm_backend != "pycolmap":
+        raise FineFailure("UNSUPPORTED_FINE_SFM_BACKEND", f"Unsupported fine SfM backend: {sfm_backend}")
 
     result = build_pycolmap_scene(
         input_dir,

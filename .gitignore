@@ -10,6 +10,9 @@ repo-cache/*
 !repo-cache/README.md
 model-cache/*
 !model-cache/README.md
+!model-cache/amb3r/
+!model-cache/amb3r/.gitkeep
 *.pyc
 __pycache__/
 *.part
+model-cache/amb3r/amb3r.pt

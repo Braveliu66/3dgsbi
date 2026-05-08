@@ -12,7 +12,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.preview.weights import ModelDownloadError, ModelWeight, download_model_weight, part_path, weights_for_pipeline  # noqa: E402
+HTTPX_IMPORT_ERROR: Exception | None = None
+try:
+    import httpx  # noqa: F401
+except Exception as exc:
+    HTTPX_IMPORT_ERROR = exc
+
+if HTTPX_IMPORT_ERROR is None:
+    from app.preview.weights import ModelDownloadError, ModelWeight, download_model_weight, part_path, weights_for_pipeline  # noqa: E402
+else:
+    ModelDownloadError = ModelWeight = download_model_weight = part_path = weights_for_pipeline = None
 
 
 PAYLOAD = b"0123456789abcdefghijklmnopqrstuvwxyz"
@@ -56,6 +65,7 @@ class WeightHandler(BaseHTTPRequestHandler):
         return
 
 
+@unittest.skipIf(HTTPX_IMPORT_ERROR is not None, f"httpx unavailable: {HTTPX_IMPORT_ERROR}")
 class WeightDownloadTests(unittest.TestCase):
     def setUp(self) -> None:
         WeightHandler.requests = []
@@ -132,7 +142,7 @@ class WeightDownloadTests(unittest.TestCase):
             [item.relative_path for item in weights_for_pipeline("litevggt_edgs")],
             ["roma/roma_indoor.pth", "roma/dinov2_vitl14_pretrain.pth"],
         )
-        self.assertEqual([item.relative_path for item in weights_for_pipeline("mobilegs_lmrs")], ["litevggt/te_dict.pt"])
+        self.assertEqual([item.relative_path for item in weights_for_pipeline("mobilegs_lmrs")], ["amb3r/amb3r.pt"])
         self.assertEqual(
             [item.relative_path for item in weights_for_pipeline("lingbot_spz")],
             ["lingbot-map/lingbot-map-long.pt"],

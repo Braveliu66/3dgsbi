@@ -12,5 +12,7 @@ frontend/*.tsbuildinfo
 backend/app/preview/tools/node_modules/
 model-cache/*
 !model-cache/README.md
+!model-cache/amb3r/
+!model-cache/amb3r/.gitkeep
 repo-cache/*
 !repo-cache/README.md

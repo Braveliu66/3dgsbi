@@ -27,6 +27,8 @@ ENV HF_HUB_CACHE=/model-cache/huggingface/hub
 ENV XDG_CACHE_HOME=/model-cache/xdg
 ENV TORCH_EXTENSIONS_DIR=/model-cache/torch_extensions
 
+RUN mkdir -p /model-cache/amb3r
+
 RUN --mount=type=cache,id=three-dgs-worker-apt-cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-apt-lists,target=/var/lib/apt/lists,sharing=locked \
     find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -exec sed -i \
@@ -199,6 +201,30 @@ while [ "$attempt" -le 5 ]; do
 done
 EOF
 
+RUN --mount=type=cache,id=three-dgs-worker-amb3r-pip-cache,target=/root/.cache/pip,sharing=locked <<'EOF'
+set -eu
+attempt=1
+while [ "$attempt" -le 5 ]; do
+  if python -m pip install --no-build-isolation --constraint /tmp/worker/constraints.txt \
+      'spconv-cu118==2.3.8' \
+      'torch-scatter==2.1.2' \
+      -f https://data.pyg.org/whl/torch-2.7.0+cu128.html; then
+    python - <<'PY'
+import spconv.pytorch as spconv
+import torch_scatter
+print("AMB3R sparse dependencies import ok")
+PY
+    exit 0
+  fi
+  if [ "$attempt" -eq 5 ]; then
+    exit 1
+  fi
+  echo "AMB3R sparse dependency install failed, retrying in $((attempt * 20)) seconds ($attempt/5)"
+  sleep $((attempt * 20))
+  attempt=$((attempt + 1))
+done
+EOF
+
 RUN --mount=type=cache,id=three-dgs-worker-pycolmap-pip-cache,target=/root/.cache/pip,sharing=locked <<'EOF'
 set -eu
 attempt=1
@@ -296,6 +322,8 @@ import transformer_engine.pytorch as te
 import diff_gaussian_rasterization
 import simple_knn
 import fused_ssim
+import spconv.pytorch as spconv
+import torch_scatter
 from transformer_engine.common.recipe import DelayedScaling, Format
 from romatch.utils.local_correlation import local_correlation
 from vggt.models.vggt import VGGT
@@ -312,6 +340,8 @@ assert getattr(diff_gaussian_rasterization, "MOBILEGS_FASTGS_METRIC", False)
 x = torch.randn(1, 2, 2, 2)
 local_correlation(x, x, 1, torch.zeros(1, 2, 2, 2), use_custom_corr=False)
 import app.fine.runner
+import app.fine.amb3r_sfm
+from app.fine.amb3r_runtime.amb3r.model import AMB3R
 from app.fine.deblur_mlp import GTnet
 print("unified worker runtime import ok")
 PY

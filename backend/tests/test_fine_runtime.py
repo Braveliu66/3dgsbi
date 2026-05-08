@@ -7,7 +7,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -16,13 +15,13 @@ from app.fine.types import FineFailure  # noqa: E402
 
 def import_fine_runtime():
     try:
-        from app.fine.litevggt_sfm import align_to_litevggt_batch
+        from app.fine.amb3r_sfm import amb3r_weight_path
         from app.fine.preprocess import BlurScore, SceneBuildResult, summarize_blur_scores
         from app.fine.runner import build_scene, deblur_mlp_enabled_by_default, normalize_fine_pipeline
     except Exception as exc:
         raise unittest.SkipTest(f"fine runtime dependencies unavailable: {exc}") from exc
     return (
-        align_to_litevggt_batch,
+        amb3r_weight_path,
         BlurScore,
         SceneBuildResult,
         summarize_blur_scores,
@@ -38,7 +37,8 @@ class FineRuntimeTests(unittest.TestCase):
         fine_status_block = algorithms_source.split("def fine_runtime_status", 1)[1].split("def ", 1)[0]
 
         self.assertNotIn("romatch", fine_status_block)
-        self.assertIn("litevggt", fine_status_block)
+        self.assertIn("amb3r", fine_status_block)
+        self.assertNotIn("transformer_engine", fine_status_block)
 
     def test_trainer_uses_local_runtime_not_lmrs_repo_training(self) -> None:
         trainer_source = (BACKEND_ROOT / "app" / "fine" / "mobilegs_trainer.py").read_text(encoding="utf-8")
@@ -103,6 +103,8 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertTrue((fine_root / "local_3dgs" / "render.py").exists())
         self.assertTrue((fine_root / "lmrs_runtime.py").exists())
         self.assertTrue((fine_root / "option_utils.py").exists())
+        self.assertTrue((fine_root / "amb3r_sfm.py").exists())
+        self.assertTrue((fine_root / "amb3r_runtime").exists())
 
     def test_compose_uses_one_worker_image(self) -> None:
         compose_source = (BACKEND_ROOT.parent / "docker-compose.yml").read_text(encoding="utf-8")
@@ -130,61 +132,129 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertEqual(summary.rejected_images, 2)
         self.assertEqual(summary.kept_images, 8)
 
-    def test_sfm_prefers_litevggt(self) -> None:
+    def test_sfm_defaults_to_amb3r(self) -> None:
         _, _, SceneBuildResult, _, build_scene, *_ = import_fine_runtime()
-        expected = SceneBuildResult(Path("scene"), "litevggt_colmap_no_exif", 8, 8, 100, {"sfm_backend": "litevggt_colmap_no_exif"})
+        expected = SceneBuildResult(Path("scene"), "amb3r_sfm_colmap_no_exif", 8, 8, 100, {"sfm_backend": "amb3r_sfm_colmap_no_exif"})
         ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={}, progress=None)
-        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_litevggt_colmap_scene", return_value=expected) as litevggt, patch(
+        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_amb3r_colmap_scene", return_value=expected) as amb3r, patch(
             "app.fine.runner.build_pycolmap_scene"
         ) as pycolmap:
             result = build_scene(ctx, Path(tmp), Path(tmp) / "scene", 8192, 1600, 8)
 
-        self.assertEqual(result.backend, "litevggt_colmap_no_exif")
-        litevggt.assert_called_once()
+        self.assertEqual(result.backend, "amb3r_sfm_colmap_no_exif")
+        amb3r.assert_called_once()
         pycolmap.assert_not_called()
 
     def test_sfm_does_not_auto_fallback_to_pycolmap(self) -> None:
         _, _, _, _, build_scene, *_ = import_fine_runtime()
         ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={}, progress=None)
         with tempfile.TemporaryDirectory() as tmp, patch(
-            "app.fine.runner.build_litevggt_colmap_scene",
-            side_effect=FineFailure("LITEVGGT_WEIGHT_MISSING", "missing"),
+            "app.fine.runner.build_amb3r_colmap_scene",
+            side_effect=FineFailure("AMB3R_WEIGHT_MISSING", "missing"),
         ), patch("app.fine.runner.build_pycolmap_scene") as pycolmap:
             with self.assertRaises(FineFailure) as raised:
                 build_scene(ctx, Path(tmp), Path(tmp) / "scene", 8192, 1600, 8)
 
-        self.assertEqual(raised.exception.code, "LITEVGGT_WEIGHT_MISSING")
+        self.assertEqual(raised.exception.code, "AMB3R_WEIGHT_MISSING")
         pycolmap.assert_not_called()
 
     def test_explicit_pycolmap_backend_is_diagnostic_only(self) -> None:
         _, _, SceneBuildResult, _, build_scene, *_ = import_fine_runtime()
         expected = SceneBuildResult(Path("scene"), "pycolmap", 3, 3, 42, {"sfm_backend": "pycolmap"})
         ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={"fine_sfm_backend": "pycolmap"}, progress=None)
-        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_litevggt_colmap_scene") as litevggt, patch(
+        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_amb3r_colmap_scene") as amb3r, patch(
             "app.fine.runner.build_pycolmap_scene", return_value=expected
         ) as pycolmap:
             result = build_scene(ctx, Path(tmp), Path(tmp) / "scene", 8192, 1600, 8)
 
         self.assertEqual(result.backend, "pycolmap")
         self.assertEqual(result.metrics["sfm_backend_requested"], "pycolmap_diagnostic")
-        litevggt.assert_not_called()
+        amb3r.assert_not_called()
         pycolmap.assert_called_once()
 
-    def test_litevggt_batch_padding_keeps_real_image_count_visible(self) -> None:
-        align_to_litevggt_batch, *_ = import_fine_runtime()
-        files = [Path(f"{index}.jpg") for index in range(3)]
-        padded = align_to_litevggt_batch(files)
-        source = (BACKEND_ROOT / "app" / "fine" / "litevggt_sfm.py").read_text(encoding="utf-8")
+    def test_litevggt_fine_backend_alias_maps_to_amb3r(self) -> None:
+        _, _, SceneBuildResult, _, build_scene, *_ = import_fine_runtime()
+        expected = SceneBuildResult(Path("scene"), "amb3r_sfm_colmap_no_exif", 3, 3, 42, {"sfm_backend": "amb3r_sfm_colmap_no_exif"})
+        ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={"fine_sfm_backend": "litevggt"}, progress=None)
+        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_amb3r_colmap_scene", return_value=expected) as amb3r:
+            result = build_scene(ctx, Path(tmp), Path(tmp) / "scene", 8192, 1600, 8)
 
-        self.assertEqual(len(padded), 8)
-        self.assertEqual(padded[:3], files)
-        self.assertEqual(padded[3:], [files[-1]] * 5)
-        self.assertIn('backend="litevggt_colmap_no_exif"', source)
-        self.assertIn("processed[:real_count]", source)
-        self.assertIn('"litevggt_padding_images"', source)
+        self.assertEqual(result.backend, "amb3r_sfm_colmap_no_exif")
+        self.assertEqual(result.metrics["sfm_backend_requested_alias"], "litevggt_deprecated_maps_to_amb3r")
+        amb3r.assert_called_once()
         runner_source = (BACKEND_ROOT / "app" / "fine" / "runner.py").read_text(encoding="utf-8")
-        self.assertIn("fine_litevggt_keep_ratio", runner_source)
+        self.assertIn("fine_amb3r_keep_ratio", runner_source)
         self.assertIn("0.12", runner_source)
+
+    def test_amb3r_weight_directory_and_auto_download_registration(self) -> None:
+        self.assertTrue((BACKEND_ROOT.parent / "model-cache" / "amb3r").exists())
+        fine_worker_source = (BACKEND_ROOT / "app" / "fine_worker.py").read_text(encoding="utf-8")
+        self.assertIn("ensure_amb3r_weight", fine_worker_source)
+        self.assertIn("download_model_weights", fine_worker_source)
+        self.assertIn("weights_for_pipeline", fine_worker_source)
+        try:
+            from app.fine.amb3r_sfm import amb3r_weight_path, build_amb3r_colmap_scene
+        except Exception as exc:
+            raise unittest.SkipTest(f"AMB3R lightweight import unavailable: {exc}") from exc
+
+        with tempfile.TemporaryDirectory() as tmp:
+            weight = amb3r_weight_path(Path(tmp))
+            self.assertTrue(weight.parent.exists())
+            self.assertEqual(weight.name, "amb3r.pt")
+            with self.assertRaises(FineFailure) as raised:
+                build_amb3r_colmap_scene(
+                    Path(tmp),
+                    Path(tmp) / "scene",
+                    checkpoint_path=weight,
+                    keep_ratio=0.12,
+                    max_points=10000,
+                    progress=lambda *_: None,
+                )
+
+        self.assertEqual(raised.exception.code, "AMB3R_WEIGHT_MISSING")
+
+    def test_amb3r_colmap_writer_creates_sparse_outputs(self) -> None:
+        try:
+            import numpy as np
+        except Exception as exc:
+            raise unittest.SkipTest(f"numpy unavailable: {exc}") from exc
+        from app.fine.amb3r_sfm import ProcessedAmb3rImage, write_colmap_model, write_gaussian_splatting_ply
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sparse_dir = Path(tmp) / "sparse" / "0"
+            sparse_dir.mkdir(parents=True)
+            images = [
+                ProcessedAmb3rImage(Path(f"{index}.jpg"), 640, 480, 518, 392, 0, 0, 640, 480, np.zeros((392, 518, 3), dtype=np.float32))
+                for index in range(3)
+            ]
+            poses = np.tile(np.eye(4, dtype=np.float32), (3, 1, 1))
+            poses[:, 0, 3] = np.arange(3, dtype=np.float32)
+            intrinsics = np.tile(np.eye(3, dtype=np.float32), (3, 1, 1))
+            intrinsics[:, 0, 0] = 500.0
+            intrinsics[:, 1, 1] = 510.0
+            intrinsics[:, 0, 2] = 259.0
+            intrinsics[:, 1, 2] = 196.0
+            points = np.array([[0.0, 0.0, 1.0], [0.1, 0.2, 1.2]], dtype=np.float32)
+            colors = np.array([[255, 0, 0], [0, 255, 0]], dtype=np.uint8)
+
+            write_gaussian_splatting_ply(sparse_dir / "points3D.ply", points, colors)
+            write_colmap_model(sparse_dir, images, [0, 1, 2], poses, intrinsics, points, colors)
+
+            self.assertTrue((sparse_dir / "cameras.bin").exists())
+            self.assertTrue((sparse_dir / "images.bin").exists())
+            self.assertTrue((sparse_dir / "points3D.bin").exists())
+            self.assertTrue((sparse_dir / "points3D.ply").stat().st_size > 0)
+
+    def test_preview_litevggt_and_fine_amb3r_imports_are_isolated(self) -> None:
+        sys.modules.pop("vggt", None)
+
+        try:
+            import app.preview.vendor.litevggt_runtime  # noqa: F401
+            import app.fine.amb3r_sfm  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"preview/fine lightweight imports unavailable: {exc}") from exc
+
+        self.assertNotIn("vggt", sys.modules)
 
     def test_deblur_mlp_replaces_scaling_heuristic(self) -> None:
         trainer_source = (BACKEND_ROOT / "app" / "fine" / "mobilegs_trainer.py").read_text(encoding="utf-8")
@@ -217,6 +287,12 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertNotIn("pycolmap", requirements)
         self.assertIn("transformer-engine[pytorch]==2.4.0", dockerfile)
         self.assertIn("pycolmap==3.12.6", dockerfile)
+        self.assertIn("spconv-cu118==2.3.8", dockerfile)
+        self.assertIn("torch-scatter==2.1.2", dockerfile)
+        self.assertIn("timm==0.6.7", requirements)
+        self.assertIn("addict==2.4.0", requirements)
+        self.assertIn("import app.fine.amb3r_sfm", dockerfile)
+        self.assertIn("mkdir -p /model-cache/amb3r", dockerfile)
         self.assertIn("import pycolmap", dockerfile)
         self.assertIn("'einops==0.8.0' 'transformer-engine[pytorch]==2.4.0'", dockerfile)
         self.assertLess(
@@ -230,6 +306,9 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertNotIn("flashinfer", combined)
         self.assertNotIn("kaolin", combined)
         self.assertNotIn("open3d", combined)
+        self.assertNotIn("xformers", combined)
+        self.assertNotIn("pytorch3d", combined)
+        self.assertNotIn("gdown", combined)
         self.assertNotIn("pip install torch", dockerfile)
         self.assertNotIn("pip install torchvision", dockerfile)
 

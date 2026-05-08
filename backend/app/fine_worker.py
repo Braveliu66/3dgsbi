@@ -14,6 +14,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.database import SessionLocal, initialize_database_schema
+from app.fine.amb3r_sfm import ensure_amb3r_weight
 from app.fine.runner import run_fine_pipeline
 from app.fine.types import FineContext, FineFailure
 from app.models import Artifact, Project, Task, utc_now
@@ -172,7 +173,7 @@ def run_fine_task(task_id: str, worker_id: str) -> None:
                     task.id, project.id, stage, progress, started, message, metrics
                 ),
             )
-            update_task(db, task, project, "fine_preflight", 18, started, "checking MobileGS LiteVGGT + LM-RS runtime")
+            update_task(db, task, project, "fine_preflight", 18, started, "checking MobileGS AMB3R-SfM + LM-RS runtime")
             result = run_fine_pipeline(ctx)
 
             if not result.final_ply.exists() or result.final_ply.stat().st_size <= 0:
@@ -293,21 +294,20 @@ def upload_fine_artifacts(
 
 
 def ensure_fine_weights(db, task: Task, project: Project, started: float) -> None:
-    specs = weights_for_pipeline("mobilegs_lmrs")
-    if not specs or not settings.model_auto_download:
-        return
-    update_task(db, task, project, "weights_checking", 8, started, "checking shared LiteVGGT weight for fine reconstruction")
-    try:
-        download_model_weights(
-            Path(settings.model_cache_dir),
-            specs,
-            prefer_hf_mirror=settings.model_download_prefer_hf_mirror,
-            lock_timeout_seconds=settings.model_download_lock_timeout_seconds,
-            log=lambda line: progress_fine_task(task.id, project.id, "weights_downloading", 10, started, line),
-        )
-    except ModelDownloadError as exc:
-        raise FineFailure("MODEL_WEIGHT_DOWNLOAD_FAILED", str(exc)) from exc
-    update_task(db, task, project, "weights_ready", 12, started, "shared LiteVGGT fine reconstruction weight is ready")
+    update_task(db, task, project, "weights_checking", 8, started, "checking AMB3R weight for fine reconstruction")
+    if settings.model_auto_download:
+        try:
+            download_model_weights(
+                Path(settings.model_cache_dir),
+                weights_for_pipeline("mobilegs_lmrs"),
+                prefer_hf_mirror=settings.model_download_prefer_hf_mirror,
+                lock_timeout_seconds=settings.model_download_lock_timeout_seconds,
+                log=lambda line: progress_fine_task(task.id, project.id, "weights_downloading", 10, started, line),
+            )
+        except ModelDownloadError as exc:
+            raise FineFailure("MODEL_WEIGHT_DOWNLOAD_FAILED", str(exc)) from exc
+    ensure_amb3r_weight(Path(settings.model_cache_dir))
+    update_task(db, task, project, "weights_ready", 12, started, "AMB3R fine reconstruction weight is ready")
 
 
 def update_task(db, task: Task, project: Project, stage: str, progress: int, started: float, *logs: str) -> None:

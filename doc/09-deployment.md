@@ -14,10 +14,15 @@
 
 ```text
 model-cache/litevggt/te_dict.pt
+model-cache/amb3r/amb3r.pt
 model-cache/lingbot-map/lingbot-map-long.pt
 model-cache/roma/roma_indoor.pth
 model-cache/roma/dinov2_vitl14_pretrain.pth
 ```
+
+`amb3r/amb3r.pt` is part of the task-specific model auto-download path for fine
+AMB3R-SfM when `MODEL_AUTO_DOWNLOAD=true`. The worker stores it under
+`model-cache/amb3r/` and still supports pre-seeding the file manually.
 
 `roma/*` 是 EDGS 的 RoMA correspondence 初始化依赖；缺失时 `litevggt_edgs`
 会失败并写出明确错误，不会生成 artifact。

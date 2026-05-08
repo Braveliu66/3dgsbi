@@ -19,13 +19,13 @@ class SceneQuality:
     metrics: dict[str, Any]
 
 
-def assess_litevggt_scene_quality(scene_dir: Path, *, min_points: int = 50_000) -> SceneQuality:
+def assess_sfm_scene_quality(scene_dir: Path, *, prefix: str, min_points: int = 50_000) -> SceneQuality:
     sparse_dir = scene_dir / "sparse" / "0"
     images_dir = scene_dir / "images"
     reasons: list[str] = []
     metrics: dict[str, Any] = {
-        "litevggt_quality_pass": False,
-        "litevggt_quality_reasons": [],
+        f"{prefix}_quality_pass": False,
+        f"{prefix}_quality_reasons": [],
     }
 
     try:
@@ -37,7 +37,7 @@ def assess_litevggt_scene_quality(scene_dir: Path, *, min_points: int = 50_000) 
             points, _, _ = read_points3D_binary(str(sparse_dir / "points3D.bin"))
     except Exception as exc:
         reasons.append(f"quality_read_failed:{exc}")
-        metrics["litevggt_quality_reasons"] = reasons
+        metrics[f"{prefix}_quality_reasons"] = reasons
         return SceneQuality(False, reasons, metrics)
 
     image_count = len(image_files(images_dir)) if images_dir.exists() else 0
@@ -74,16 +74,19 @@ def assess_litevggt_scene_quality(scene_dir: Path, *, min_points: int = 50_000) 
 
     metrics.update(
         {
-            "litevggt_quality_pass": not reasons,
-            "litevggt_quality_reasons": reasons,
-            "litevggt_quality_camera_count": len(extrinsics),
-            "litevggt_quality_image_count": image_count,
-            "litevggt_quality_duplicate_camera_names": len(duplicate_names),
-            "litevggt_quality_camera_span": round(span, 6),
-            "litevggt_quality_focal_min": round(focal_min, 6),
-            "litevggt_quality_focal_max": round(focal_max, 6),
-            "litevggt_quality_sparse_points": point_count,
+            f"{prefix}_quality_pass": not reasons,
+            f"{prefix}_quality_reasons": reasons,
+            f"{prefix}_quality_camera_count": len(extrinsics),
+            f"{prefix}_quality_image_count": image_count,
+            f"{prefix}_quality_duplicate_camera_names": len(duplicate_names),
+            f"{prefix}_quality_camera_span": round(span, 6),
+            f"{prefix}_quality_focal_min": round(focal_min, 6),
+            f"{prefix}_quality_focal_max": round(focal_max, 6),
+            f"{prefix}_quality_sparse_points": point_count,
         }
     )
     return SceneQuality(not reasons, reasons, metrics)
 
+
+def assess_litevggt_scene_quality(scene_dir: Path, *, min_points: int = 50_000) -> SceneQuality:
+    return assess_sfm_scene_quality(scene_dir, prefix="litevggt", min_points=min_points)

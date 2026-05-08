@@ -103,7 +103,7 @@ flowchart LR
 | 图片极速预览 | 默认 LiteVGGT → EDGS → Spark-SPZ；可选 LiteVGGT → Spark-SPZ 粗预览 |
 | 视频极速预览 | LingBot-Map → Spark-SPZ |
 | 实时摄像头 | LingBot-Map streaming → 增量 `preview_segment_*.spz` |
-| 精细重建 | 默认 `mobilegs_lmrs`：LiteVGGT 生成无 EXIF 依赖的 COLMAP 兼容 SfM + DeblurMLP-MobileGS + FastGS-style VCD/VCP + patched LM-RS Compact Box rasterizer + 可选 LM-RS matrix-free Phase 2 + Spark-SPZ；pycolmap 仅显式诊断，fine 不依赖 EDGS/RoMA/romatch |
+| 精细重建 | 默认 `mobilegs_lmrs`：AMB3R-SfM 生成无 EXIF 依赖的 COLMAP 兼容 SfM + DeblurMLP-MobileGS + FastGS-style VCD/VCP + patched LM-RS Compact Box rasterizer + 可选 LM-RS matrix-free Phase 2 + Spark-SPZ；pycolmap 仅显式诊断，fine 不依赖 EDGS/RoMA/romatch；预览仍使用 LiteVGGT |
 | 稀疏视角 | FreeSplatter 初始化 → 精细合成引擎 |
 | 长视频精细重建 | 可选 LingBot-Map + MASt3R + Pi3 → 精细合成引擎 |
 | Mesh 导出 | MeshSplatting → `.ply` / `.obj` / `.glb` |
@@ -148,8 +148,8 @@ viewer          Spark 2.0
 ## 2026-05-07 Fine Pipeline Update
 
 - Fine reconstruction accepts ordinary JPG/PNG uploads. EXIF camera parameters are not required; EXIF is used only for orientation correction.
-- Production fine path: JPG/PNG normalization -> LiteVGGT SfM -> COLMAP-compatible sparse model -> DeblurMLP-MobileGS training -> optional LM-RS refinement -> Spark SPZ.
-- LiteVGGT is the only production SfM frontend. `pycolmap` remains only as explicit development diagnostics via `fine_sfm_backend=pycolmap`, never as automatic fallback.
-- LiteVGGT pads only the internal inference batch. COLMAP `images.bin`, `cameras.bin`, and `points3D.bin` contain only real uploaded images. Metrics include `sfm_backend=litevggt_colmap_no_exif`, real image count, padding count, and sparse point count.
+- Production fine path: JPG/PNG normalization -> AMB3R-SfM -> COLMAP-compatible sparse model -> DeblurMLP-MobileGS training -> optional LM-RS refinement -> Spark SPZ.
+- AMB3R-SfM is the production fine SfM frontend. `pycolmap` remains only as explicit development diagnostics via `fine_sfm_backend=pycolmap`, never as automatic fallback. Deprecated fine `litevggt` maps to AMB3R.
+- Preview LiteVGGT remains isolated under the preview vendor path. Fine AMB3R metrics include `sfm_backend=amb3r_sfm_colmap_no_exif`, registered/unmapped image count, resolution, and sparse point count.
 - DeblurMLP uses the Deblurring-3DGS GTnet method at commit `e63366b8581c0fde2fda0ab1aea99518da2e2f10`. It models blurred observations during training and still exports a standard sharp Gaussian PLY.
 - The worker image keeps one CUDA/PyTorch baseline, one patched LM-RS rasterizer, one `simple_knn`, and one `fused_ssim`.

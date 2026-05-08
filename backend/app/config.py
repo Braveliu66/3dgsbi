@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     fine_iterations: int = 10000
 
     litevggt_repo_commit: str = "4767c17f8b6f176bb751566e92f60eb885040033"
+    amb3r_repo_commit: str = "7aae7fbb77a750651ffa236bb9c3212290c6fc78"
     edgs_repo_commit: str = "9a897645eb47c1b24d4f9e4428cd745927bf1ee1"
     lingbot_repo_commit: str = "f720b421c6c50af3adc63272033226aa4811ef42"
     spark_repo_commit: str = "3cf9fa15adb7ac7c47a1e962740db97b9e8a9fdf"

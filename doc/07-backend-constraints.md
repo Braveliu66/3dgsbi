@@ -24,7 +24,8 @@
 所有第三方模型权重必须先进入项目根目录的本地缓存，再通过 Docker Compose 挂载给 worker 使用。后续接入任何新模型都按这个规则处理。
 
 - 本地缓存路径统一为 `model-cache/<model-name>/...`。
-- 当前 LiteVGGT 权重路径为 `model-cache/litevggt/te_dict.pt`，LingBot-Map 权重路径为 `model-cache/lingbot-map/lingbot-map-long.pt`。
+- 当前 LiteVGGT preview 权重路径为 `model-cache/litevggt/te_dict.pt`，fine AMB3R-SfM 权重路径为 `model-cache/amb3r/amb3r.pt`，LingBot-Map 权重路径为 `model-cache/lingbot-map/lingbot-map-long.pt`。
+- `model-cache/amb3r/amb3r.pt` 支持 `MODEL_AUTO_DOWNLOAD=true` 时自动下载；也可以提前手动放入共享 `model-cache`。
 - Docker build 不再远端下载大权重；worker 启动预检必须先检查共享 `model-cache`，缺失时使用 `.part` 文件和 HTTP Range 断点续传下载。
 - 大权重文件不得提交 Git；只保留目录占位或说明文件，权重扩展名由 `.gitignore` 忽略。
 - 新增模型时必须同步更新下载脚本、构建脚本、Dockerfile/Compose 挂载路径和 `algorithm_registry` 的 `weight_source`/`weight_path`。

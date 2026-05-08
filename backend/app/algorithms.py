@@ -74,17 +74,17 @@ ALGORITHMS: list[dict[str, Any]] = [
         "notes": "Spark-readable SPZ conversion/validation.",
     },
     {
-        "name": "MobileGS Fine (LiteVGGT + DeblurMLP + LM-RS)",
-        "repo_url": None,
-        "license": "Project orchestration; LiteVGGT MIT; Deblurring-3DGS/LM-RS/3DGS research use",
-        "commit_hash_setting": None,
+        "name": "MobileGS Fine (AMB3R-SfM + DeblurMLP + LM-RS)",
+        "repo_url": "https://github.com/HengyiWang/amb3r",
+        "license": "Mixed upstream terms; AMB3R/VGGT/PTv3 + Deblur/LM-RS research use",
+        "commit_hash_setting": "amb3r_repo_commit",
         "local_path": FINE_ROOT / "runner.py",
         "enabled": True,
-        "weight_paths": ["litevggt/te_dict.pt"],
+        "weight_paths": ["amb3r/amb3r.pt"],
         "commands": {},
         "source_type": "system",
-        "license_notice": "Fine pipeline reuses LiteVGGT SfM, Deblurring-3DGS GTnet ideas, and LM-RS matrix-free optimization. EDGS/RoMA is not required for fine reconstruction.",
-        "notes": "Default image fine reconstruction pipeline: JPG/PNG normalization, LiteVGGT COLMAP-compatible no-EXIF SfM, DeblurMLP-MobileGS training, FastGS-style densification/pruning, patched LM-RS Compact Box rasterizer, optional LM-RS matrix-free Phase 2, and Spark SPZ conversion. pycolmap is explicit diagnostics only.",
+        "license_notice": "Fine pipeline integrates the minimal AMB3R-SfM runtime from commit 7aae7fbb77a750651ffa236bb9c3212290c6fc78, Deblurring-3DGS GTnet ideas, and LM-RS matrix-free optimization. Preview still uses LiteVGGT.",
+        "notes": "Default image fine reconstruction pipeline: JPG/PNG normalization, AMB3R-SfM COLMAP-compatible no-EXIF sparse/0 initialization, DeblurMLP-MobileGS training, FastGS-style densification/pruning, patched LM-RS Compact Box rasterizer, optional LM-RS matrix-free Phase 2, and Spark SPZ conversion. pycolmap is explicit diagnostics only.",
     },
     {
         "name": "Deblurring-3DGS GTnet",
@@ -200,7 +200,7 @@ def runtime_preflight(db: Session, settings: Settings | None = None) -> dict[str
                 extensions_ready = bool(edgs_ext["available"] or preview_workers["available"])
                 if not extensions_ready:
                     issues.append("worker-preview heartbeat missing and backend EDGS CUDA extensions unavailable")
-            if item.name == "MobileGS Fine (LiteVGGT + DeblurMLP + LM-RS)":
+            if item.name == "MobileGS Fine (AMB3R-SfM + DeblurMLP + LM-RS)":
                 fine_runtime = fine_runtime_status()
                 extensions_ready = bool(fine_runtime["available"] or fine_workers["available"])
                 if not extensions_ready:
@@ -326,7 +326,7 @@ def bundled_module_status(name: str) -> dict[str, Any]:
     modules = {
         "LiteVGGT": "app.preview.vendor.litevggt_runtime",
         "EDGS": "app.preview.vendor.edgs_runtime",
-        "MobileGS Fine (LiteVGGT + DeblurMLP + LM-RS)": "app.fine.runner",
+        "MobileGS Fine (AMB3R-SfM + DeblurMLP + LM-RS)": "app.fine.runner",
         "Deblurring-3DGS GTnet": "app.fine.deblur_mlp",
         "LingBot-Map": "app.preview.vendor.lingbot_runtime",
         "Spark SPZ": "app.preview.io.spz",
@@ -353,8 +353,11 @@ def fine_runtime_status() -> dict[str, Any]:
     torch_status = torch_info()
     spark_status = spark_converter_status()
     modules = {
-        "litevggt": litevggt_runtime_status(),
-        "transformer_engine": import_check("transformer_engine"),
+        "amb3r": import_check("app.fine.amb3r_sfm"),
+        "omegaconf": import_check("omegaconf"),
+        "spconv": import_check("spconv.pytorch"),
+        "torch_scatter": import_check("torch_scatter"),
+        "timm": import_check("timm"),
         "deblur_mlp": import_check("app.fine.deblur_mlp"),
         "diff_gaussian_rasterization": import_check("diff_gaussian_rasterization"),
         "simple_knn": import_check("simple_knn"),
@@ -377,7 +380,7 @@ def fine_runtime_status() -> dict[str, Any]:
         "spark_spz": spark_status,
         **modules,
         **optional_modules,
-        "error": None if available else "CUDA torch/Spark SPZ/LiteVGGT/transformer_engine/DeblurMLP/LM-RS rasterizer/Compact Box/simple_knn/fused_ssim check failed",
+        "error": None if available else "CUDA torch/Spark SPZ/AMB3R-SfM/DeblurMLP/LM-RS rasterizer/Compact Box/simple_knn/fused_ssim check failed",
     }
 
 

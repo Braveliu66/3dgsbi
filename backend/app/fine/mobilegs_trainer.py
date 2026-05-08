@@ -234,7 +234,7 @@ def train_mobile_3dgs(
                 "lmrs_last_loss": lm_last_loss,
                 "lmrs_cg_iter": read_int(options.get("fine_lmrs_cg_iter"), 8, minimum=1, maximum=64) if lm_iterations else None,
                 "fastergs_backend": "local_algorithm_equivalent_no_cuda_kernel_fusion",
-                "requested_algorithms": ["LiteVGGT", "Deblurring-3DGS", "FastGS", "FasterGS", "LM-RS"],
+                "requested_algorithms": ["AMB3R", "Deblurring-3DGS", "FastGS", "FasterGS", "LM-RS"],
                 "effective_algorithms": effective_algorithms(deblur_state.enabled, lm_iterations, policy),
                 **policy.metrics(),
             },
@@ -327,7 +327,7 @@ def build_lmrs_options(options: dict[str, Any]) -> SimpleNamespace:
 
 def effective_algorithms(deblur_enabled: bool, lm_iterations: int, policy: FastGSPolicy) -> list[str]:
     algorithms = [
-        "LiteVGGT",
+        "AMB3R",
         "Deblurring-3DGS_GTnet" if deblur_enabled else "Deblurring-3DGS_disabled",
         "FastGS_local_multiview_score",
     ]

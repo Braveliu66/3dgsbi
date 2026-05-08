@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
+from html import unescape
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -39,19 +41,24 @@ DINOV2_WEIGHT = ModelWeight(
     "roma/dinov2_vitl14_pretrain.pth",
     "https://dl.fbaipublicfiles.com/dinov2/dinov2_vitl14/dinov2_vitl14_pretrain.pth",
 )
+AMB3R_WEIGHT = ModelWeight(
+    "amb3r/amb3r.pt",
+    "https://drive.google.com/file/d/14x0WW2rUE_he2hUEouP6ywSRnlJDeLel/view?usp=sharing",
+)
 
 MODEL_WEIGHTS: tuple[ModelWeight, ...] = (
     LITEVGGT_WEIGHT,
     LINGBOT_WEIGHT,
     ROMA_WEIGHT,
     DINOV2_WEIGHT,
+    AMB3R_WEIGHT,
 )
 WEIGHT_BY_RELATIVE_PATH = {item.relative_path: item for item in MODEL_WEIGHTS}
 
 PIPELINE_WEIGHT_PATHS: dict[str, tuple[str, ...]] = {
     "litevggt_spz": ("litevggt/te_dict.pt",),
     "litevggt_edgs": ("roma/roma_indoor.pth", "roma/dinov2_vitl14_pretrain.pth"),
-    "mobilegs_lmrs": ("litevggt/te_dict.pt",),
+    "mobilegs_lmrs": ("amb3r/amb3r.pt",),
     "lingbot_spz": ("lingbot-map/lingbot-map-long.pt",),
 }
 
@@ -151,6 +158,9 @@ def candidate_urls(spec: ModelWeight, *, prefer_hf_mirror: bool) -> list[str]:
 
 
 def _download_url(url: str, target: Path, part: Path, meta: Path, relative_path: str) -> dict[str, Any]:
+    if "drive.google.com" in url:
+        return _download_google_drive(url, target, part, meta, relative_path)
+
     timeout = httpx.Timeout(connect=20.0, read=60.0, write=60.0, pool=20.0)
     with httpx.Client(follow_redirects=True, timeout=timeout) as client:
         try:
@@ -158,6 +168,116 @@ def _download_url(url: str, target: Path, part: Path, meta: Path, relative_path:
         except _RestartWithoutRange:
             part.unlink(missing_ok=True)
             return _stream_url(client, url, target, part, meta, relative_path)
+
+
+def _download_google_drive(url: str, target: Path, part: Path, meta: Path, relative_path: str) -> dict[str, Any]:
+    file_id = _google_drive_file_id(url)
+    if not file_id:
+        raise ModelDownloadError("could not parse Google Drive file id")
+
+    timeout = httpx.Timeout(connect=20.0, read=60.0, write=60.0, pool=20.0)
+    with httpx.Client(follow_redirects=True, timeout=timeout) as client:
+        download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+        with client.stream("GET", download_url) as response:
+            if response.status_code >= 400:
+                raise ModelDownloadError(f"HTTP {response.status_code}")
+            content_type = response.headers.get("content-type", "")
+            if "text/html" not in content_type.lower():
+                return _write_google_drive_response(response, target, part, meta, relative_path, download_url)
+
+            html = response.read().decode(response.encoding or "utf-8", errors="replace")
+            confirm_url = _google_drive_confirm_url_from_html(html, response.cookies, file_id)
+            if not confirm_url:
+                raise ModelDownloadError("Google Drive returned an HTML confirmation page instead of the checkpoint")
+
+        return _stream_google_drive_url(client, confirm_url, target, part, meta, relative_path)
+
+
+def _google_drive_file_id(url: str) -> str | None:
+    match = re.search(r"/file/d/([^/]+)", url)
+    if match:
+        return match.group(1)
+    match = re.search(r"[?&]id=([^&]+)", url)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _google_drive_confirm_url_from_html(text: str, cookies: httpx.Cookies, file_id: str) -> str | None:
+    for name, value in cookies.items():
+        if name.startswith("download_warning"):
+            return f"https://drive.google.com/uc?export=download&confirm={value}&id={file_id}"
+
+    match = re.search(r'href="([^"]*confirm=[^"]*)"', text)
+    if match:
+        href = unescape(match.group(1)).replace("&amp;", "&")
+        if href.startswith("/"):
+            return "https://drive.google.com" + href
+        return href
+
+    match = re.search(r"confirm=([0-9A-Za-z_-]+)", text)
+    if match:
+        return f"https://drive.google.com/uc?export=download&confirm={match.group(1)}&id={file_id}"
+    return None
+
+
+def _stream_google_drive_url(
+    client: httpx.Client,
+    url: str,
+    target: Path,
+    part: Path,
+    meta: Path,
+    relative_path: str,
+) -> dict[str, Any]:
+    part.unlink(missing_ok=True)
+    with client.stream("GET", url) as response:
+        if response.status_code >= 400:
+            raise ModelDownloadError(f"HTTP {response.status_code}")
+        content_type = response.headers.get("content-type", "")
+        if "text/html" in content_type.lower():
+            raise ModelDownloadError("Google Drive returned an HTML confirmation page instead of the checkpoint")
+
+        return _write_google_drive_response(response, target, part, meta, relative_path, url)
+
+
+def _write_google_drive_response(
+    response: httpx.Response,
+    target: Path,
+    part: Path,
+    meta: Path,
+    relative_path: str,
+    requested_url: str,
+) -> dict[str, Any]:
+    with part.open("wb") as out:
+        for chunk in response.iter_bytes():
+            if chunk:
+                out.write(chunk)
+
+    size_bytes = part.stat().st_size
+    if size_bytes <= 0:
+        raise ModelDownloadError("downloaded file is empty")
+
+    os.replace(part, target)
+    download_meta = {
+        "relative_path": relative_path,
+        "url": str(response.url),
+        "requested_url": requested_url,
+        "etag": response.headers.get("etag"),
+        "content_length": _content_length(response, 0),
+        "size_bytes": target.stat().st_size,
+        "resumed": False,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    meta.write_text(json.dumps(download_meta, ensure_ascii=True, indent=2), encoding="utf-8")
+    return {
+        "path": str(target),
+        "status": "downloaded",
+        "url": str(response.url),
+        "requested_url": requested_url,
+        "size_bytes": target.stat().st_size,
+        "resumed": False,
+        "partial_exists": False,
+    }
 
 
 def _stream_url(

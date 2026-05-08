@@ -188,10 +188,10 @@ Fine image workflow now runs:
 
 1. Normalize uploaded JPG/PNG into RGB JPEG. Missing EXIF is valid; EXIF orientation is only a pixel-rotation hint.
 2. Analyze blur and keep at least 3 real images.
-3. Run LiteVGGT SfM as the production frontend. If 3-7 images are available, only the LiteVGGT inference batch is padded; scene records remain real images only.
-4. Write COLMAP-compatible `sparse/0` with `images.bin`, `cameras.bin`, and `points3D.bin`; metrics set `sfm_backend=litevggt_colmap_no_exif`.
+3. Run AMB3R-SfM as the production fine frontend. Preview remains LiteVGGT.
+4. Write COLMAP-compatible `sparse/0` with `images.bin`, `cameras.bin`, `points3D.bin`, and `points3D.ply`; metrics set `sfm_backend=amb3r_sfm_colmap_no_exif`.
 5. Train MobileGS. Non-sharp inputs enable DeblurMLP GTnet during the ADAM training phase; motion/mixed uses position moments, defocus adjusts scale/rotation only.
 6. Optional LM-RS refinement runs only when explicitly scheduled. Auto DeblurMLP runs keep the default LM start at the final iteration so training does not optimize the blurred observation with LM-RS unless requested.
 7. Export standard `final.ply`, transcode `final_web.spz`, and write `metrics.json`.
 
-`pycolmap` is no longer an automatic failure recovery path. It is a development diagnostic path only when `fine_sfm_backend=pycolmap` is explicitly provided.
+`pycolmap` is no longer an automatic failure recovery path. It is a development diagnostic path only when `fine_sfm_backend=pycolmap` is explicitly provided. The deprecated `fine_sfm_backend=litevggt` fine option maps to AMB3R-SfM; preview LiteVGGT is unchanged.
