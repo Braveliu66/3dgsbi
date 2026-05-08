@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { FilePlus2, Image, Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { api, formatBytes } from "@/lib/api";
+import { api, formatBytes, mediaThumbnailUrl } from "@/lib/api";
 import { formatDateTime, inputTypeLabel, projectStatusLabel } from "@/lib/labels";
 import type { Project, ProjectStatus } from "@/lib/types";
 
@@ -14,10 +14,14 @@ export default function ProjectsPage() {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<ProjectStatus | "all">("all");
   const [error, setError] = useState<string | null>(null);
+  const [brokenCoverIds, setBrokenCoverIds] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
     void api.projects()
-      .then((data) => setProjects(data.projects))
+      .then((data) => {
+        setProjects(data.projects);
+        setBrokenCoverIds(new Set());
+      })
       .catch((err) => setError(err instanceof Error ? err.message : "读取项目失败"));
   }, []);
 
@@ -83,13 +87,24 @@ export default function ProjectsPage() {
 
           {visible.length > 0 && !listMode ? (
             <div className="project-grid">
-              {visible.map((project) => (
+              {visible.map((project) => {
+                const cover = projectCover(project, brokenCoverIds);
+                return (
                 <Link className="panel project-card" href={`/projects/${project.id}`} key={project.id}>
-                  <div className="preview-tile">
-                    <div className="stack" style={{ placeItems: "center", textAlign: "center" }}>
-                      <Image size={30} />
-                      <strong>{project.status === "PREVIEW_READY" ? "SPZ READY" : inputTypeLabel(project.input_type)}</strong>
-                    </div>
+                  <div className={`preview-tile${cover ? " has-cover" : ""}`}>
+                    {cover ? (
+                      <img
+                        className="project-cover-image"
+                        src={cover.url}
+                        alt={project.name}
+                        onError={() => setBrokenCoverIds((ids) => new Set(ids).add(cover.mediaId))}
+                      />
+                    ) : (
+                      <div className="stack" style={{ placeItems: "center", textAlign: "center" }}>
+                        <Image size={30} />
+                        <strong>{project.status === "PREVIEW_READY" ? "SPZ READY" : inputTypeLabel(project.input_type)}</strong>
+                      </div>
+                    )}
                   </div>
                   <div className="row between">
                     <h3 className="truncate" title={project.name}>{project.name}</h3>
@@ -103,11 +118,18 @@ export default function ProjectsPage() {
                     <span>{formatDateTime(project.updated_at)}</span>
                   </div>
                 </Link>
-              ))}
+                );
+              })}
             </div>
           ) : null}
         </div>
       </section>
     </div>
   );
+}
+
+function projectCover(project: Project, brokenCoverIds: Set<string>): { mediaId: string; url: string } | null {
+  const media = project.media?.find((item) => item.thumbnail_uri && !brokenCoverIds.has(item.id));
+  const url = media ? mediaThumbnailUrl(media) : null;
+  return media && url ? { mediaId: media.id, url } : null;
 }

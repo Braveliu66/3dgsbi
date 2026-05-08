@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
 
 import psutil
@@ -94,9 +96,10 @@ def collect_gpu_nvml() -> dict[str, Any]:
 
 def collect_gpu_nvidia_smi() -> dict[str, Any]:
     try:
+        command = nvidia_smi_command()
         result = subprocess.run(
             [
-                "nvidia-smi",
+                command,
                 "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,driver_version",
                 "--format=csv,noheader,nounits",
             ],
@@ -129,7 +132,7 @@ def collect_gpu_nvidia_smi() -> dict[str, Any]:
             "available": bool(gpus),
             "source": "nvidia-smi",
             "driver_version": driver,
-            "cuda_runtime": query_cuda_runtime(),
+            "cuda_runtime": query_cuda_runtime(command),
             "gpus": gpus,
             "usage_percent": max((item["usage_percent"] for item in gpus), default=0),
             "memory_used": sum(item["memory_used"] for item in gpus),
@@ -139,9 +142,23 @@ def collect_gpu_nvidia_smi() -> dict[str, Any]:
         return {"available": False, "source": "nvidia-smi", "message": str(exc)}
 
 
-def query_cuda_runtime() -> str | None:
+def nvidia_smi_command() -> str:
+    found = shutil.which("nvidia-smi")
+    if found:
+        return found
+    candidates = [
+        Path("C:/Program Files/NVIDIA Corporation/NVSMI/nvidia-smi.exe"),
+        Path("C:/Windows/System32/nvidia-smi.exe"),
+    ]
+    for path in candidates:
+        if path.exists():
+            return str(path)
+    return "nvidia-smi"
+
+
+def query_cuda_runtime(command: str | None = None) -> str | None:
     try:
-        result = subprocess.run(["nvidia-smi", "-q", "-x"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5)
+        result = subprocess.run([command or nvidia_smi_command(), "-q", "-x"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5)
         if "<cuda_version>" in result.stdout:
             return result.stdout.split("<cuda_version>", 1)[1].split("</cuda_version>", 1)[0].strip()
     except Exception:
@@ -170,4 +187,3 @@ def torch_info() -> dict[str, Any]:
 
 def to_jsonable(value: Any) -> Any:
     return json.loads(json.dumps(value, default=str))
-

@@ -1,25 +1,35 @@
 "use client";
 
-import { Maximize2 } from "lucide-react";
+import { Focus, Maximize2, RotateCcw, RotateCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { Object3D, WebGLRenderer } from "three";
+import type { Box3, Object3D, PerspectiveCamera, Vector3, WebGLRenderer } from "three";
+import type { OrbitControls as OrbitControlsType } from "three/examples/jsm/controls/OrbitControls.js";
 import { artifactUrl } from "@/lib/api";
 import type { ViewerSegment } from "@/lib/types";
 
 type ViewerState = "idle" | "loading" | "ready" | "error";
+type AxisView = "x-positive" | "x-negative" | "y-positive" | "y-negative" | "z-positive" | "z-negative";
 
-interface SparkRendererLike {
+interface ViewerControlApi {
+  resetCamera: () => void;
+  rotateModel: (radians: number) => void;
+  setAxisView: (view: AxisView) => void;
+}
+
+interface SparkRendererLike extends Object3D {
   lodSplatScale?: number;
   maxStdDev?: number;
   maxPixelRadius?: number;
   dispose?: () => void;
 }
 
-interface SplatMeshLike {
-  rotation: { y: number };
+interface SplatMeshLike extends Object3D {
+  initialized?: Promise<SplatMeshLike>;
   lodScale?: number;
   numSplats?: number;
+  splats?: { getNumSplats?: () => number };
   dispose?: () => void;
+  getBoundingBox?: (centersOnly?: boolean) => Box3;
 }
 
 interface QualityLevel {
@@ -47,7 +57,9 @@ const MAX_RENDER_SPLATS = readNumber(process.env.VIEWER_MAX_SPLATS, 5_000_000);
 
 export function SplatViewer({ modelUrl, segments }: { modelUrl?: string | null; segments?: ViewerSegment[] }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const viewerApiRef = useRef<ViewerControlApi | null>(null);
   const [state, setState] = useState<ViewerState>("idle");
+  const [viewerReady, setViewerReady] = useState(false);
   const [message, setMessage] = useState("真实 preview_spz 产物会加载在这里。");
   const [fps, setFps] = useState(0);
   const [qualityIndex, setQualityIndex] = useState(1);
@@ -68,6 +80,8 @@ export function SplatViewer({ modelUrl, segments }: { modelUrl?: string | null; 
         ? [modelUrl]
         : [];
     if (!urls.length || !hostRef.current) {
+      viewerApiRef.current = null;
+      setViewerReady(false);
       setState("idle");
       setMessage("真实 preview_spz 产物会加载在这里。");
       setFps(0);
@@ -79,14 +93,18 @@ export function SplatViewer({ modelUrl, segments }: { modelUrl?: string | null; 
     let animationFrame = 0;
     let resizeObserver: ResizeObserver | undefined;
     let cleanup: (() => void) | undefined;
+    let controls: OrbitControlsType | undefined;
     const qualityRef = { current: qualityIndex };
     const fpsWindow = { startedAt: performance.now(), frames: 0, highStreak: 0, lowStreak: 0 };
+    viewerApiRef.current = null;
+    setViewerReady(false);
 
     async function mountViewer() {
       try {
         setState("loading");
         setMessage("正在初始化 Spark Viewer");
         const THREE = await import("three");
+        const { OrbitControls } = await import("three/examples/jsm/controls/OrbitControls.js");
         const Spark = (await import("@sparkjsdev/spark") as unknown) as {
           SplatMesh?: new (options: { url: string; lod?: boolean | "quality"; lodAbove?: number }) => SplatMeshLike;
           SparkRenderer?: new (options: Record<string, unknown>) => SparkRendererLike;
@@ -99,11 +117,35 @@ export function SplatViewer({ modelUrl, segments }: { modelUrl?: string | null; 
         host.innerHTML = "";
 
         const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0f1512);
         const camera = new THREE.PerspectiveCamera(55, host.clientWidth / Math.max(host.clientHeight, 1), 0.01, 1000);
         camera.position.set(0, 0, 3);
-        const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: true, powerPreference: "high-performance" });
+        const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: false, powerPreference: "high-performance" });
+        renderer.outputColorSpace = THREE.SRGBColorSpace;
+        renderer.setClearColor(0x0f1512, 1);
         renderer.setSize(host.clientWidth, host.clientHeight);
         host.appendChild(renderer.domElement);
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = false;
+        controls.screenSpacePanning = true;
+        controls.rotateSpeed = 1;
+        controls.zoomSpeed = 0.9;
+        controls.panSpeed = 0.7;
+        controls.autoRotate = false;
+        controls.enableRotate = true;
+        controls.enablePan = true;
+        controls.enableZoom = true;
+        controls.minPolarAngle = 0;
+        controls.maxPolarAngle = Math.PI;
+        controls.mouseButtons = {
+          LEFT: THREE.MOUSE.ROTATE,
+          MIDDLE: THREE.MOUSE.DOLLY,
+          RIGHT: THREE.MOUSE.PAN
+        };
+        controls.touches = {
+          ONE: THREE.TOUCH.ROTATE,
+          TWO: THREE.TOUCH.DOLLY_PAN
+        };
 
         const initialQuality = QUALITY_LEVELS[qualityRef.current];
         const sparkRenderer = Spark.SparkRenderer
@@ -114,7 +156,13 @@ export function SplatViewer({ modelUrl, segments }: { modelUrl?: string | null; 
               maxPixelRadius: initialQuality.maxPixelRadius
             })
           : null;
-        if (sparkRenderer) scene.add(sparkRenderer as unknown as Object3D);
+        if (sparkRenderer) scene.add(sparkRenderer);
+
+        const modelPivot = new THREE.Group();
+        scene.add(modelPivot);
+        const splatGroup = new THREE.Group();
+        splatGroup.rotation.x = Math.PI;
+        modelPivot.add(splatGroup);
 
         const weakNetwork = isWeakNetwork();
         const splats = urls.map((url, index) => {
@@ -123,7 +171,7 @@ export function SplatViewer({ modelUrl, segments }: { modelUrl?: string | null; 
             lod: true,
             lodAbove: weakNetwork || index < urls.length - 1 ? 50000 : 100000
           });
-          scene.add(splat as unknown as Object3D);
+          splatGroup.add(splat);
           applyQuality(renderer, sparkRenderer, splat, initialQuality, host);
           return splat;
         });
@@ -137,27 +185,81 @@ export function SplatViewer({ modelUrl, segments }: { modelUrl?: string | null; 
         });
         resizeObserver.observe(host);
 
-        const render = (now: number) => {
-          animationFrame = requestAnimationFrame(render);
-          for (const splat of splats) splat.rotation.y += 0.002;
-          renderer.render(scene, camera);
-          const totalSplats = splats.reduce((sum, splat) => sum + (typeof splat.numSplats === "number" ? splat.numSplats : 0), 0);
-          updateFps(now, fpsWindow, qualityRef, renderer, sparkRenderer, splats, host, setFps, setQualityIndex, totalSplats);
-          if (totalSplats > 0) setSplatCount(totalSplats);
-        };
-        animationFrame = requestAnimationFrame(render);
-
         cleanup = () => {
           cancelAnimationFrame(animationFrame);
           resizeObserver?.disconnect();
+          controls?.dispose();
           for (const splat of splats) splat.dispose?.();
           sparkRenderer?.dispose?.();
           renderer.dispose();
           host.innerHTML = "";
         };
+
+        await Promise.all(splats.map((splat) => splat.initialized ?? Promise.resolve(splat)));
+        if (cancelled) return;
+        scene.updateMatrixWorld(true);
+        const fit = fitCameraToSplats(THREE, camera, splats);
+        if (fit && controls) {
+          modelPivot.position.copy(fit.center);
+          splatGroup.position.copy(fit.center.clone().multiplyScalar(-1));
+          scene.updateMatrixWorld(true);
+          controls.target.copy(fit.center);
+          controls.minDistance = Math.max(0.01, fit.radius * 0.05);
+          controls.maxDistance = Math.max(10, fit.distance * 8);
+          controls.update();
+          controls.saveState();
+          const home = {
+            position: camera.position.clone(),
+            target: controls.target.clone(),
+            up: camera.up.clone(),
+            zoom: camera.zoom
+          };
+          viewerApiRef.current = {
+            resetCamera: () => {
+              modelPivot.rotation.set(0, 0, 0);
+              camera.position.copy(home.position);
+              camera.up.copy(home.up);
+              camera.zoom = home.zoom;
+              controls?.target.copy(home.target);
+              camera.lookAt(home.target);
+              camera.updateProjectionMatrix();
+              controls?.update();
+            },
+            rotateModel: (radians: number) => {
+              modelPivot.rotation.y += radians;
+              modelPivot.updateMatrixWorld(true);
+              controls?.update();
+            },
+            setAxisView: (view: AxisView) => {
+              const axis = axisViewVector(THREE, view);
+              const up = axisViewUp(THREE, view);
+              camera.position.copy(fit.center).addScaledVector(axis, fit.distance);
+              camera.up.copy(up);
+              camera.zoom = 1;
+              controls?.target.copy(fit.center);
+              camera.lookAt(fit.center);
+              camera.updateProjectionMatrix();
+              controls?.update();
+            }
+          };
+          setViewerReady(true);
+        }
+
+        const render = (now: number) => {
+          animationFrame = requestAnimationFrame(render);
+          controls?.update();
+          renderer.render(scene, camera);
+          const totalSplats = splats.reduce((sum, splat) => sum + readSplatCount(splat), 0);
+          updateFps(now, fpsWindow, qualityRef, renderer, sparkRenderer, splats, host, setFps, setQualityIndex, totalSplats);
+          if (totalSplats > 0) setSplatCount(totalSplats);
+        };
+        animationFrame = requestAnimationFrame(render);
+
         setState("ready");
         setMessage(hasSegments ? `Spark Viewer 已加载 ${urls.length} 个增量 SPZ 片段。` : "Spark Viewer 已加载真实 SPZ 产物。");
       } catch (error) {
+        cleanup?.();
+        if (cancelled) return;
         setState("error");
         setMessage(error instanceof Error ? error.message : "Spark Viewer 加载失败");
       }
@@ -166,6 +268,8 @@ export function SplatViewer({ modelUrl, segments }: { modelUrl?: string | null; 
     void mountViewer();
     return () => {
       cancelled = true;
+      viewerApiRef.current = null;
+      setViewerReady(false);
       cleanup?.();
     };
   }, [modelUrl, segmentKey, activeSegment, hasSegments]);
@@ -174,6 +278,27 @@ export function SplatViewer({ modelUrl, segments }: { modelUrl?: string | null; 
   return (
     <section className="viewer-shell">
       <div ref={hostRef} className="viewer-canvas" />
+      <div className="viewer-axis-panel" aria-label="视角控制">
+        <button className="axis-button" type="button" onClick={() => viewerApiRef.current?.resetCamera()} disabled={!viewerReady} title="回到初始视角" aria-label="回到初始视角">
+          <Focus size={16} />
+        </button>
+        <div className="axis-grid">
+          <button className="axis-button" type="button" onClick={() => viewerApiRef.current?.setAxisView("x-negative")} disabled={!viewerReady} title="X- 左侧视角" aria-label="X- 左侧视角">X-</button>
+          <button className="axis-button" type="button" onClick={() => viewerApiRef.current?.setAxisView("y-positive")} disabled={!viewerReady} title="Y+ 顶部视角" aria-label="Y+ 顶部视角">Y+</button>
+          <button className="axis-button" type="button" onClick={() => viewerApiRef.current?.setAxisView("x-positive")} disabled={!viewerReady} title="X+ 右侧视角" aria-label="X+ 右侧视角">X+</button>
+          <button className="axis-button" type="button" onClick={() => viewerApiRef.current?.setAxisView("z-negative")} disabled={!viewerReady} title="Z- 背面视角" aria-label="Z- 背面视角">Z-</button>
+          <button className="axis-button" type="button" onClick={() => viewerApiRef.current?.setAxisView("y-negative")} disabled={!viewerReady} title="Y- 底部视角" aria-label="Y- 底部视角">Y-</button>
+          <button className="axis-button" type="button" onClick={() => viewerApiRef.current?.setAxisView("z-positive")} disabled={!viewerReady} title="Z+ 正面视角" aria-label="Z+ 正面视角">Z+</button>
+        </div>
+        <div className="axis-rotate">
+          <button className="axis-button" type="button" onClick={() => viewerApiRef.current?.rotateModel(Math.PI / 2)} disabled={!viewerReady} title="物体左转 90 度" aria-label="物体左转 90 度">
+            <RotateCcw size={15} />
+          </button>
+          <button className="axis-button" type="button" onClick={() => viewerApiRef.current?.rotateModel(-Math.PI / 2)} disabled={!viewerReady} title="物体右转 90 度" aria-label="物体右转 90 度">
+            <RotateCw size={15} />
+          </button>
+        </div>
+      </div>
       {hasSegments ? (
         <div className="viewer-timeline">
           <input
@@ -199,6 +324,69 @@ export function SplatViewer({ modelUrl, segments }: { modelUrl?: string | null; 
       </div>
     </section>
   );
+}
+
+function fitCameraToSplats(THREE: typeof import("three"), camera: PerspectiveCamera, splats: SplatMeshLike[]): { center: Vector3; radius: number; distance: number } | null {
+  const bounds = new THREE.Box3();
+  let hasBounds = false;
+  for (const splat of splats) {
+    const box = splat.getBoundingBox?.(true);
+    if (!box || box.isEmpty()) continue;
+    splat.updateWorldMatrix(true, false);
+    const worldBox = box.clone().applyMatrix4(splat.matrixWorld);
+    if (worldBox.isEmpty()) continue;
+    if (hasBounds) {
+      bounds.union(worldBox);
+    } else {
+      bounds.copy(worldBox);
+      hasBounds = true;
+    }
+  }
+  if (!hasBounds) return null;
+
+  const center = bounds.getCenter(new THREE.Vector3());
+  const size = bounds.getSize(new THREE.Vector3());
+  const radius = Math.max(size.length() / 2, 0.05);
+  const fov = camera.fov * Math.PI / 180;
+  const distance = Math.max(0.5, (radius / Math.sin(fov / 2)) * 1.15);
+  const direction = new THREE.Vector3(0.18, -0.12, 1).normalize();
+
+  camera.position.copy(center).addScaledVector(direction, distance);
+  camera.near = Math.max(0.001, distance / 1000);
+  camera.far = Math.max(1000, distance + radius * 8);
+  camera.lookAt(center);
+  camera.updateProjectionMatrix();
+  return { center, radius, distance };
+}
+
+function axisViewVector(THREE: typeof import("three"), view: AxisView): Vector3 {
+  switch (view) {
+    case "x-positive":
+      return new THREE.Vector3(1, 0, 0);
+    case "x-negative":
+      return new THREE.Vector3(-1, 0, 0);
+    case "y-positive":
+      return new THREE.Vector3(0, 1, 0);
+    case "y-negative":
+      return new THREE.Vector3(0, -1, 0);
+    case "z-negative":
+      return new THREE.Vector3(0, 0, -1);
+    case "z-positive":
+    default:
+      return new THREE.Vector3(0, 0, 1);
+  }
+}
+
+function axisViewUp(THREE: typeof import("three"), view: AxisView): Vector3 {
+  if (view === "y-positive") return new THREE.Vector3(0, 0, -1);
+  if (view === "y-negative") return new THREE.Vector3(0, 0, 1);
+  return new THREE.Vector3(0, 1, 0);
+}
+
+function readSplatCount(splat: SplatMeshLike): number {
+  if (typeof splat.numSplats === "number") return splat.numSplats;
+  const count = splat.splats?.getNumSplats?.();
+  return typeof count === "number" && Number.isFinite(count) ? count : 0;
 }
 
 function updateFps(

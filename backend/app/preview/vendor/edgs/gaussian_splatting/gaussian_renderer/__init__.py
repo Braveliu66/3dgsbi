@@ -34,7 +34,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
     tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
 
-    raster_settings = GaussianRasterizationSettings(
+    raster_settings_kwargs = dict(
         image_height=int(viewpoint_camera.image_height),
         image_width=int(viewpoint_camera.image_width),
         tanfovx=tanfovx,
@@ -47,8 +47,10 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         campos=viewpoint_camera.camera_center,
         prefiltered=False,
         debug=pipe.debug,
-        antialiasing=pipe.antialiasing
     )
+    if "antialiasing" in getattr(GaussianRasterizationSettings, "_fields", ()):
+        raster_settings_kwargs["antialiasing"] = getattr(pipe, "antialiasing", False)
+    raster_settings = GaussianRasterizationSettings(**raster_settings_kwargs)
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
@@ -89,7 +91,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
     if separate_sh:
-        rendered_image, radii, depth_image = rasterizer(
+        rendered_image, radii, depth_image = _unpack_rasterizer_output(rasterizer(
             means3D = means3D,
             means2D = means2D,
             dc = dc,
@@ -98,9 +100,9 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             opacities = opacity,
             scales = scales,
             rotations = rotations,
-            cov3D_precomp = cov3D_precomp)
+            cov3D_precomp = cov3D_precomp))
     else:
-        rendered_image, radii, depth_image = rasterizer(
+        rendered_image, radii, depth_image = _unpack_rasterizer_output(rasterizer(
             means3D = means3D,
             means2D = means2D,
             shs = shs,
@@ -108,7 +110,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             opacities = opacity,
             scales = scales,
             rotations = rotations,
-            cov3D_precomp = cov3D_precomp)
+            cov3D_precomp = cov3D_precomp))
         
     # Apply exposure to rendered image (training only)
     if use_trained_exp:
@@ -127,3 +129,12 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         }
     
     return out
+
+
+def _unpack_rasterizer_output(output):
+    if len(output) == 3:
+        return output
+    if len(output) == 2:
+        rendered_image, radii = output
+        return rendered_image, radii, None
+    raise RuntimeError(f"Unexpected Gaussian rasterizer output size: {len(output)}")

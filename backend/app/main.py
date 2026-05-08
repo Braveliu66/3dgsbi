@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import mimetypes
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -11,15 +12,15 @@ from typing import Any
 import redis
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.algorithms import license_notice_for, normalize_preview_pipeline, runtime_preflight, seed_algorithm_registry
 from app.config import get_settings
-from app.database import Base, SessionLocal, engine, get_db
-from app.models import AlgorithmRegistry, Artifact, Feedback, MediaAsset, Project, Task, TaskEvent, User, utc_now
+from app.database import SessionLocal, get_db, initialize_database_schema
+from app.models import AlgorithmRegistry, Artifact, Feedback, MediaAsset, Project, Task, TaskEvent, User, new_id, utc_now
 from app.resources import collect_resources
 from app.security import (
     create_access_token,
@@ -106,6 +107,7 @@ def task_dict(task: Task) -> dict[str, Any]:
     return {
         "id": task.id,
         "project_id": task.project_id,
+        "project_name": task.project.name if task.project else None,
         "type": task.type,
         "status": task.status,
         "priority": task.priority,
@@ -138,6 +140,23 @@ def artifact_dict(item: Artifact) -> dict[str, Any]:
         "source_version": item.source_version,
         "created_at": iso(item.created_at),
     }
+
+
+def is_ply_artifact(item: Artifact) -> bool:
+    kind = (item.kind or "").lower()
+    file_name = (item.file_name or "").lower()
+    object_uri = (item.object_uri or "").lower()
+    return kind == "ply" or kind.endswith("_ply") or file_name.endswith(".ply") or object_uri.endswith(".ply")
+
+
+def intermediate_ply_path(item: Artifact) -> Path | None:
+    path_value = (item.metadata_json or {}).get("intermediate_ply")
+    if not isinstance(path_value, str) or not path_value:
+        return None
+    path = Path(path_value).expanduser().resolve()
+    if path.suffix.lower() != ".ply" or not path.is_file():
+        return None
+    return path
 
 
 def project_dict(project: Project, include_children: bool = False) -> dict[str, Any]:
@@ -191,14 +210,15 @@ def thumbnail_key(project: Project, media_id: str) -> str:
 def create_thumbnail(uri: str, project: Project, media_id: str) -> tuple[str | None, int | None, int | None]:
     try:
         from PIL import Image, ImageOps
+        from app.preview.image_preprocess import convert_to_rgb, register_optional_heif_support
 
+        register_optional_heif_support()
         with storage.open_file(uri) as handle:
             image = Image.open(handle)
             image = ImageOps.exif_transpose(image)
             width, height = image.size
             image.thumbnail((420, 420))
-            if image.mode not in ("RGB", "L"):
-                image = image.convert("RGB")
+            image = convert_to_rgb(image)
             output = io.BytesIO()
             image.save(output, format="JPEG", quality=86)
             thumb_uri = storage.write_bytes(thumbnail_key(project, media_id), output.getvalue())
@@ -207,12 +227,74 @@ def create_thumbnail(uri: str, project: Project, media_id: str) -> tuple[str | N
         return None, None, None
 
 
+def create_video_thumbnail(uri: str, project: Project, media_id: str) -> tuple[str | None, int | None, int | None, float | None]:
+    temp_path: Path | None = None
+    cap = None
+    try:
+        import cv2
+        from PIL import Image
+
+        resolved_uri = storage.resolve_existing_uri(uri)
+        if resolved_uri.startswith("local://"):
+            video_path = storage.local_path(resolved_uri)
+        else:
+            suffix = Path(storage.key_from_uri(resolved_uri)).suffix or ".video"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                temp_path = Path(tmp.name)
+            storage.download_to_path(resolved_uri, temp_path)
+            video_path = temp_path
+
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            return None, None, None, None
+
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0)
+        duration = frame_count / fps if frame_count > 0 and fps > 0 else None
+        if frame_count > 3:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, min(frame_count - 1, max(1, frame_count // 3)))
+
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ok, frame = cap.read()
+        if not ok or frame is None:
+            return None, None, None, duration
+
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        image = Image.fromarray(frame)
+        width, height = image.size
+        image.thumbnail((420, 420), Image.Resampling.LANCZOS)
+        output = io.BytesIO()
+        image.save(output, format="JPEG", quality=86)
+        thumb_uri = storage.write_bytes(thumbnail_key(project, media_id), output.getvalue())
+        return thumb_uri, width, height, duration
+    except Exception:
+        return None, None, None, None
+    finally:
+        if cap is not None:
+            cap.release()
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+
+
+def first_media_thumbnail(project: Project, exclude_media_id: str | None = None) -> str | None:
+    for item in project.media:
+        if item.id != exclude_media_id and item.thumbnail_uri:
+            return item.thumbnail_uri
+    return None
+
+
 def get_redis() -> redis.Redis:
     return redis.Redis.from_url(settings.redis_url, decode_responses=True)
 
 
 def enqueue_preview_task(task_id: str) -> None:
     get_redis().rpush(settings.preview_queue_name, task_id)
+
+
+def enqueue_fine_task(task_id: str) -> None:
+    get_redis().rpush(settings.fine_queue_name, task_id)
 
 
 def seed_database(db: Session) -> None:
@@ -232,7 +314,7 @@ def seed_database(db: Session) -> None:
 
 @app.on_event("startup")
 def startup() -> None:
-    Base.metadata.create_all(bind=engine)
+    initialize_database_schema()
     storage.ensure_bucket()
     with SessionLocal() as db:
         seed_database(db)
@@ -367,18 +449,16 @@ async def upload_media(
     kind = "image" if content_type.startswith("image/") else "video" if content_type.startswith("video/") else None
     if kind is None:
         suffix = Path(file.filename or "").suffix.lower()
-        kind = "image" if suffix in {".jpg", ".jpeg", ".png", ".webp", ".bmp"} else "video"
+        kind = "image" if suffix in {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"} else "video"
     if project.input_type == "images" and kind != "image":
         raise HTTPException(status_code=400, detail="图片项目只能上传图片")
     if project.input_type == "video" and kind != "video":
         raise HTTPException(status_code=400, detail="视频项目只能上传视频")
 
-    media = MediaAsset(project_id=project.id, kind=kind, object_uri="", file_name=safe_filename(file.filename or "upload.bin"))
-    db.add(media)
-    db.flush()
-    uri, size = await storage.save_upload(file, media_key(project, media.id, media.file_name, kind),)
-    media.object_uri = uri
-    media.file_size = size
+    media_id = new_id()
+    file_name = safe_filename(file.filename or "upload.bin")
+    uri, size = await storage.save_upload(file, media_key(project, media_id, file_name, kind))
+    media = MediaAsset(project_id=project.id, id=media_id, kind=kind, object_uri=uri, file_name=file_name, file_size=size)
     project.total_size_bytes += size
     project.source_version += 1
     media.source_version = project.source_version
@@ -391,6 +471,15 @@ async def upload_media(
         media.height = height
         if thumb_uri and not project.preview_image_uri:
             project.preview_image_uri = media.thumbnail_uri
+    else:
+        thumb_uri, width, height, duration = create_video_thumbnail(uri, project, media.id)
+        media.thumbnail_uri = thumb_uri
+        media.width = width
+        media.height = height
+        media.duration_seconds = duration
+        if thumb_uri and not project.preview_image_uri:
+            project.preview_image_uri = media.thumbnail_uri
+    db.add(media)
     db.commit()
     db.refresh(media)
     return media_dict(media)
@@ -426,7 +515,7 @@ def delete_media(project_id: str, media_id: str, user: User = Depends(get_curren
     project.source_version += 1
     project.updated_at = utc_now()
     if project.preview_image_uri == media.thumbnail_uri:
-        project.preview_image_uri = None
+        project.preview_image_uri = first_media_thumbnail(project, exclude_media_id=media.id)
     if not [item for item in project.media if item.id != media_id]:
         project.status = "CREATED"
     elif project.preview_source_version is not None and project.preview_source_version != project.source_version:
@@ -483,20 +572,55 @@ def create_preview_task(
 
 
 @app.post("/api/projects/{project_id}/tasks/fine")
-def create_fine_task(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
-    project = owned_project(db, project_id, user)
+def create_fine_task(
+    project_id: str,
+    payload: TaskCreatePayload,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    project = owned_project(db, project_id, user, include_children=True)
+    active_task = next((item for item in project.tasks if item.status in {"queued", "running"}), None)
+    if active_task:
+        raise HTTPException(status_code=409, detail="Project already has an active task")
+    image_count = sum(1 for item in project.media if item.kind == "image")
+    if project.input_type != "images":
+        raise HTTPException(status_code=400, detail="Fine reconstruction currently requires an image project")
+    if image_count < 3:
+        raise HTTPException(status_code=400, detail="Fine reconstruction requires at least 3 images")
+
+    options = {
+        **(payload.options or {}),
+        "fine_pipeline": "mobilegs_lmrs",
+        "source_version": project.source_version,
+        "fine_iterations": int((payload.options or {}).get("fine_iterations") or settings.fine_iterations),
+    }
     task = Task(
         project_id=project.id,
         type="fine",
-        status="failed",
+        status="queued",
+        priority=40,
         progress=0,
-        current_stage="not_configured",
-        error_code="ALGORITHM_NOT_CONFIGURED",
-        error_message="精细重建 worker-fine 尚未启用。本批次只启用图片/视频极速预览。",
-        finished_at=utc_now(),
+        current_stage="queued",
+        eta_seconds=settings.fine_expected_seconds_images,
+        options=options,
     )
+    project.status = "FINE_RUNNING"
+    project.error_message = None
     db.add(task)
+    db.flush()
+    emit_event(db, project.id, "task_queued", task_dict(task), task.id)
     db.commit()
+    try:
+        enqueue_fine_task(task.id)
+    except Exception as exc:
+        task.status = "failed"
+        task.error_code = "QUEUE_UNAVAILABLE"
+        task.error_message = f"Redis queue unavailable: {exc}"
+        task.finished_at = utc_now()
+        project.status = "FAILED"
+        project.error_message = task.error_message
+        emit_event(db, project.id, "task_failed", task_dict(task), task.id)
+        db.commit()
     db.refresh(task)
     return task_dict(task)
 
@@ -532,12 +656,16 @@ def list_artifacts(project_id: str, user: User = Depends(get_current_user), db: 
     return {"artifacts": [artifact_dict(item) for item in project.artifacts]}
 
 
-def artifact_url(artifact: Artifact) -> str:
-    presigned = storage.presigned_get_url(artifact.object_uri, settings.artifact_token_expire_seconds)
-    if presigned:
-        return presigned
+def artifact_url(artifact: Artifact, *, download: bool = False) -> str:
     token = create_artifact_token(artifact.id)
-    return f"/api/artifacts/{artifact.id}/file?token={token}"
+    suffix = "&download=1" if download else ""
+    return f"/api/artifacts/{artifact.id}/file?token={token}{suffix}"
+
+
+def artifact_original_ply_url(artifact: Artifact, *, download: bool = False) -> str:
+    token = create_artifact_token(artifact.id)
+    suffix = "&download=1" if download else ""
+    return f"/api/artifacts/{artifact.id}/original-ply/file?token={token}{suffix}"
 
 
 @app.get("/api/artifacts/{artifact_id}/download-url")
@@ -546,38 +674,77 @@ def artifact_download_url(artifact_id: str, user: User = Depends(get_current_use
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
     owned_project(db, artifact.project_id, user)
-    return {"url": artifact_url(artifact), "expires_in_seconds": settings.artifact_token_expire_seconds}
+    return {"url": artifact_url(artifact, download=True), "expires_in_seconds": settings.artifact_token_expire_seconds}
+
+
+@app.get("/api/artifacts/{artifact_id}/original-ply/download-url")
+def artifact_original_ply_download_url(artifact_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    artifact = db.get(Artifact, artifact_id)
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    owned_project(db, artifact.project_id, user)
+    if is_ply_artifact(artifact):
+        return {"url": artifact_url(artifact, download=True), "expires_in_seconds": settings.artifact_token_expire_seconds}
+    if not intermediate_ply_path(artifact):
+        raise HTTPException(status_code=404, detail="Original PLY not found")
+    return {"url": artifact_original_ply_url(artifact, download=True), "expires_in_seconds": settings.artifact_token_expire_seconds}
 
 
 @app.get("/api/artifacts/{artifact_id}/file")
-def artifact_file(artifact_id: str, token: str = Query(...), db: Session = Depends(get_db)):
+def artifact_file(artifact_id: str, token: str = Query(...), download: bool = Query(default=False), db: Session = Depends(get_db)):
     verify_artifact_token(token, artifact_id)
     artifact = db.get(Artifact, artifact_id)
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
-    if artifact.object_uri.startswith("s3://"):
-        raise HTTPException(status_code=400, detail="Use presigned S3 URL")
-    path = storage.local_path(artifact.object_uri)
-    return FileResponse(path, filename=artifact.file_name)
+    uri = storage.resolve_existing_uri(artifact.object_uri)
+    if uri != artifact.object_uri and storage.exists(uri):
+        artifact.object_uri = uri
+        db.commit()
+    return stored_file_response(
+        uri,
+        filename=artifact.file_name,
+        media_type=mimetypes.guess_type(artifact.file_name)[0] or "application/octet-stream",
+        attachment=download,
+    )
+
+
+@app.get("/api/artifacts/{artifact_id}/original-ply/file")
+def artifact_original_ply_file(artifact_id: str, token: str = Query(...), download: bool = Query(default=False), db: Session = Depends(get_db)):
+    verify_artifact_token(token, artifact_id)
+    artifact = db.get(Artifact, artifact_id)
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    if is_ply_artifact(artifact):
+        return artifact_file(artifact_id, token, download, db)
+    path = intermediate_ply_path(artifact)
+    if not path:
+        raise HTTPException(status_code=404, detail="Original PLY not found")
+    return FileResponse(
+        path,
+        filename="original.ply" if download else None,
+        media_type=mimetypes.guess_type("original.ply")[0] or "application/octet-stream",
+    )
 
 
 @app.get("/api/media/{media_id}/thumbnail")
-def media_thumbnail(media_id: str, token: str | None = Query(default=None), db: Session = Depends(get_db)):
+def media_thumbnail(media_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     media = db.get(MediaAsset, media_id)
     if not media or not media.thumbnail_uri:
         raise HTTPException(status_code=404, detail="Thumbnail not found")
+    owned_project(db, media.project_id, user)
     if media.thumbnail_uri.startswith("/api/media/"):
         key = thumbnail_key(media.project, media.id)
         uri = storage.uri_for_key(key)
     else:
         uri = media.thumbnail_uri
-    if uri.startswith("s3://"):
-        url = storage.presigned_get_url(uri, settings.artifact_token_expire_seconds)
-        if url:
-            return RedirectResponse(url)
-        raise HTTPException(status_code=400, detail="S3 thumbnail URL unavailable")
-    path = storage.local_path(uri)
-    return FileResponse(path, media_type="image/jpeg")
+    resolved_uri = storage.resolve_existing_uri(uri)
+    if resolved_uri != media.thumbnail_uri and storage.exists(resolved_uri):
+        media.thumbnail_uri = resolved_uri
+        if media.project.preview_image_uri == uri:
+            media.project.preview_image_uri = resolved_uri
+        db.commit()
+    uri = resolved_uri
+    return stored_file_response(uri, media_type="image/jpeg")
 
 
 @app.get("/api/media/{media_id}/file")
@@ -586,16 +753,47 @@ def media_file(media_id: str, user: User = Depends(get_current_user), db: Sessio
     if not media:
         raise HTTPException(status_code=404, detail="Media not found")
     owned_project(db, media.project_id, user)
-    if media.object_uri.startswith("s3://"):
-        url = storage.presigned_get_url(media.object_uri, settings.artifact_token_expire_seconds)
-        if url:
-            return RedirectResponse(url)
-    return FileResponse(storage.local_path(media.object_uri), filename=media.file_name)
+    uri = storage.resolve_existing_uri(media.object_uri)
+    if uri != media.object_uri and storage.exists(uri):
+        media.object_uri = uri
+        db.commit()
+    return stored_file_response(
+        uri,
+        filename=media.file_name,
+        media_type=mimetypes.guess_type(media.file_name)[0] or "application/octet-stream",
+    )
+
+
+def stored_file_response(uri: str, *, filename: str | None = None, media_type: str | None = None, attachment: bool = False):
+    try:
+        uri = storage.resolve_existing_uri(uri)
+        size = storage.size(uri)
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail="Stored file not found") from exc
+    headers = {"Content-Length": str(size)}
+    if attachment and filename:
+        headers["Content-Disposition"] = f'attachment; filename="{safe_filename(filename)}"'
+    if uri.startswith(("db://", "s3://")):
+        return StreamingResponse(storage.iter_bytes(uri), media_type=media_type or "application/octet-stream", headers=headers)
+    return FileResponse(storage.local_path(uri), filename=filename if attachment else None, media_type=media_type)
 
 
 @app.get("/api/projects/{project_id}/viewer-config")
 def viewer_config(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
     project = owned_project(db, project_id, user, include_children=True)
+    final_artifacts = [item for item in project.artifacts if item.kind in {"final_spz", "lod_rad"}]
+    fresh_final = [item for item in final_artifacts if item.source_version == project.source_version]
+    if fresh_final:
+        artifact = sorted(fresh_final, key=lambda item: (item.kind == "final_spz", item.created_at), reverse=True)[0]
+        return {
+            "status": "ready",
+            "mode": "single",
+            "source": "final",
+            "artifact_id": artifact.id,
+            "model_url": artifact_url(artifact),
+            "format": "rad" if artifact.kind == "lod_rad" or artifact.file_name.lower().endswith(".rad") else "spz",
+            "progressive": False,
+        }
     preview_artifacts = [item for item in project.artifacts if item.kind == "preview_spz"]
     fresh = [item for item in preview_artifacts if item.source_version == project.source_version]
     if fresh:
@@ -608,6 +806,12 @@ def viewer_config(project_id: str, user: User = Depends(get_current_user), db: S
             "model_url": artifact_url(artifact),
             "format": "spz",
             "progressive": False,
+        }
+    if final_artifacts:
+        return {
+            "status": "unavailable",
+            "message": "Final artifact is stale because source media changed; start fine reconstruction again.",
+            "stale": True,
         }
     if preview_artifacts:
         return {
@@ -721,16 +925,23 @@ async def camera_chunk(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     project = owned_project(db, project_id, user)
-    media = MediaAsset(project_id=project.id, kind="video", object_uri="", file_name=safe_filename(file.filename or "camera.webm"))
-    db.add(media)
-    db.flush()
+    media_id = new_id()
+    file_name = safe_filename(file.filename or "camera.webm")
     key = storage_key("users", project.owner_id, "projects", project.id, "raw", "video", f"camera-{segment_index:04d}.webm")
     uri, size = await storage.save_upload(file, key)
-    media.object_uri = uri
-    media.file_size = size
+    media = MediaAsset(project_id=project.id, id=media_id, kind="video", object_uri=uri, file_name=file_name, file_size=size)
     media.quality_flags = {"segment_index": segment_index, "segment_start_seconds": segment_start_seconds, "segment_end_seconds": segment_end_seconds}
     project.total_size_bytes += size
     project.source_version += 1
+    media.source_version = project.source_version
+    thumb_uri, width, height, duration = create_video_thumbnail(uri, project, media.id)
+    media.thumbnail_uri = thumb_uri
+    media.width = width
+    media.height = height
+    media.duration_seconds = duration
+    if thumb_uri and not project.preview_image_uri:
+        project.preview_image_uri = media.thumbnail_uri
+    project.updated_at = utc_now()
     task = Task(
         project_id=project.id,
         type="preview",
@@ -739,6 +950,7 @@ async def camera_chunk(
         current_stage="camera_segment_queued",
         options={"preview_pipeline": "lingbot_spz", "segment_index": segment_index, "source_version": project.source_version},
     )
+    db.add(media)
     db.add(task)
     db.commit()
     try:

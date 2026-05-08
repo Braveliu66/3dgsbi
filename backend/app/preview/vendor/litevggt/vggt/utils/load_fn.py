@@ -300,6 +300,8 @@ def load_image_file_crop(img_path: str, ratio=1.0, target_size=518):
         # Convert to tensor if needed
         if img.ndim == 2:  # for grayscale images
             img = img[..., None]
+        if img.ndim == 3 and img.shape[-1] == 1:
+            img = np.repeat(img, 3, axis=2)
 
         # Set width to target_size (518px or any custom size)
         new_width = target_size
@@ -309,26 +311,34 @@ def load_image_file_crop(img_path: str, ratio=1.0, target_size=518):
 
         # Resize to the new dimensions
         img = cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_AREA)
+        if img.ndim == 2:
+            img = np.repeat(img[..., None], 3, axis=2)
 
         return img
     else:
         # For non-jpeg images (like PNG), handle with OpenCV
         img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            raise ValueError(f"Failed to read image: {img_path}")
+
+        height, width = img.shape[:2]
 
         if img.ndim >= 3 and img.shape[-1] >= 3:
-            img[..., :3] = img[..., [2, 1, 0]]  # Convert from BGR to RGB
+            img = img[..., [2, 1, 0]]  # Convert from BGR/BGRA to RGB
 
         if np.issubdtype(img.dtype, np.integer):
             img = img.astype(np.float32) / np.iinfo(img.dtype).max  # normalize
 
         # Apply ratio scaling if needed
         if ratio != 1.0:
-            height, width = img.shape[:2]
             img = cv2.resize(img, (int(width * ratio), int(height * ratio)), interpolation=cv2.INTER_AREA)
+            height, width = img.shape[:2]
 
         # Convert single channel grayscale image to 3 channels
         if img.ndim == 2:  # for grayscale images
             img = img[..., None]
+        if img.ndim == 3 and img.shape[-1] == 1:
+            img = np.repeat(img, 3, axis=2)
 
         # Set width to target_size (518px or any custom size)
         new_width = target_size
@@ -338,5 +348,7 @@ def load_image_file_crop(img_path: str, ratio=1.0, target_size=518):
 
         # Resize to the new dimensions
         img = cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_AREA)
+        if img.ndim == 2:
+            img = np.repeat(img[..., None], 3, axis=2)
 
         return img

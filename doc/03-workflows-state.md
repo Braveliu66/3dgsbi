@@ -101,9 +101,9 @@ flowchart TD
     FreeSplatter --> Engine
     Engine --> Blur{"检测到模糊素材?"}
     Blur -- 是 --> Deblur["启用 Deblurring 钩子"]
-    Blur -- 否 --> Train["Faster-GS + FastGS 训练"]
+    Blur -- 否 --> Train["mobilegs_lmrs 训练"]
     Deblur --> Train
-    Train --> LM["后期切换 3DGS-LM"]
+    Train --> LM["LM-RS matrix-free Phase 2 / 缺失则失败"]
     LM --> LOD
     LOD --> Save["保存 final 产物和 metrics.json"]
 ```
@@ -181,3 +181,17 @@ sequenceDiagram
 - 只有真实非空 `preview.spz` 上传成功后，任务才进入 `succeeded`，项目进入 `PREVIEW_READY`。
 - viewer config 存在 `preview_spz` 时返回 `mode=single`；存在 `preview_spz_segment` 时返回 `mode=progressive` 和 segment 列表；都不存在时返回 `unavailable`。
 - 当前取消接口只持久化 `canceled` 状态；正在执行的外部算法进程中断和临时目录清理属于后续增强。
+
+## 2026-05-07 Fine Workflow Update
+
+Fine image workflow now runs:
+
+1. Normalize uploaded JPG/PNG into RGB JPEG. Missing EXIF is valid; EXIF orientation is only a pixel-rotation hint.
+2. Analyze blur and keep at least 3 real images.
+3. Run LiteVGGT SfM as the production frontend. If 3-7 images are available, only the LiteVGGT inference batch is padded; scene records remain real images only.
+4. Write COLMAP-compatible `sparse/0` with `images.bin`, `cameras.bin`, and `points3D.bin`; metrics set `sfm_backend=litevggt_colmap_no_exif`.
+5. Train MobileGS. Non-sharp inputs enable DeblurMLP GTnet during the ADAM training phase; motion/mixed uses position moments, defocus adjusts scale/rotation only.
+6. Optional LM-RS refinement runs only when explicitly scheduled. Auto DeblurMLP runs keep the default LM start at the final iteration so training does not optimize the blurred observation with LM-RS unless requested.
+7. Export standard `final.ply`, transcode `final_web.spz`, and write `metrics.json`.
+
+`pycolmap` is no longer an automatic failure recovery path. It is a development diagnostic path only when `fine_sfm_backend=pycolmap` is explicitly provided.

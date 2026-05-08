@@ -1,0 +1,19 @@
+-r ../backend/requirements.txt
+
+# Unified worker algorithm runtime. PyTorch and torchvision come from the
+# pytorch/pytorch cu128 base image to keep CUDA wheels aligned.
+# Transformer Engine is installed separately in Dockerfile so CUDA/cuDNN
+# compile prerequisites fail with a clear error. Keep einops pinned here too:
+# LiteVGGT requires it, and Dockerfile installs it early before TE import checks.
+tqdm==4.67.1
+einops==0.8.0
+scipy==1.15.1
+huggingface_hub==0.30.2
+matplotlib==3.10.1
+hydra-core==1.3.2
+wandb==0.19.8
+lpips==0.1.4
+plyfile==1.1
+rich==13.9.4
+kornia==0.8.0
+loguru==0.7.3

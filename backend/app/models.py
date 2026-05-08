@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -117,6 +117,23 @@ class Artifact(Base):
     task: Mapped[Task] = relationship(back_populates="artifacts")
 
 
+class StoredObject(Base):
+    __tablename__ = "stored_objects"
+
+    key: Mapped[str] = mapped_column(String(1024), primary_key=True)
+    size: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class StoredObjectChunk(Base):
+    __tablename__ = "stored_object_chunks"
+
+    key: Mapped[str] = mapped_column(ForeignKey("stored_objects.key", ondelete="CASCADE"), primary_key=True)
+    chunk_index: Mapped[int] = mapped_column(Integer, primary_key=True)
+    data: Mapped[bytes] = mapped_column(LargeBinary)
+    size: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class Feedback(Base):
     __tablename__ = "feedback"
 
@@ -170,4 +187,3 @@ class TaskEvent(Base):
     event: Mapped[str] = mapped_column(String(80), index=True)
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-

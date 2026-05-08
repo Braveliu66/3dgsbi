@@ -9,7 +9,6 @@ import pycolmap
 import os
 import time
 import tempfile
-from moviepy import VideoFileClip
 from matplotlib import pyplot as plt
 from PIL import Image
 import cv2
@@ -19,6 +18,8 @@ WORKDIR = "../outputs/"
 
 
 def get_rotation_moviepy(video_path):
+    from moviepy import VideoFileClip
+
     clip = VideoFileClip(video_path)
     rotation = 0
 
@@ -264,7 +265,7 @@ def save_frames_to_scene_dir(frames, scene_dir):
     print(f"Saved {len(frames)} frames to {images_dir}")
 
 
-def run_colmap_on_scene(scene_dir):
+def run_colmap_on_scene(scene_dir, max_num_features=512 * 2, max_image_size=512, min_model_size=10, num_threads=8):
     """
     Runs feature extraction, matching, and mapping on all images inside scene_dir/images using pycolmap.
 
@@ -290,8 +291,8 @@ def run_colmap_on_scene(scene_dir):
         database_path,
         image_dir,
         sift_options={
-            "max_num_features": 512 * 2,
-            "max_image_size": 512 * 1,
+            "max_num_features": max_num_features,
+            "max_image_size": max_image_size,
         }
     )
     print(f"Finished feature extraction in {(time.time() - start_time):.2f}s.")
@@ -306,9 +307,9 @@ def run_colmap_on_scene(scene_dir):
     pipeline_options.multiple_models = True
     pipeline_options.max_num_models = 50
     pipeline_options.max_model_overlap = 20
-    pipeline_options.min_model_size = 10
+    pipeline_options.min_model_size = min_model_size
     pipeline_options.extract_colors = True
-    pipeline_options.num_threads = 8
+    pipeline_options.num_threads = num_threads
     pipeline_options.mapper.init_min_num_inliers = 30
     pipeline_options.mapper.init_max_error = 8.0
     pipeline_options.mapper.init_min_tri_angle = 5.0

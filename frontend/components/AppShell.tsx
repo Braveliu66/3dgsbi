@@ -27,7 +27,7 @@ const nav = [
   { href: "/projects", label: "项目控制台", icon: FolderKanban }
 ];
 
-const RESOURCE_REFRESH_MS = 2000;
+const RESOURCE_REFRESH_MS = 1000;
 
 type ResourcePayload = {
   cpu?: Record<string, unknown>;
@@ -179,7 +179,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 <button className="top-task-summary" type="button" onClick={() => setTaskOpen((value) => !value)}>
                   <span className="activity-dot" />
                   <span className="top-task-title" title={activeTask.current_stage || activeTask.type}>
-                    {taskTypeLabel(activeTask.type)} / {activeTask.current_stage || taskStatusLabel(activeTask.status)}
+                    {taskProjectName(activeTask)}
+                    <small className="top-task-stage">({taskTypeLabel(activeTask.type)} · {activeTask.current_stage || taskStatusLabel(activeTask.status)})</small>
                   </span>
                   <span className="top-task-meta">
                     {Math.round(activeTask.progress || 0)}% · {formatEta(activeTask.eta_seconds)}
@@ -191,7 +192,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     {tasks.map((task) => (
                       <Link className="task-popover-row" href={`/projects/${task.project_id}`} key={task.id} onClick={() => setTaskOpen(false)}>
                         <span className="truncate">
-                          <strong>{taskTypeLabel(task.type)}</strong> · {task.current_stage || taskStatusLabel(task.status)}
+                          <strong>{taskProjectName(task)}</strong> <small>({taskTypeLabel(task.type)} · {task.current_stage || taskStatusLabel(task.status)})</small>
                         </span>
                         <span className={`status-pill ${task.status}`}>{Math.round(task.progress || 0)}%</span>
                         <div className="progress-track" style={{ gridColumn: "1 / -1" }} aria-label="任务进度">
@@ -243,6 +244,10 @@ function getRouteLabel(pathname: string): string {
   if (pathname.startsWith("/about")) return "算法合规";
   if (pathname.startsWith("/login")) return "账户登录";
   return "工作台";
+}
+
+function taskProjectName(task: Task): string {
+  return task.project_name?.trim() || task.project_id;
 }
 
 function resourcePercent(value: unknown): string {

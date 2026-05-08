@@ -11,6 +11,7 @@ import { SplatViewer } from "@/components/SplatViewer";
 import { TaskProgress } from "@/components/TaskProgress";
 
 const MIN_INPUT_FRAMES = 1;
+const MIN_FINE_INPUT_FRAMES = 3;
 const MAX_INPUT_FRAMES = 800;
 export default function UploadPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -32,7 +33,7 @@ export default function UploadPage() {
   const totalBytes = useMemo(() => media.reduce((sum, item) => sum + item.file_size, 0), [media]);
   const imageCount = media.filter((item) => item.kind === "image").length;
   const canStartPreview = Boolean(project && media.length > 0 && (inputType === "video" || imageCount >= MIN_INPUT_FRAMES) && !isActiveTask(task));
-  const canStartFine = Boolean(project && media.length > 0 && !isActiveTask(task));
+  const canStartFine = Boolean(project && project.input_type === "images" && imageCount >= MIN_FINE_INPUT_FRAMES && !isActiveTask(task));
 
   useEffect(() => {
     return () => {

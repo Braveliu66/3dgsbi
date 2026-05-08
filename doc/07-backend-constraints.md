@@ -21,7 +21,7 @@
 
 ## 3. 模型权重缓存
 
-所有第三方模型权重必须先进入项目根目录的本地缓存，再由 Docker 构建脚本复制到运行镜像。后续接入任何新模型都按这个规则处理。
+所有第三方模型权重必须先进入项目根目录的本地缓存，再通过 Docker Compose 挂载给 worker 使用。后续接入任何新模型都按这个规则处理。
 
 - 本地缓存路径统一为 `model-cache/<model-name>/...`。
 - 当前 LiteVGGT 权重路径为 `model-cache/litevggt/te_dict.pt`，LingBot-Map 权重路径为 `model-cache/lingbot-map/lingbot-map-long.pt`。

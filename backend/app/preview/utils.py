@@ -11,7 +11,7 @@ from typing import Any
 from app.preview.types import PreviewFailure
 
 
-IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff", ".heic", ".heif"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 VENDOR_ROOT = Path(__file__).resolve().parent / "vendor"
 
@@ -74,4 +74,3 @@ class StageTimer:
 
     def metrics(self) -> dict[str, Any]:
         return {"stage_durations": dict(self.marks)}
-

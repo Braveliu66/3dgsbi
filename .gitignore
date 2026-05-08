@@ -1,5 +1,6 @@
 backend/data/
 data/
+.docker-build-cache/
 frontend/.next/
 frontend/node_modules/
 backend/app/preview/tools/node_modules/

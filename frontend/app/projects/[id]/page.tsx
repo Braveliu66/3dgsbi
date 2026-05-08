@@ -20,6 +20,8 @@ export default function ProjectDetailPage() {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [logTask, setLogTask] = useState<Task | null>(null);
   const [selectedMedia, setSelectedMedia] = useState<NonNullable<Project["media"]>[number] | null>(null);
+  const [showMedia, setShowMedia] = useState(false);
+  const [brokenThumbIds, setBrokenThumbIds] = useState<Set<string>>(() => new Set());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -39,6 +41,7 @@ export default function ProjectDetailPage() {
       setProject(projectData);
       setViewer(viewerData);
       setArtifacts(artifactData.artifacts);
+      setBrokenThumbIds(new Set());
     } catch (err) {
       setError(err instanceof Error ? err.message : "项目加载失败");
     }
@@ -46,10 +49,20 @@ export default function ProjectDetailPage() {
 
   const latestTask = project?.tasks?.[0];
   const media = project?.media ?? [];
+  const imageCount = media.filter((item) => item.kind === "image").length;
   const tasks = project?.tasks ?? [];
   const logs = latestTask?.logs ?? [];
   const showCompactLogs = logs.length > LOG_LIST_THRESHOLD;
-  const canStartFine = Boolean(project && !isActiveTask(latestTask) && (project.status === "PREVIEW_READY" || project.status === "COMPLETED"));
+  const canStartFine = Boolean(project && project.input_type === "images" && imageCount >= 3 && !isActiveTask(latestTask));
+  const downloadableArtifacts = useMemo(() => artifacts.filter((artifact) => !isPlyArtifact(artifact)), [artifacts]);
+  const originalPlyArtifact = useMemo(() => {
+    const plyArtifacts = artifacts.filter(isPlyArtifact).sort(compareArtifactCreatedAtDesc);
+    return plyArtifacts.find((artifact) => artifact.source_version === project?.preview_source_version) ?? plyArtifacts[0] ?? null;
+  }, [artifacts, project?.preview_source_version]);
+  const previewArtifactWithOriginalPly = useMemo(() => {
+    const previewArtifacts = artifacts.filter(hasIntermediatePly).sort(compareArtifactCreatedAtDesc);
+    return previewArtifacts.find((artifact) => artifact.source_version === project?.preview_source_version) ?? previewArtifacts[0] ?? null;
+  }, [artifacts, project?.preview_source_version]);
 
   const storageStats = useMemo(() => {
     const artifactBytes = artifacts.reduce((sum, item) => sum + item.file_size, 0);
@@ -120,6 +133,21 @@ export default function ProjectDetailPage() {
       window.open(artifactUrl(result.url), "_blank", "noopener,noreferrer");
     } catch (err) {
       setError(err instanceof Error ? err.message : "获取下载链接失败");
+    }
+  }
+
+  async function downloadOriginalPly() {
+    setError(null);
+    try {
+      if (originalPlyArtifact) {
+        await downloadArtifact(originalPlyArtifact);
+        return;
+      }
+      if (!previewArtifactWithOriginalPly) return;
+      const result = await api.artifactOriginalPlyDownloadUrl(previewArtifactWithOriginalPly.id);
+      window.open(artifactUrl(result.url), "_blank", "noopener,noreferrer");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "获取原始 PLY 下载链接失败");
     }
   }
 
@@ -195,10 +223,20 @@ export default function ProjectDetailPage() {
               </section>
 
               <section className="stack">
-                <h3>产物</h3>
-                {artifacts.length ? (
+                <div className="panel-head flush">
+                  <h3>产物</h3>
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    onClick={() => void downloadOriginalPly()}
+                    disabled={!originalPlyArtifact && !previewArtifactWithOriginalPly}
+                  >
+                    <Download size={16} />导出原始 PLY
+                  </button>
+                </div>
+                {downloadableArtifacts.length ? (
                   <div className="artifact-list">
-                    {artifacts.map((artifact) => (
+                    {downloadableArtifacts.map((artifact) => (
                       <div className="list-row" style={{ gridTemplateColumns: "minmax(0, 1fr) 92px 44px" }} key={artifact.id}>
                         <span className="truncate" title={artifact.file_name}><FileArchive size={15} /> {artifact.file_name}</span>
                         <span className="muted small">{formatBytes(artifact.file_size)}</span>
@@ -229,42 +267,57 @@ export default function ProjectDetailPage() {
               ) : null}
 
               <section className="stack">
-                <h3>媒体数据</h3>
-                <div className="media-grid dense">
-                  {media.map((item) => {
-                    const thumb = mediaThumbnailUrl(item);
-                    return (
-                      <div
-                        className="media-tile selectable"
-                        title={`${item.file_name} · ${formatBytes(item.file_size)}`}
-                        key={item.id}
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => item.kind === "image" ? setSelectedMedia(item) : undefined}
-                        onKeyDown={(event) => {
-                          if ((event.key === "Enter" || event.key === " ") && item.kind === "image") setSelectedMedia(item);
-                        }}
-                      >
-                        {thumb ? <img src={thumb} alt={item.file_name} /> : item.kind === "image" ? <Images size={22} /> : <Film size={22} />}
-                        <span className="media-name" title={item.file_name}>{item.file_name}</span>
-                        <span className="media-kind">{item.kind === "image" ? "图片" : "视频"}</span>
-                        <button
-                          className="media-delete"
-                          type="button"
-                          aria-label="删除素材"
-                          disabled={busy}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            void deleteMedia(item.id);
+                <div className="panel-head flush">
+                  <h3>媒体数据</h3>
+                  <button className="ghost-button" type="button" onClick={() => setShowMedia((value) => !value)}>
+                    <Images size={16} />{showMedia ? "收起" : `查看 ${media.length} 个`}
+                  </button>
+                </div>
+                {showMedia ? (
+                  <div className="media-grid dense">
+                    {media.map((item) => {
+                      const thumb = brokenThumbIds.has(item.id) ? null : mediaThumbnailUrl(item);
+                      return (
+                        <div
+                          className="media-tile selectable"
+                          title={`${item.file_name} · ${formatBytes(item.file_size)}`}
+                          key={item.id}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => item.kind === "image" ? setSelectedMedia(item) : undefined}
+                          onKeyDown={(event) => {
+                            if ((event.key === "Enter" || event.key === " ") && item.kind === "image") setSelectedMedia(item);
                           }}
                         >
-                          <Trash2 size={14} />
-                        </button>
-                      </div>
-                    );
-                  })}
-                  {!media.length ? <div className="empty-state" style={{ gridColumn: "1 / -1" }}>暂无媒体</div> : null}
-                </div>
+                          {thumb ? (
+                            <img
+                              src={thumb}
+                              alt={item.file_name}
+                              onError={() => setBrokenThumbIds((ids) => new Set(ids).add(item.id))}
+                            />
+                          ) : item.kind === "image" ? <Images size={22} /> : <Film size={22} />}
+                          <span className="media-name" title={item.file_name}>{item.file_name}</span>
+                          <span className="media-kind">{item.kind === "image" ? "图片" : "视频"}</span>
+                          <button
+                            className="media-delete"
+                            type="button"
+                            aria-label="删除素材"
+                            disabled={busy}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void deleteMedia(item.id);
+                            }}
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      );
+                    })}
+                    {!media.length ? <div className="empty-state" style={{ gridColumn: "1 / -1" }}>暂无媒体</div> : null}
+                  </div>
+                ) : (
+                  <div className="empty-state">媒体已折叠，点击查看后加载图片。</div>
+                )}
               </section>
 
               <section className="stack">
@@ -344,4 +397,20 @@ function formatTaskLog(task: Task): string {
   }
   if (!lines.length) return "暂无日志。";
   return lines.join("\n\n");
+}
+
+function isPlyArtifact(artifact: Artifact): boolean {
+  const kind = artifact.kind.toLowerCase();
+  const fileName = artifact.file_name.toLowerCase();
+  const objectUri = artifact.object_uri.toLowerCase();
+  return kind === "ply" || kind.endsWith("_ply") || fileName.endsWith(".ply") || objectUri.endsWith(".ply");
+}
+
+function hasIntermediatePly(artifact: Artifact): boolean {
+  const value = artifact.metadata?.intermediate_ply;
+  return typeof value === "string" && value.length > 0;
+}
+
+function compareArtifactCreatedAtDesc(a: Artifact, b: Artifact): number {
+  return Date.parse(b.created_at) - Date.parse(a.created_at);
 }

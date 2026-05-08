@@ -33,6 +33,11 @@ def run_edgs_preview(
     roma_weight: Path,
     dinov2_weight: Path,
     progress: Progress,
+    colmap_max_num_features: int = 512 * 2,
+    colmap_max_image_size: int = 512,
+    colmap_min_model_size: int = 10,
+    colmap_num_threads: int = 8,
+    fine_profile: bool = False,
 ) -> dict[str, object]:
     """执行 EDGS 预览训练，返回最终 Gaussian PLY 路径和训练指标。"""
 
@@ -65,7 +70,13 @@ def run_edgs_preview(
         save_frames_to_scene_dir(selected_frames, str(scene_dir))
 
         progress("edgs_colmap", 34, "running pycolmap feature extraction/mapping")
-        run_colmap_on_scene(str(scene_dir))
+        run_colmap_on_scene(
+            str(scene_dir),
+            max_num_features=colmap_max_num_features,
+            max_image_size=colmap_max_image_size,
+            min_model_size=colmap_min_model_size,
+            num_threads=colmap_num_threads,
+        )
 
         progress("edgs_config", 44, "initializing EDGS trainer")
         with initialize_config_dir(config_dir=str((edgs_root / "configs").resolve()), version_base="1.1"):
@@ -77,10 +88,10 @@ def run_edgs_preview(
         cfg.gs.dataset.images = "images"
         cfg.gs.opt.TEST_CAM_IDX_TO_LOG = min(12, max(0, selected_count - 1))
         cfg.train.gs_epochs = 30000
-        cfg.gs.opt.opacity_reset_interval = 1_000_000
+        cfg.gs.opt.opacity_reset_interval = 3000 if fine_profile else 1_000_000
         cfg.train.reduce_opacity = True
-        cfg.train.no_densify = True
-        cfg.train.max_lr = True
+        cfg.train.no_densify = not fine_profile
+        cfg.train.max_lr = not fine_profile
         cfg.init_wC.use = True
         cfg.init_wC.matches_per_ref = num_corrs_per_view
         cfg.init_wC.nns_per_ref = 1
@@ -104,7 +115,7 @@ def run_edgs_preview(
         torch.set_float32_matmul_precision("highest")
         roma_state = torch.load(roma_weight, map_location="cuda:0")
         dinov2_state = torch.load(dinov2_weight, map_location="cuda:0")
-        roma_model = roma_indoor(device="cuda:0", weights=roma_state, dinov2_weights=dinov2_state)
+        roma_model = roma_indoor(device="cuda:0", weights=roma_state, dinov2_weights=dinov2_state, use_custom_corr=False)
         roma_model.upsample_preds = False
         roma_model.symmetric = False
         trainer.timer.start()

@@ -1,6 +1,6 @@
 import type { AlgorithmEntry, Artifact, AuthResponse, MediaAsset, Project, RuntimePreflight, Task, User, ViewerConfig } from "@/lib/types";
 
-export const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
+export const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
 const TOKEN_KEY = "three_dgs_token";
 
 export function getToken(): string | null {
@@ -114,6 +114,8 @@ export const api = {
   cancelTask: (id: string) => request<Task>(`/api/tasks/${id}/cancel`, { method: "POST" }),
   artifacts: (projectId: string) => request<{ artifacts: Artifact[] }>(`/api/projects/${projectId}/artifacts`),
   artifactDownloadUrl: (artifactId: string) => request<{ url: string; expires_in_seconds: number }>(`/api/artifacts/${artifactId}/download-url`),
+  artifactOriginalPlyDownloadUrl: (artifactId: string) =>
+    request<{ url: string; expires_in_seconds: number }>(`/api/artifacts/${artifactId}/original-ply/download-url`),
   viewerConfig: (projectId: string) => request<ViewerConfig>(`/api/projects/${projectId}/viewer-config`),
   feedback: (payload: { title: string; content: string; project_id?: string }) =>
     request<Record<string, unknown>>("/api/feedback", { method: "POST", body: JSON.stringify(payload) })
@@ -131,7 +133,7 @@ export function artifactUrl(path: string): string {
 }
 
 export function mediaThumbnailUrl(media: MediaAsset): string | null {
-  if (!media.thumbnail_uri && media.kind !== "image") return null;
+  if (!media.thumbnail_uri) return null;
   return authenticatedAssetPath(`/api/media/${media.id}/thumbnail`);
 }
 

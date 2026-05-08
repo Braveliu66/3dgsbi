@@ -147,10 +147,8 @@ users/{user_id}/projects/{project_id}/preview/preview.spz
 users/{user_id}/projects/{project_id}/preview/preview_lod1.rad
 users/{user_id}/projects/{project_id}/final/final.ply
 users/{user_id}/projects/{project_id}/final/final_web.spz
-users/{user_id}/projects/{project_id}/final/lod/final_lod0.rad
-users/{user_id}/projects/{project_id}/final/lod/final_lod1.rad
-users/{user_id}/projects/{project_id}/final/lod/final_lod2.rad
-users/{user_id}/projects/{project_id}/final/lod/final_lod3.rad
+users/{user_id}/projects/{project_id}/final/metrics.json
+users/{user_id}/projects/{project_id}/final/lod/final_lod.rad
 users/{user_id}/projects/{project_id}/exports/final_mesh.glb
 users/{user_id}/projects/{project_id}/logs/{task_id}.log
 users/{user_id}/projects/{project_id}/metrics/{task_id}.json
@@ -339,3 +337,32 @@ Worker 返回结果：
 - 视频预览任务创建前要求已上传视频；video-worker 使用 LingBot-Map 按完整时长采样，少于配置最小帧数时标记失败且不创建 artifact。
 - 实时摄像头分片进入 `preview_camera_tasks`，camera-worker 使用 LingBot-Map streaming 处理，成功后创建 `preview_spz_segment` artifact，metadata 记录 `segment_index`、时间窗口、LOD 和估算 splat 数。
 - `Task.options.input_frame_policy` 记录 `min_input_frames`、`max_input_frames`、`available_input_frames` 和 `selected_input_frames`。
+
+## 8. 2026-05-07 Fine API Metrics
+
+Fine tasks accept uploaded JPG/PNG images without EXIF camera metadata. Valid task options include:
+
+- `fine_sfm_backend=litevggt` by default. `fine_sfm_backend=pycolmap` is explicit development diagnostics only.
+- `fine_deblur_enabled=auto|true|false`. `auto` enables DeblurMLP for `motion`、`defocus`、`mixed` blur modes and disables it for `sharp`.
+- `fine_deblur_mode=motion|defocus|mixed|sharp` can override blur analysis.
+- `fine_deblur_num_moments` controls the DeblurMLP motion branch moment count.
+- `fine_lm_start_iter` explicitly schedules LM-RS. When DeblurMLP auto-enables and this option is absent, LM-RS starts at the final iteration by default.
+
+Fine `metrics.json` now includes:
+
+```json
+{
+  "sfm_backend": "litevggt_colmap_no_exif",
+  "litevggt_real_images": 6,
+  "litevggt_padding_images": 2,
+  "sfm_sparse_points": 250000,
+  "deblur_mlp_enabled": true,
+  "deblur_algorithm": "Deblurring-3DGS_GTnet",
+  "deblur_source_commit": "e63366b8581c0fde2fda0ab1aea99518da2e2f10",
+  "deblur_mlp_use_position_moments": true,
+  "deblur_mlp_num_moments": 4,
+  "compact_box_rasterizer": {
+    "available": true
+  }
+}
+```

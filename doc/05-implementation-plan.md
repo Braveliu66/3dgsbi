@@ -18,7 +18,7 @@
 | 数据库 | PostgreSQL |
 | 队列与缓存 | Redis |
 | 对象存储 | MinIO，生产或实验部署可换 S3 |
-| Worker | Python GPU Worker，调用真实算法仓库 |
+| Worker | Python GPU Worker，调用项目融合算法代码和已登记真实算法组件 |
 | 资源监控 | NVML / nvidia-smi / psutil |
 | 部署 | Docker Compose 起步，后续拆分多 GPU Worker |
 
@@ -119,15 +119,18 @@
 
 交付内容：
 
-- 精细重建任务入口。
-- Faster-GS 合成引擎适配。
-- Deblurring、FreeSplatter、3DGS-LM 的条件启用接口。
+- 图片项目精细重建任务入口，可直接从上传素材启动，不要求先完成极速预览。
+- 默认精细管线 `mobilegs_lmrs`：复用 LiteVGGT 生成无 EXIF 依赖的 COLMAP 兼容 SfM，接入 DeblurMLP-MobileGS，pycolmap 仅显式诊断，fine 不再依赖 EDGS/RoMA/romatch。
+- `worker-preview` 与 `worker-fine` 复用同一个统一 CUDA worker 镜像和同一个 `model-cache`，不创建第二套 conda/CUDA 11.x 环境。
+- FastGS 官方仓库只登记为后续可选参考；当前不整仓 vendoring，只把关键算法思想转化为本系统参数调度和训练流程。
+- DeblurMLP 已作为训练期模糊观测模型接入；FreeSplatter 仍作为后续条件启用接口。LM-RS Phase 2 已接入 matrix-free wrapper，runtime 会先检测 `get_JTv/get_Diag/get_JTJv` 和 Compact Box patch marker，缺失时失败而不是记录伪成功 fallback。
 - `metrics.json` 保存和展示。
 
 验证：
 
-- 精细重建产出 `final.ply`、`final_web.spz`、`final_lod0.rad` 到 `final_lod3.rad`。
-- Viewer 能优先加载低细节，再根据帧率加载高细节。
+- 精细重建产出真实非空 `final.ply`、`final_web.spz` 和 `metrics.json`。
+- RAD 只在配置真实转换器时生成 `final_lod.rad`；未配置时任务仍可成功，但不会创建假 RAD。
+- Viewer 优先加载同一 `source_version` 的 `final_spz`，没有最终产物时才回退极速预览。
 
 ### M7：Mesh 导出、分享、反馈和管理面板
 
@@ -177,10 +180,22 @@
 
 ## 6. 当前批次落地状态
 
-本批次已完成 M1-M3 的主要工程闭环，并保留 M4 真实算法要求：
+本批次已完成 M1-M4 的主要工程闭环，并开始落地 M6 图片精细重建：
 
 - FastAPI API、Next.js 前端、登录页、项目页、上传页、详情页、管理页、反馈页和关于页已具备可启动骨架。
 - PostgreSQL 目标模型、Alembic、Redis 任务队列、MinIO 对象存储适配、独立 preview worker 已接入。
 - 本机单元测试使用 SQLite 和本地对象存储后端，验证认证、权限隔离、任务入队、worker 失败路径和禁止假 artifact。
 - Docker Compose 已覆盖 backend、worker、postgres、redis、minio、frontend；真实算法 bootstrap 仍独立执行，不在 API 启动时下载仓库或权重。
 - 当前成功产物仍只允许来自真实 LiteVGGT → EDGS → Spark-SPZ 命令输出；未配置算法时任务失败且 artifact 表为空。
+- Docker Compose 新增 `worker-fine`，默认精细管线为 `mobilegs_lmrs`，直接消费图片项目并输出 `final.ply`、`final_web.spz`、`metrics.json`。
+- FastGS 登记为 `FastGS Reference` 可选项，不作为默认主干，也不要求独立下载官方仓库或新建 CUDA 11.x/conda 环境。
+
+## 7. 2026-05-07 Implementation Update
+
+- M6 fine pipeline is now LiteVGGT-first and production-only: no automatic `pycolmap` fallback. `pycolmap` is an explicit diagnostic option and is not installed in the production worker requirements.
+- Fine input contract is JPG/PNG images. Missing EXIF camera metadata is normal; LiteVGGT estimates camera/intrinsics/depth/point cloud from pixels.
+- LiteVGGT batch padding is internal to inference. Real image records and COLMAP sparse output exclude padded duplicates.
+- DeblurMLP is implemented as a compact local integration of Deblurring-3DGS GTnet (`e63366b8581c0fde2fda0ab1aea99518da2e2f10`): Fourier embedding, scale/rotation branch, and optional position-moment branch. No Deblurring-3DGS repository environment is vendored.
+- GTnet parameters are added to the same Gaussian optimizer. Topology updates skip the `GTnet` parameter group so LM-RS/MobileGS densify and prune operations keep working.
+- Worker dependency goal: one PyTorch 2.7.1/cu128 baseline, system cuDNN headers, one Transformer Engine build, one patched LM-RS rasterizer, one `simple_knn`, and one `fused_ssim`. Do not add FlashInfer, Kaolin, Open3D, Gradio, duplicate torch/CUDA, or pip cuDNN.
+- Tests now cover LiteVGGT-only routing, no-EXIF image normalization, DeblurMLP branch shapes, optimizer attachment, and static Docker dependency checks.

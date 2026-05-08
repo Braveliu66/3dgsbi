@@ -63,6 +63,7 @@ export interface MediaAsset {
 export interface Task {
   id: string;
   project_id: string;
+  project_name?: string | null;
   type: "preview" | "fine" | "lod" | "mesh_export";
   status: "queued" | "running" | "succeeded" | "failed" | "canceled";
   priority?: number;
@@ -125,7 +126,7 @@ export interface ViewerConfig {
   segments?: ViewerSegment[];
   lods?: ViewerLod[];
   progressive?: boolean;
-  format?: "spz";
+  format?: "spz" | "rad";
   message?: string;
   stale?: boolean;
 }
@@ -172,6 +173,7 @@ export interface RuntimePreflight {
   torch: Record<string, unknown>;
   transformer_engine: Record<string, unknown>;
   edgs_cuda_extensions?: Record<string, unknown>;
+  fine_runtime?: Record<string, unknown>;
   lingbot_runtime?: Record<string, unknown>;
   spz_converter?: Record<string, unknown>;
   algorithms: RuntimePreflightAlgorithm[];

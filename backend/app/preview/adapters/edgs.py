@@ -18,7 +18,7 @@ def run(ctx: PreviewContext) -> PreviewResult:
     output_dir = ctx.work_dir / "edgs_output"
     num_ref_views = int(ctx.options.get("edgs_num_ref_views") or 16)
     num_corrs = int(ctx.options.get("edgs_num_corrs_per_view") or 20_000)
-    num_steps = int(ctx.options.get("edgs_preview_steps") or 1_000)
+    num_steps = int(ctx.options.get("edgs_preview_steps") or 200)
     max_size = int(ctx.options.get("edgs_max_image_size") or 1024)
     roma_weight = require_file(ctx.model_path("roma", "roma_indoor.pth"), "ROMA_WEIGHT_MISSING", "RoMA indoor weight")
     dinov2_weight = require_file(ctx.model_path("roma", "dinov2_vitl14_pretrain.pth"), "DINOV2_WEIGHT_MISSING", "DINOv2 ViT-L/14 weight")

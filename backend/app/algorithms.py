@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -8,12 +9,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
-from app.models import AlgorithmRegistry
+from app.models import AlgorithmRegistry, WorkerHeartbeat
 from app.preview.io.spz import locate_spark_cli
+from app.preview.utils import prepend_sys_path
+from app.preview.weights import weight_file_status
 from app.resources import collect_gpu, python_info, torch_info
 
 
 VENDOR_ROOT = Path(__file__).resolve().parent / "preview" / "vendor"
+FINE_ROOT = Path(__file__).resolve().parent / "fine"
 
 
 ALGORITHMS: list[dict[str, Any]] = [
@@ -41,7 +45,7 @@ ALGORITHMS: list[dict[str, Any]] = [
         "commands": {},
         "source_type": "bundled",
         "license_notice": "EDGS is limited to non-commercial academic/personal use.",
-        "notes": "Bundled EDGS preview Gaussian optimizer; CUDA extensions are compiled in worker-preview.",
+        "notes": "Bundled EDGS preview Gaussian optimizer; CUDA extensions are compiled in the unified worker image.",
     },
     {
         "name": "LingBot-Map",
@@ -70,17 +74,43 @@ ALGORITHMS: list[dict[str, Any]] = [
         "notes": "Spark-readable SPZ conversion/validation.",
     },
     {
-        "name": "Fine Reconstruction Stack",
+        "name": "MobileGS Fine (LiteVGGT + DeblurMLP + LM-RS)",
         "repo_url": None,
-        "license": None,
+        "license": "Project orchestration; LiteVGGT MIT; Deblurring-3DGS/LM-RS/3DGS research use",
         "commit_hash_setting": None,
+        "local_path": FINE_ROOT / "runner.py",
+        "enabled": True,
+        "weight_paths": ["litevggt/te_dict.pt"],
+        "commands": {},
+        "source_type": "system",
+        "license_notice": "Fine pipeline reuses LiteVGGT SfM, Deblurring-3DGS GTnet ideas, and LM-RS matrix-free optimization. EDGS/RoMA is not required for fine reconstruction.",
+        "notes": "Default image fine reconstruction pipeline: JPG/PNG normalization, LiteVGGT COLMAP-compatible no-EXIF SfM, DeblurMLP-MobileGS training, FastGS-style densification/pruning, patched LM-RS Compact Box rasterizer, optional LM-RS matrix-free Phase 2, and Spark SPZ conversion. pycolmap is explicit diagnostics only.",
+    },
+    {
+        "name": "Deblurring-3DGS GTnet",
+        "repo_url": "https://github.com/benhenryL/Deblurring-3D-Gaussian-Splatting",
+        "license": "Research/non-commercial risk; verify upstream terms before commercial use",
+        "commit_hash_setting": "deblurring_3dgs_repo_commit",
+        "local_path": FINE_ROOT / "deblur_mlp.py",
+        "enabled": True,
+        "weight_paths": [],
+        "commands": {},
+        "source_type": "adapted_module",
+        "license_notice": "Only the GTnet/Fourier embedding training-time blur model is adapted locally; the upstream environment and full repository are not vendored.",
+        "notes": "DeblurMLP models blurred observations during training. It does not export deblurred 2D images and final output remains a standard sharp Gaussian PLY.",
+    },
+    {
+        "name": "FastGS Reference",
+        "repo_url": "https://github.com/MrNeRF/FastGS",
+        "license": "Research license, see upstream",
+        "commit_hash_setting": "fastgs_repo_commit",
         "local_path": None,
         "enabled": False,
         "weight_paths": [],
         "commands": {},
-        "source_type": "reserved",
-        "license_notice": None,
-        "notes": "Reserved for Faster-GS/FastGS/Deblurring-3DGS/3DGS-LM in worker-fine.",
+        "source_type": "optional_reference",
+        "license_notice": "Registered as an optional algorithm reference only; official FastGS repo is not vendored or required by the default fine path.",
+        "notes": "Reference for future selective CUDA/kernel optimization. It must be compiled inside the existing worker CUDA/Python environment if enabled later.",
     },
 ]
 
@@ -145,26 +175,36 @@ def runtime_preflight(db: Session, settings: Settings | None = None) -> dict[str
     algorithms = []
     errors: list[str] = []
     warnings: list[str] = []
+    preview_workers = preview_worker_status(db)
+    fine_workers = fine_worker_status(db)
     for item in db.scalars(select(AlgorithmRegistry).order_by(AlgorithmRegistry.name)).all():
         issues = []
         module_status = bundled_module_status(item.name)
         weights_ready = True
+        weight_statuses = []
         extensions_ready = True
         spz_converter_ready = spark_converter_status()
         if item.enabled:
             if item.local_path and not Path(item.local_path).exists():
                 issues.append(f"bundled source missing: {item.local_path}")
             for weight_path in item.weight_paths or []:
-                if not Path(weight_path).exists():
+                status = weight_file_status(Path(weight_path))
+                weight_statuses.append(status)
+                if not status["exists"]:
                     issues.append(f"weight missing: {weight_path}")
                     weights_ready = False
             if not module_status.get("available", True):
                 issues.append(f"bundled module import failed: {module_status.get('error')}")
             if item.name == "EDGS":
                 edgs_ext = extension_pair_status()
-                extensions_ready = bool(edgs_ext["available"])
+                extensions_ready = bool(edgs_ext["available"] or preview_workers["available"])
                 if not extensions_ready:
-                    issues.append(f"EDGS CUDA extensions missing: {edgs_ext['error']}")
+                    issues.append("worker-preview heartbeat missing and backend EDGS CUDA extensions unavailable")
+            if item.name == "MobileGS Fine (LiteVGGT + DeblurMLP + LM-RS)":
+                fine_runtime = fine_runtime_status()
+                extensions_ready = bool(fine_runtime["available"] or fine_workers["available"])
+                if not extensions_ready:
+                    issues.append("worker-fine heartbeat missing and backend fine CUDA runtime unavailable")
             if item.name == "Spark SPZ":
                 if not spz_converter_ready["available"]:
                     issues.append(f"Spark SPZ converter unavailable: {spz_converter_ready['error']}")
@@ -181,6 +221,7 @@ def runtime_preflight(db: Session, settings: Settings | None = None) -> dict[str
                 "commit_hash": item.commit_hash,
                 "local_path": item.local_path,
                 "weight_paths": item.weight_paths or [],
+                "weights": weight_statuses,
                 "commands": item.commands or {},
                 "source_type": item.source_type,
                 "bundled": item.source_type == "bundled",
@@ -203,12 +244,73 @@ def runtime_preflight(db: Session, settings: Settings | None = None) -> dict[str
         "gpu": gpu,
         "torch": torch,
         "transformer_engine": import_check("transformer_engine"),
-        "edgs_cuda_extensions": extension_pair_status(),
+        "edgs_cuda_extensions": {**extension_pair_status(), "worker_preview": preview_workers},
+        "fine_runtime": {**fine_runtime_status(), "worker_fine": fine_workers},
         "lingbot_runtime": {"flashinfer": import_check("flashinfer"), "sdpa_fallback": True},
         "spz_converter": spark_converter_status(),
         "algorithms": algorithms,
         "errors": errors,
         "warnings": warnings,
+    }
+
+
+def preview_worker_status(db: Session) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    workers = db.scalars(select(WorkerHeartbeat).where(WorkerHeartbeat.worker_id.like("preview-%"))).all()
+    active = []
+    for item in workers:
+        last_seen = item.last_seen_at
+        if last_seen.tzinfo is None:
+            last_seen = last_seen.replace(tzinfo=timezone.utc)
+        age_seconds = (now - last_seen.astimezone(timezone.utc)).total_seconds()
+        if age_seconds <= 90:
+            active.append(
+                {
+                    "worker_id": item.worker_id,
+                    "hostname": item.hostname,
+                    "gpu_name": item.gpu_name,
+                    "gpu_memory_total": item.gpu_memory_total,
+                    "gpu_memory_used": item.gpu_memory_used,
+                    "gpu_utilization": item.gpu_utilization,
+                    "age_seconds": round(age_seconds, 1),
+                }
+            )
+    return {
+        "available": bool(active),
+        "active_count": len(active),
+        "stale_count": max(0, len(workers) - len(active)),
+        "workers": active,
+        "note": "EDGS CUDA extensions are compiled and smoke-checked in the unified worker image.",
+    }
+
+
+def fine_worker_status(db: Session) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    workers = db.scalars(select(WorkerHeartbeat).where(WorkerHeartbeat.worker_id.like("fine-%"))).all()
+    active = []
+    for item in workers:
+        last_seen = item.last_seen_at
+        if last_seen.tzinfo is None:
+            last_seen = last_seen.replace(tzinfo=timezone.utc)
+        age_seconds = (now - last_seen.astimezone(timezone.utc)).total_seconds()
+        if age_seconds <= 90:
+            active.append(
+                {
+                    "worker_id": item.worker_id,
+                    "hostname": item.hostname,
+                    "gpu_name": item.gpu_name,
+                    "gpu_memory_total": item.gpu_memory_total,
+                    "gpu_memory_used": item.gpu_memory_used,
+                    "gpu_utilization": item.gpu_utilization,
+                    "age_seconds": round(age_seconds, 1),
+                }
+            )
+    return {
+        "available": bool(active),
+        "active_count": len(active),
+        "stale_count": max(0, len(workers) - len(active)),
+        "workers": active,
+        "note": "worker-fine runs from the same CUDA/PyTorch worker image and model-cache as preview, but fine tasks do not require EDGS/RoMA weights.",
     }
 
 
@@ -224,6 +326,8 @@ def bundled_module_status(name: str) -> dict[str, Any]:
     modules = {
         "LiteVGGT": "app.preview.vendor.litevggt_runtime",
         "EDGS": "app.preview.vendor.edgs_runtime",
+        "MobileGS Fine (LiteVGGT + DeblurMLP + LM-RS)": "app.fine.runner",
+        "Deblurring-3DGS GTnet": "app.fine.deblur_mlp",
         "LingBot-Map": "app.preview.vendor.lingbot_runtime",
         "Spark SPZ": "app.preview.io.spz",
     }
@@ -234,13 +338,83 @@ def bundled_module_status(name: str) -> dict[str, Any]:
 def extension_pair_status() -> dict[str, Any]:
     raster = import_check("diff_gaussian_rasterization")
     knn = import_check("simple_knn")
-    available = bool(raster.get("available") and knn.get("available"))
+    fused = import_check("fused_ssim")
+    available = bool(raster.get("available") and knn.get("available") and fused.get("available"))
     return {
         "available": available,
         "diff_gaussian_rasterization": raster,
         "simple_knn": knn,
-        "error": None if available else "diff_gaussian_rasterization/simple_knn import failed",
+        "fused_ssim": fused,
+        "error": None if available else "diff_gaussian_rasterization/simple_knn/fused_ssim import failed",
     }
+
+
+def fine_runtime_status() -> dict[str, Any]:
+    torch_status = torch_info()
+    spark_status = spark_converter_status()
+    modules = {
+        "litevggt": litevggt_runtime_status(),
+        "transformer_engine": import_check("transformer_engine"),
+        "deblur_mlp": import_check("app.fine.deblur_mlp"),
+        "diff_gaussian_rasterization": import_check("diff_gaussian_rasterization"),
+        "simple_knn": import_check("simple_knn"),
+        "fused_ssim": import_check("fused_ssim"),
+    }
+    optional_modules = {
+        "pycolmap_diagnostic": import_check("pycolmap"),
+    }
+    modules["lmrs_matrix_free"] = lmrs_matrix_free_status(modules["diff_gaussian_rasterization"])
+    modules["compact_box"] = compact_box_status(modules["diff_gaussian_rasterization"])
+    available = bool(
+        torch_status.get("available")
+        and torch_status.get("cuda_available")
+        and spark_status.get("available")
+        and all(item.get("available") for item in modules.values())
+    )
+    return {
+        "available": available,
+        "torch_cuda": torch_status,
+        "spark_spz": spark_status,
+        **modules,
+        **optional_modules,
+        "error": None if available else "CUDA torch/Spark SPZ/LiteVGGT/transformer_engine/DeblurMLP/LM-RS rasterizer/Compact Box/simple_knn/fused_ssim check failed",
+    }
+
+
+def litevggt_runtime_status() -> dict[str, Any]:
+    try:
+        with prepend_sys_path(VENDOR_ROOT / "litevggt"):
+            from vggt.models.vggt import VGGT
+
+        return {"available": True, "symbol": VGGT.__name__}
+    except Exception as exc:
+        return {"available": False, "error": str(exc)}
+
+
+def lmrs_matrix_free_status(raster_status: dict[str, Any]) -> dict[str, Any]:
+    if not raster_status.get("available"):
+        return {"available": False, "error": "diff_gaussian_rasterization import failed"}
+    try:
+        module = __import__("diff_gaussian_rasterization")
+        extension = getattr(module, "_C", None)
+        missing = [name for name in ("get_JTv", "get_Diag", "get_JTJv") if not hasattr(extension, name)]
+        if missing:
+            return {"available": False, "error": f"missing LM-RS matrix-free symbols: {', '.join(missing)}"}
+        return {"available": True, "symbols": ["get_JTv", "get_Diag", "get_JTJv"]}
+    except Exception as exc:
+        return {"available": False, "error": str(exc)}
+
+
+def compact_box_status(raster_status: dict[str, Any]) -> dict[str, Any]:
+    if not raster_status.get("available"):
+        return {"available": False, "error": "diff_gaussian_rasterization import failed"}
+    try:
+        module = __import__("diff_gaussian_rasterization")
+        if bool(getattr(module, "MOBILEGS_COMPACT_BOX", False)):
+            return {"available": True, "backend": "fastgs_compact_box_on_lmrs"}
+        return {"available": False, "error": "missing MOBILEGS_COMPACT_BOX marker"}
+    except Exception as exc:
+        return {"available": False, "error": str(exc)}
 
 
 def spark_converter_status() -> dict[str, Any]:

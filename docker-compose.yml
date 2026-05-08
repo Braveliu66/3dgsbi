@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:16-bookworm
+    restart: unless-stopped
     environment:
       POSTGRES_DB: three_dgs
       POSTGRES_USER: three_dgs
@@ -9,85 +10,161 @@ services:
       - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U three_dgs -d three_dgs"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
   redis:
     image: redis:7-bookworm
+    restart: unless-stopped
     ports:
       - "6379:6379"
-
-  minio:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    volumes:
-      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
   backend:
+    restart: unless-stopped
     build:
-      context: .
-      dockerfile: backend/Dockerfile
+      context: ./backend
+      dockerfile: Dockerfile
+      cache_from:
+        - type=local,src=.docker-build-cache/backend
+      cache_to:
+        - type=local,dest=.docker-build-cache/backend,mode=max
     environment:
       DATABASE_URL: postgresql+psycopg://three_dgs:three_dgs@postgres:5432/three_dgs
       REDIS_URL: redis://redis:6379/0
-      STORAGE_BACKEND: s3
-      S3_ENDPOINT_URL: http://minio:9000
-      S3_ACCESS_KEY: minioadmin
-      S3_SECRET_KEY: minioadmin
-      S3_BUCKET: three-dgs
+      STORAGE_BACKEND: local
+      STORAGE_ROOT: /app/data/storage
+      WORK_ROOT: /app/data/work
       SECRET_KEY: change-this-for-deploy
       MODEL_CACHE_DIR: /model-cache
+      MODEL_AUTO_DOWNLOAD: "false"
     depends_on:
-      - postgres
-      - redis
-      - minio
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    gpus: all
     ports:
       - "8000:8000"
     volumes:
+      - ./backend/app:/app/app
       - ./model-cache:/model-cache
+      - ./data/storage:/app/data/storage
+      - ./data/work:/app/data/work
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
 
   worker-preview:
+    restart: unless-stopped
+    image: 3dgsbi-worker:local
     build:
       context: .
       dockerfile: worker/Dockerfile
-      target: worker-preview
+      target: worker
+      args:
+        WORKER_BASE_IMAGE: ${WORKER_BASE_IMAGE:-docker.m.daocloud.io/pytorch/pytorch:2.7.1-cuda12.8-cudnn9-devel}
+      cache_from:
+        - type=local,src=.docker-build-cache/worker
+      cache_to:
+        - type=local,dest=.docker-build-cache/worker,mode=max
+    command: ["python", "-m", "app.worker_bootstrap"]
     environment:
       DATABASE_URL: postgresql+psycopg://three_dgs:three_dgs@postgres:5432/three_dgs
       REDIS_URL: redis://redis:6379/0
-      STORAGE_BACKEND: s3
-      S3_ENDPOINT_URL: http://minio:9000
-      S3_ACCESS_KEY: minioadmin
-      S3_SECRET_KEY: minioadmin
-      S3_BUCKET: three-dgs
+      STORAGE_BACKEND: local
+      STORAGE_ROOT: /app/data/storage
+      WORK_ROOT: /app/data/work
       SECRET_KEY: change-this-for-deploy
       MODEL_CACHE_DIR: /model-cache
+      MODEL_AUTO_DOWNLOAD: "true"
+      MODEL_DOWNLOAD_PREFER_HF_MIRROR: "true"
+      TORCH_HOME: /model-cache/torch
+      HF_HOME: /model-cache/huggingface
+      HF_HUB_CACHE: /model-cache/huggingface/hub
+      XDG_CACHE_HOME: /model-cache/xdg
+      TORCH_EXTENSIONS_DIR: /model-cache/torch_extensions
     depends_on:
-      - backend
-      - redis
-      - minio
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     gpus: all
     volumes:
+      - ./backend/app:/app/app
       - ./model-cache:/model-cache
-      - worker-work:/app/data/work
+      - ./data/storage:/app/data/storage
+      - ./data/work:/app/data/work
+
+  worker-fine:
+    restart: unless-stopped
+    image: 3dgsbi-worker:local
+    pull_policy: never
+    command: ["python", "-m", "app.fine_worker"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://three_dgs:three_dgs@postgres:5432/three_dgs
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_BACKEND: local
+      STORAGE_ROOT: /app/data/storage
+      WORK_ROOT: /app/data/work
+      SECRET_KEY: change-this-for-deploy
+      MODEL_CACHE_DIR: /model-cache
+      MODEL_AUTO_DOWNLOAD: "true"
+      MODEL_DOWNLOAD_PREFER_HF_MIRROR: "true"
+      FINE_RECONSTRUCTION_ENABLED: "true"
+      TORCH_HOME: /model-cache/torch
+      HF_HOME: /model-cache/huggingface
+      HF_HUB_CACHE: /model-cache/huggingface/hub
+      XDG_CACHE_HOME: /model-cache/xdg
+      TORCH_EXTENSIONS_DIR: /model-cache/torch_extensions
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    gpus: all
+    volumes:
+      - ./backend/app:/app/app
+      - ./model-cache:/model-cache
+      - ./data/storage:/app/data/storage
+      - ./data/work:/app/data/work
 
   frontend:
+    restart: unless-stopped
     build:
       context: frontend
       dockerfile: Dockerfile
+      cache_from:
+        - type=local,src=.docker-build-cache/frontend
+      cache_to:
+        - type=local,dest=.docker-build-cache/frontend,mode=max
       args:
-        NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+        NEXT_PUBLIC_API_BASE_URL: ""
+        INTERNAL_API_BASE_URL: http://backend:8000
     environment:
-      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+      NEXT_PUBLIC_API_BASE_URL: ""
+      INTERNAL_API_BASE_URL: http://backend:8000
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     ports:
       - "3001:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
 
 volumes:
   postgres-data:
-  minio-data:
-  worker-work:

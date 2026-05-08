@@ -1,0 +1,305 @@
+diff --git a/cuda_rasterizer/auxiliary.h b/cuda_rasterizer/auxiliary.h
+index 047390e..a9a8317 100644
+--- a/cuda_rasterizer/auxiliary.h
++++ b/cuda_rasterizer/auxiliary.h
+@@ -14,6 +14,7 @@
+ 
+ #include "config.h"
+ #include "stdio.h"
++#include <stdint.h>
+ #include <cooperative_groups.h>
+ #include <cooperative_groups/reduce.h>
+ namespace cg = cooperative_groups;
+@@ -194,6 +195,151 @@ __forceinline__ __device__ bool in_frustum(int idx,
+ 	return true;
+ }
+ 
++// Compact Box tile traversal adapted from FastGS/Speedy-Splat. It counts
++// only tiles intersected by the projected 2D Gaussian ellipse instead of
++// duplicating over the full radius square.
++__device__ inline float2 computeEllipseIntersection(
++	const float4 con_o, const float disc, const float t, const float2 p,
++	const bool isY, const float coord)
++{
++	float p_u = isY ? p.y : p.x;
++	float p_v = isY ? p.x : p.y;
++	float coeff = isY ? con_o.x : con_o.z;
++	float h = coord - p_u;
++	float sqrt_term = sqrt(disc * h * h + t * coeff);
++
++	return {
++		(-con_o.y * h - sqrt_term) / coeff + p_v,
++		(-con_o.y * h + sqrt_term) / coeff + p_v
++	};
++}
++
++__device__ inline uint32_t processTiles(
++	const float4 con_o, const float disc, const float t, const float2 p,
++	float2 bbox_min, float2 bbox_max,
++	float2 bbox_argmin, float2 bbox_argmax,
++	int2 rect_min, int2 rect_max,
++	const dim3 grid, const bool isY,
++	uint32_t idx, uint32_t off, float depth,
++	uint64_t* gaussian_keys_unsorted,
++	uint32_t* gaussian_values_unsorted)
++{
++	float block_u = isY ? BLOCK_Y : BLOCK_X;
++	float block_v = isY ? BLOCK_X : BLOCK_Y;
++
++	if (isY)
++	{
++		rect_min = { rect_min.y, rect_min.x };
++		rect_max = { rect_max.y, rect_max.x };
++		bbox_min = { bbox_min.y, bbox_min.x };
++		bbox_max = { bbox_max.y, bbox_max.x };
++		bbox_argmin = { bbox_argmin.y, bbox_argmin.x };
++		bbox_argmax = { bbox_argmax.y, bbox_argmax.x };
++	}
++
++	uint32_t tiles_count = 0;
++	float2 intersect_min_line;
++	float2 intersect_max_line = { bbox_max.y, bbox_min.y };
++	float min_line = rect_min.x * block_u;
++
++	if (bbox_min.x <= min_line)
++		intersect_min_line = computeEllipseIntersection(con_o, disc, t, p, isY, rect_min.x * block_u);
++	else
++		intersect_min_line = intersect_max_line;
++
++	for (int u = rect_min.x; u < rect_max.x; ++u)
++	{
++		float max_line = min_line + block_u;
++		if (max_line <= bbox_max.x)
++			intersect_max_line = computeEllipseIntersection(con_o, disc, t, p, isY, max_line);
++
++		float ellipse_min = (min_line <= bbox_argmin.y && bbox_argmin.y < max_line)
++			? bbox_min.y
++			: min(intersect_min_line.x, intersect_max_line.x);
++		float ellipse_max = (min_line <= bbox_argmax.y && bbox_argmax.y < max_line)
++			? bbox_max.y
++			: max(intersect_min_line.y, intersect_max_line.y);
++
++		int min_tile_v = max(rect_min.y, min(rect_max.y, (int)(ellipse_min / block_v)));
++		int max_tile_v = min(rect_max.y, max(rect_min.y, (int)(ellipse_max / block_v + 1)));
++		tiles_count += max_tile_v - min_tile_v;
++
++		if (gaussian_keys_unsorted != nullptr)
++		{
++			for (int v = min_tile_v; v < max_tile_v; v++)
++			{
++				uint64_t key = isY ? (u * grid.x + v) : (v * grid.x + u);
++				key <<= 32;
++				key |= *((uint32_t*)&depth);
++				gaussian_keys_unsorted[off] = key;
++				gaussian_values_unsorted[off] = idx;
++				off++;
++			}
++		}
++
++		intersect_min_line = intersect_max_line;
++		min_line = max_line;
++	}
++	return tiles_count;
++}
++
++__device__ inline uint32_t duplicateToTilesTouched(
++	const float2 p, const float4 con_o, const dim3 grid, const float mult,
++	uint32_t idx, uint32_t off, float depth,
++	uint64_t* gaussian_keys_unsorted,
++	uint32_t* gaussian_values_unsorted)
++{
++	float disc = con_o.y * con_o.y - con_o.x * con_o.z;
++	if (con_o.x <= 0 || con_o.z <= 0 || disc >= 0)
++		return 0;
++
++	float t = 2.0f * log(con_o.w * 255.0f);
++	if (t <= 0.0f)
++		return 0;
++	t = mult * t;
++
++	float x_term = sqrt(-(con_o.y * con_o.y * t) / (disc * con_o.x));
++	x_term = (con_o.y < 0) ? x_term : -x_term;
++	float y_term = sqrt(-(con_o.y * con_o.y * t) / (disc * con_o.z));
++	y_term = (con_o.y < 0) ? y_term : -y_term;
++
++	float2 bbox_argmin = { p.y - y_term, p.x - x_term };
++	float2 bbox_argmax = { p.y + y_term, p.x + x_term };
++	float2 bbox_min = {
++		computeEllipseIntersection(con_o, disc, t, p, true, bbox_argmin.x).x,
++		computeEllipseIntersection(con_o, disc, t, p, false, bbox_argmin.y).x
++	};
++	float2 bbox_max = {
++		computeEllipseIntersection(con_o, disc, t, p, true, bbox_argmax.x).y,
++		computeEllipseIntersection(con_o, disc, t, p, false, bbox_argmax.y).y
++	};
++
++	int2 rect_min = {
++		max(0, min((int)grid.x, (int)(bbox_min.x / BLOCK_X))),
++		max(0, min((int)grid.y, (int)(bbox_min.y / BLOCK_Y)))
++	};
++	int2 rect_max = {
++		max(0, min((int)grid.x, (int)(bbox_max.x / BLOCK_X + 1))),
++		max(0, min((int)grid.y, (int)(bbox_max.y / BLOCK_Y + 1)))
++	};
++
++	int y_span = rect_max.y - rect_min.y;
++	int x_span = rect_max.x - rect_min.x;
++	if (y_span * x_span == 0)
++		return 0;
++
++	bool isY = y_span < x_span;
++	return processTiles(
++		con_o, disc, t, p,
++		bbox_min, bbox_max,
++		bbox_argmin, bbox_argmax,
++		rect_min, rect_max,
++		grid, isY,
++		idx, off, depth,
++		gaussian_keys_unsorted,
++		gaussian_values_unsorted);
++}
++
+ __forceinline__ __device__ float3 mult(float3 a, float3 b){
+ 	float3 result = {a.x * b.x, a.y * b.y, a.z * b.z};
+ 	return result;
+diff --git a/cuda_rasterizer/forward.cu b/cuda_rasterizer/forward.cu
+index 0af7787..a08ffbb 100644
+--- a/cuda_rasterizer/forward.cu
++++ b/cuda_rasterizer/forward.cu
+@@ -16,6 +16,10 @@
+ #include "ForwardState.h"
+ namespace cg = cooperative_groups;
+ 
++#ifndef MOBILEGS_COMPACT_BOX_MULT
++#define MOBILEGS_COMPACT_BOX_MULT 0.5f
++#endif
++
+ // Forward method for converting the input spherical harmonics
+ // coefficients of each Gaussian to a simple RGB color.
+ __device__ glm::vec3 computeColorFromSH(int idx, int deg, int max_coeffs, const glm::vec3* means, glm::vec3 campos, const float* shs, bool* clamped)
+@@ -241,9 +245,11 @@ __global__ void preprocessCUDA(int P, int D, int M,
+ 	float lambda2 = mid - sqrt(max(0.1f, mid * mid - det));
+ 	float my_radius = ceil(3.f * sqrt(max(lambda1, lambda2)));
+ 	float2 point_image = { ndc2Pix(p_proj.x, W), ndc2Pix(p_proj.y, H) };
+-	uint2 rect_min, rect_max;
+-	getRect(point_image, my_radius, rect_min, rect_max, grid);
+-	if ((rect_max.x - rect_min.x) * (rect_max.y - rect_min.y) == 0)
++	float4 con_o = { conic.x, conic.y, conic.z, opacities[idx] };
++	uint32_t tiles_count = duplicateToTilesTouched(
++		point_image, con_o, grid, MOBILEGS_COMPACT_BOX_MULT,
++		0, 0, 0, nullptr, nullptr);
++	if (tiles_count == 0)
+ 		return;
+ 	// If colors have been precomputed, use them, otherwise convert
+ 	// spherical harmonics coefficients to RGB color.
+@@ -260,8 +266,8 @@ __global__ void preprocessCUDA(int P, int D, int M,
+ 	radii[idx] = my_radius;
+ 	points_xy_image[idx] = point_image;
+ 	// Inverse 2D covariance and opacity neatly pack into one float4
+-	conic_opacity[idx] = { conic.x, conic.y, conic.z, opacities[idx] };
+-	tiles_touched[idx] = (rect_max.y - rect_min.y) * (rect_max.x - rect_min.x);
++	conic_opacity[idx] = con_o;
++	tiles_touched[idx] = tiles_count;
+ }
+ 
+ // Main rasterization method. Collaboratively works on one tile per
+@@ -630,4 +636,4 @@ void FORWARD::preprocess(int P, int D, int M,
+ 		tiles_touched,
+ 		prefiltered
+ 		);
+-}
+\ No newline at end of file
++}
+diff --git a/cuda_rasterizer/rasterizer_impl.cu b/cuda_rasterizer/rasterizer_impl.cu
+index 68599df..3061912 100644
+--- a/cuda_rasterizer/rasterizer_impl.cu
++++ b/cuda_rasterizer/rasterizer_impl.cu
+@@ -40,6 +40,10 @@ namespace CudaRasterizer {
+     BatchState global_batch;
+ } 
+ 
++#ifndef MOBILEGS_COMPACT_BOX_MULT
++#define MOBILEGS_COMPACT_BOX_MULT 0.5f
++#endif
++
+ // Helper function to find the next-highest bit of the MSB
+ // on the CPU.
+ uint32_t getHigherMsb(uint32_t n)
+@@ -84,7 +88,8 @@ __global__ void duplicateWithKeys(
+ 	const uint32_t* offsets,
+ 	uint64_t* gaussian_keys_unsorted,
+ 	uint32_t* gaussian_values_unsorted,
+-	int* radii,
++	float4* con_o,
++	uint32_t* tiles_touched,
+ 	dim3 grid)
+ {
+ 	auto idx = cg::this_grid().thread_rank();
+@@ -92,31 +97,15 @@ __global__ void duplicateWithKeys(
+ 		return;
+ 
+ 	// Generate no key/value pair for invisible Gaussians
+-	if (radii[idx] > 0)
++	if (tiles_touched[idx] > 0)
+ 	{
+ 		// Find this Gaussian's offset in buffer for writing keys/values.
+ 		uint32_t off = (idx == 0) ? 0 : offsets[idx - 1];
+-		uint2 rect_min, rect_max;
+-
+-		getRect(points_xy[idx], radii[idx], rect_min, rect_max, grid);
+-
+-		// For each tile that the bounding rect overlaps, emit a 
+-		// key/value pair. The key is |  tile ID  |      depth      |,
+-		// and the value is the ID of the Gaussian. Sorting the values 
+-		// with this key yields Gaussian IDs in a list, such that they
+-		// are first sorted by tile and then by depth. 
+-		for (int y = rect_min.y; y < rect_max.y; y++)
+-		{
+-			for (int x = rect_min.x; x < rect_max.x; x++)
+-			{
+-				uint64_t key = y * grid.x + x;
+-				key <<= 32;
+-				key |= *((uint32_t*)&depths[idx]);
+-				gaussian_keys_unsorted[off] = key;
+-				gaussian_values_unsorted[off] = idx;
+-				off++;
+-			}
+-		}
++		duplicateToTilesTouched(
++			points_xy[idx], con_o[idx], grid, MOBILEGS_COMPACT_BOX_MULT,
++			idx, off, depths[idx],
++			gaussian_keys_unsorted,
++			gaussian_values_unsorted);
+ 	}
+ }
+ 
+@@ -313,7 +302,8 @@ int CudaRasterizer::Rasterizer::forward(
+ 		geomState.point_offsets,
+ 		binningState.point_list_keys_unsorted,
+ 		binningState.point_list_unsorted,
+-		radii,
++		geomState.conic_opacity,
++		geomState.tiles_touched,
+ 		tile_grid)
+ 	CHECK_CUDA(, debug)
+ 
+@@ -524,4 +514,4 @@ void CudaRasterizer::Rasterizer::setBackwardInputs(
+ 	CGNamespace::batchInput.rotations = (glm::vec4*)rotations;
+ 	CGNamespace::batchInput.radii = radii;
+ 	CGNamespace::batchInput.batch_size = batch_size;
+-}
+\ No newline at end of file
++}
+diff --git a/diff_gaussian_rasterization/__init__.py b/diff_gaussian_rasterization/__init__.py
+index c65eb8d..ee3aa9c 100644
+--- a/diff_gaussian_rasterization/__init__.py
++++ b/diff_gaussian_rasterization/__init__.py
+@@ -16,6 +16,8 @@ from . import _C
+ 
+ import numpy as np 
+ 
++MOBILEGS_COMPACT_BOX = True
++
+ def cpu_deep_copy_tuple(input_tuple):
+     copied_tensors = [item.cpu().clone() if isinstance(item, torch.Tensor) else item for item in input_tuple]
+     return tuple(copied_tensors)
