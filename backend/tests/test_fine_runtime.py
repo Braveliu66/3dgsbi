@@ -178,6 +178,8 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertNotIn("transformer-engine", requirements)
         self.assertNotIn("pycolmap", requirements)
         self.assertIn("transformer-engine[pytorch]==2.4.0", dockerfile)
+        self.assertIn("pycolmap==3.12.6", dockerfile)
+        self.assertIn("import pycolmap", dockerfile)
         self.assertIn("'einops==0.8.0' 'transformer-engine[pytorch]==2.4.0'", dockerfile)
         self.assertLess(
             dockerfile.index("'einops==0.8.0' 'transformer-engine[pytorch]==2.4.0'"),

@@ -54,6 +54,8 @@ const QUALITY_UP_FPS = readNumber(process.env.VIEWER_QUALITY_UP_FPS, 105);
 const QUALITY_DOWN_FPS = readNumber(process.env.VIEWER_QUALITY_DOWN_FPS, 90);
 const ADAPTIVE_QUALITY = (process.env.VIEWER_ADAPTIVE_QUALITY ?? "true").toLowerCase() !== "false";
 const MAX_RENDER_SPLATS = readNumber(process.env.VIEWER_MAX_SPLATS, 5_000_000);
+const DEFAULT_FIT_RADIUS = 1;
+const FIT_PADDING = 1.35;
 
 export function SplatViewer({ modelUrl, segments }: { modelUrl?: string | null; segments?: ViewerSegment[] }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -199,13 +201,13 @@ export function SplatViewer({ modelUrl, segments }: { modelUrl?: string | null; 
         if (cancelled) return;
         scene.updateMatrixWorld(true);
         const fit = fitCameraToSplats(THREE, camera, splats);
-        if (fit && controls) {
+        if (controls) {
           modelPivot.position.copy(fit.center);
           splatGroup.position.copy(fit.center.clone().multiplyScalar(-1));
           scene.updateMatrixWorld(true);
           controls.target.copy(fit.center);
-          controls.minDistance = Math.max(0.01, fit.radius * 0.05);
-          controls.maxDistance = Math.max(10, fit.distance * 8);
+          controls.minDistance = Math.max(0.01, fit.radius * 0.03);
+          controls.maxDistance = Math.max(10, fit.distance * 10);
           controls.update();
           controls.saveState();
           const home = {
@@ -326,7 +328,7 @@ export function SplatViewer({ modelUrl, segments }: { modelUrl?: string | null; 
   );
 }
 
-function fitCameraToSplats(THREE: typeof import("three"), camera: PerspectiveCamera, splats: SplatMeshLike[]): { center: Vector3; radius: number; distance: number } | null {
+function fitCameraToSplats(THREE: typeof import("three"), camera: PerspectiveCamera, splats: SplatMeshLike[]): { center: Vector3; radius: number; distance: number } {
   const bounds = new THREE.Box3();
   let hasBounds = false;
   for (const splat of splats) {
@@ -342,13 +344,12 @@ function fitCameraToSplats(THREE: typeof import("three"), camera: PerspectiveCam
       hasBounds = true;
     }
   }
-  if (!hasBounds) return null;
 
-  const center = bounds.getCenter(new THREE.Vector3());
-  const size = bounds.getSize(new THREE.Vector3());
-  const radius = Math.max(size.length() / 2, 0.05);
+  const center = hasBounds ? bounds.getCenter(new THREE.Vector3()) : new THREE.Vector3(0, 0, 0);
+  const size = hasBounds ? bounds.getSize(new THREE.Vector3()) : new THREE.Vector3(DEFAULT_FIT_RADIUS * 2, DEFAULT_FIT_RADIUS * 2, DEFAULT_FIT_RADIUS * 2);
+  const radius = Math.max(Math.max(size.x, size.y, size.z) / 2, 0.05);
   const fov = camera.fov * Math.PI / 180;
-  const distance = Math.max(0.5, (radius / Math.sin(fov / 2)) * 1.15);
+  const distance = Math.max(0.35, (radius / Math.tan(fov / 2)) * FIT_PADDING);
   const direction = new THREE.Vector3(0.18, -0.12, 1).normalize();
 
   camera.position.copy(center).addScaledVector(direction, distance);

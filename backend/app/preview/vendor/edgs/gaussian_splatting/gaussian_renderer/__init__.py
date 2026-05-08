@@ -12,6 +12,7 @@
 
 import torch
 import math
+import inspect
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
@@ -34,7 +35,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
     tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
 
-    raster_settings_kwargs = dict(
+    raster_settings = _build_raster_settings(
         image_height=int(viewpoint_camera.image_height),
         image_width=int(viewpoint_camera.image_width),
         tanfovx=tanfovx,
@@ -47,10 +48,8 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         campos=viewpoint_camera.camera_center,
         prefiltered=False,
         debug=pipe.debug,
+        antialiasing=getattr(pipe, "antialiasing", False),
     )
-    if "antialiasing" in getattr(GaussianRasterizationSettings, "_fields", ()):
-        raster_settings_kwargs["antialiasing"] = getattr(pipe, "antialiasing", False)
-    raster_settings = GaussianRasterizationSettings(**raster_settings_kwargs)
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
@@ -82,7 +81,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)
             colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)
         else:
-            if separate_sh:
+            if separate_sh and _rasterizer_accepts_keyword("dc"):
                 dc, shs = pc.get_features_dc, pc.get_features_rest
             else:
                 shs = pc.get_features
@@ -90,7 +89,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         colors_precomp = override_color
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
-    if separate_sh:
+    if separate_sh and override_color is None and _rasterizer_accepts_keyword("dc"):
         rendered_image, radii, depth_image = _unpack_rasterizer_output(rasterizer(
             means3D = means3D,
             means2D = means2D,
@@ -129,6 +128,31 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         }
     
     return out
+
+
+def _build_raster_settings(**values):
+    fields = getattr(GaussianRasterizationSettings, "_fields", ())
+    defaults = {
+        "antialiasing": False,
+        "isbatched": False,
+        "end_transmittance": 0.0001,
+        "enable_timer": False,
+        "return_matvec_kernels": False,
+        "enable_error_check": False,
+    }
+    if fields:
+        values = {key: values[key] for key in values if key in fields}
+        for key, value in defaults.items():
+            if key in fields and key not in values:
+                values[key] = value
+    return GaussianRasterizationSettings(**values)
+
+
+def _rasterizer_accepts_keyword(name):
+    try:
+        return name in inspect.signature(GaussianRasterizer.forward).parameters
+    except (TypeError, ValueError):
+        return True
 
 
 def _unpack_rasterizer_output(output):

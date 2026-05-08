@@ -26,6 +26,7 @@ def run_litevggt_pointcloud(
     output_ply: Path,
     keep_ratio: float,
     max_points: int,
+    spatial_keep_quantile: float = 0.995,
     progress: Progress,
 ) -> dict[str, int | float | str]:
     """执行 LiteVGGT 直接点云预览。
@@ -97,11 +98,20 @@ def run_litevggt_pointcloud(
             confidence = depth_conf.reshape(-1).detach().cpu().numpy()
             keep = max(1, int(len(confidence) * keep_ratio))
             keep_indices = np.argsort(confidence)[::-1][:keep]
+            selected_points = points[keep_indices]
+            selected_colors = colors[keep_indices]
+            selected_confidence = confidence[keep_indices]
+            trimmed_points, trimmed_colors, trimmed_confidence = trim_spatial_outliers(
+                selected_points,
+                selected_colors,
+                selected_confidence,
+                keep_quantile=spatial_keep_quantile,
+            )
             point_count = write_point_cloud_ply(
-                points[keep_indices],
-                colors[keep_indices],
+                trimmed_points,
+                trimmed_colors,
                 output_ply,
-                confidence=confidence[keep_indices],
+                confidence=trimmed_confidence,
                 max_points=max_points,
             )
 
@@ -110,6 +120,9 @@ def run_litevggt_pointcloud(
             "input_frame_count": aligned_count,
             "point_count": point_count,
             "keep_ratio": keep_ratio,
+            "spatial_keep_quantile": spatial_keep_quantile,
+            "point_count_before_spatial_trim": int(selected_points.shape[0]),
+            "point_count_after_spatial_trim": int(trimmed_points.shape[0]),
             "cuda_memory_peak_mb": peak_mb,
         }
 
@@ -120,3 +133,31 @@ def require_transformer_engine() -> None:
     except Exception as exc:  # pragma: no cover - depends on CUDA worker image
         raise PreviewFailure("TRANSFORMER_ENGINE_UNAVAILABLE", f"LiteVGGT requires transformer_engine: {exc}") from exc
 
+
+def trim_spatial_outliers(
+    points: np.ndarray,
+    colors: np.ndarray,
+    confidence: np.ndarray,
+    *,
+    keep_quantile: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    keep_quantile = float(np.clip(keep_quantile, 0.5, 1.0))
+    if keep_quantile >= 1.0 or points.shape[0] <= 1:
+        return points, colors, confidence
+
+    finite = np.isfinite(points).all(axis=1) & np.isfinite(confidence)
+    if not np.any(finite):
+        return points, colors, confidence
+    points = points[finite]
+    colors = colors[finite]
+    confidence = confidence[finite]
+    if points.shape[0] <= 1:
+        return points, colors, confidence
+
+    center = np.median(points, axis=0)
+    distances = np.linalg.norm(points - center, axis=1)
+    cutoff = float(np.quantile(distances, keep_quantile))
+    keep = distances <= cutoff
+    if not np.any(keep):
+        return points, colors, confidence
+    return points[keep], colors[keep], confidence[keep]

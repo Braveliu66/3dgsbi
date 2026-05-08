@@ -3,8 +3,8 @@
 import Link from "next/link";
 import { Download, FileArchive, Film, Images, PauseCircle, PlayCircle, ScrollText, Trash2, X } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
-import { api, artifactUrl, formatBytes, mediaFileUrl, mediaThumbnailUrl } from "@/lib/api";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { api, artifactUrl, formatBytes, mediaFileUrl, mediaThumbnailUrl, projectEventsUrl } from "@/lib/api";
 import { formatDateTime, inputTypeLabel, isActiveTask, projectStatusLabel, taskStatusLabel, taskTypeLabel } from "@/lib/labels";
 import type { Artifact, Project, Task, ViewerConfig } from "@/lib/types";
 import { SplatViewer } from "@/components/SplatViewer";
@@ -24,10 +24,16 @@ export default function ProjectDetailPage() {
   const [brokenThumbIds, setBrokenThumbIds] = useState<Set<string>>(() => new Set());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
     if (!params.id) return;
     void loadProject(params.id);
+    connectEvents(params.id);
+    return () => {
+      eventSourceRef.current?.close();
+      eventSourceRef.current = null;
+    };
   }, [params.id]);
 
   async function loadProject(projectId: string) {
@@ -68,6 +74,10 @@ export default function ProjectDetailPage() {
     const artifactBytes = artifacts.reduce((sum, item) => sum + item.file_size, 0);
     return { artifactBytes, mediaBytes: project?.total_size_bytes ?? 0 };
   }, [artifacts, project?.total_size_bytes]);
+  const logTaskArtifact = useMemo(
+    () => artifacts.find((artifact) => artifact.kind === "task_log" && artifact.task_id === logTask?.id) ?? null,
+    [artifacts, logTask?.id]
+  );
 
   async function cancelTask(task: Task) {
     setBusy(true);
@@ -149,6 +159,57 @@ export default function ProjectDetailPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "获取原始 PLY 下载链接失败");
     }
+  }
+
+  function connectEvents(projectId: string) {
+    eventSourceRef.current?.close();
+    const source = new EventSource(projectEventsUrl(projectId));
+    source.addEventListener("project_snapshot", (event) => {
+      try {
+        const payload = JSON.parse((event as MessageEvent).data) as Project;
+        setProject(payload);
+        if (payload.artifacts) setArtifacts(payload.artifacts);
+      } catch {
+        return;
+      }
+    });
+    source.addEventListener("task_started", (event) => updateTaskFromEvent(event as MessageEvent));
+    source.addEventListener("task_progress", (event) => updateTaskFromEvent(event as MessageEvent));
+    source.addEventListener("task_succeeded", (event) => {
+      updateTaskFromEvent(event as MessageEvent);
+      void loadProject(projectId);
+    });
+    source.addEventListener("task_failed", (event) => {
+      updateTaskFromEvent(event as MessageEvent);
+      void loadProject(projectId);
+    });
+    source.addEventListener("artifact_created", () => {
+      void refreshArtifactsAndViewer(projectId);
+    });
+    eventSourceRef.current = source;
+  }
+
+  function updateTaskFromEvent(event: MessageEvent) {
+    try {
+      const task = JSON.parse(event.data) as Task;
+      setProject((current) => {
+        if (!current) return current;
+        const tasks = [task, ...(current.tasks ?? []).filter((item) => item.id !== task.id)];
+        return { ...current, tasks };
+      });
+      setLogTask((current) => current?.id === task.id ? task : current);
+    } catch {
+      return;
+    }
+  }
+
+  async function refreshArtifactsAndViewer(projectId: string) {
+    const [artifactData, viewerData] = await Promise.all([
+      api.artifacts(projectId).catch(() => null),
+      api.viewerConfig(projectId).catch(() => null)
+    ]);
+    if (artifactData) setArtifacts(artifactData.artifacts);
+    if (viewerData) setViewer(viewerData);
   }
 
   return (
@@ -358,7 +419,14 @@ export default function ProjectDetailPage() {
                 <h2>任务日志</h2>
                 <p className="muted small">{taskTypeLabel(logTask.type)} · {logTask.current_stage || taskStatusLabel(logTask.status)}</p>
               </div>
-              <button className="ghost-button" type="button" onClick={() => setLogTask(null)}>关闭</button>
+              <div className="actions">
+                {logTaskArtifact ? (
+                  <button className="ghost-button" type="button" onClick={() => void downloadArtifact(logTaskArtifact)}>
+                    <Download size={16} />完整日志
+                  </button>
+                ) : null}
+                <button className="ghost-button" type="button" onClick={() => setLogTask(null)}>关闭</button>
+              </div>
             </div>
             <div className="panel-body scrollable stack">
               {logTask.error_message ? <div className="error-box">{logTask.error_message}</div> : null}

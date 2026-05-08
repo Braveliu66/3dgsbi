@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from app.config import get_settings
 from app.fine.litevggt_sfm import build_litevggt_colmap_scene
 from app.fine.option_utils import read_float, read_int
 from app.fine.preprocess import build_pycolmap_scene, prepare_mobile_images
@@ -29,6 +30,7 @@ SOURCE_COMMITS_FINE = {
 }
 
 def run_fine_pipeline(ctx: FineContext) -> FineResult:
+    settings = get_settings()
     pipeline = normalize_fine_pipeline(ctx.pipeline)
     if pipeline != PIPELINE_NAME:
         raise FineFailure("UNSUPPORTED_FINE_PIPELINE", f"Unsupported fine pipeline: {ctx.pipeline}")
@@ -38,7 +40,7 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
     if image_count < 3:
         raise FineFailure("INSUFFICIENT_IMAGES", "Fine reconstruction requires at least 3 images")
 
-    iterations = read_int(ctx.options.get("fine_iterations"), 30_000, minimum=500, maximum=60_000)
+    iterations = read_int(ctx.options.get("fine_iterations"), settings.fine_iterations, minimum=500, maximum=60_000)
     explicit_lm_start_iter = ctx.options.get("fine_lm_start_iter")
     reject_ratio = read_float(ctx.options.get("fine_blur_reject_ratio"), 0.15, minimum=0.0, maximum=0.45)
     colmap_features = read_int(ctx.options.get("fine_sift_max_num_features"), 8192, minimum=1024, maximum=32768)

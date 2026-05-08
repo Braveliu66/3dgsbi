@@ -8,7 +8,7 @@ from pathlib import Path
 
 from app.preview.io.spz import convert_ply_to_spz
 from app.preview.types import PreviewContext, PreviewResult, SOURCE_COMMITS
-from app.preview.utils import StageTimer, require_file
+from app.preview.utils import StageTimer, image_files, require_file
 from app.preview.vendor.edgs_runtime import run_edgs_preview
 
 
@@ -16,10 +16,17 @@ def run(ctx: PreviewContext) -> PreviewResult:
     timer = StageTimer()
     scene_dir = ctx.work_dir / "edgs_scene"
     output_dir = ctx.work_dir / "edgs_output"
-    num_ref_views = int(ctx.options.get("edgs_num_ref_views") or 16)
-    num_corrs = int(ctx.options.get("edgs_num_corrs_per_view") or 20_000)
-    num_steps = int(ctx.options.get("edgs_preview_steps") or 200)
-    max_size = int(ctx.options.get("edgs_max_image_size") or 1024)
+    input_count = len(image_files(ctx.input_dir))
+    num_ref_views = _read_positive_int(ctx.options.get("edgs_num_ref_views"), _default_ref_views(input_count))
+    num_corrs = _read_positive_int(ctx.options.get("edgs_num_corrs_per_view") or ctx.options.get("edgs_matches_per_ref"), 20_000)
+    num_steps = _read_positive_int(ctx.options.get("edgs_preview_steps"), 1_500 if input_count < 16 else 3_000)
+    max_size = _read_positive_int(ctx.options.get("edgs_max_image_size"), 1024)
+    selected_count = max(1, min(num_ref_views, input_count))
+    nns_per_ref = _read_positive_int(ctx.options.get("edgs_nns_per_ref"), 3)
+    scaling_factor = _read_positive_float(ctx.options.get("edgs_scaling_factor"), 0.001)
+    colmap_max_features = _read_positive_int(ctx.options.get("edgs_colmap_max_num_features"), 4096)
+    colmap_max_size = _read_positive_int(ctx.options.get("edgs_colmap_max_image_size"), 1024)
+    colmap_min_model_size = _read_positive_int(ctx.options.get("edgs_colmap_min_model_size"), max(3, min(10, selected_count)))
     roma_weight = require_file(ctx.model_path("roma", "roma_indoor.pth"), "ROMA_WEIGHT_MISSING", "RoMA indoor weight")
     dinov2_weight = require_file(ctx.model_path("roma", "dinov2_vitl14_pretrain.pth"), "DINOV2_WEIGHT_MISSING", "DINOv2 ViT-L/14 weight")
 
@@ -37,6 +44,11 @@ def run(ctx: PreviewContext) -> PreviewResult:
         roma_weight=roma_weight,
         dinov2_weight=dinov2_weight,
         progress=report,
+        colmap_max_num_features=colmap_max_features,
+        colmap_max_image_size=colmap_max_size,
+        colmap_min_model_size=colmap_min_model_size,
+        nns_per_ref=nns_per_ref,
+        scaling_factor=scaling_factor,
     )
     timer.mark("edgs_training")
     ply_path = Path(result["ply_path"])
@@ -59,3 +71,27 @@ def run(ctx: PreviewContext) -> PreviewResult:
         },
         source_commits={"EDGS": SOURCE_COMMITS["EDGS"], "Spark": SOURCE_COMMITS["Spark"]},
     )
+
+
+def _default_ref_views(image_count: int) -> int:
+    if image_count <= 24:
+        return max(1, image_count)
+    if image_count <= 96:
+        return 64
+    return 96
+
+
+def _read_positive_int(value, fallback: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if parsed > 0 else fallback
+
+
+def _read_positive_float(value, fallback: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if parsed > 0 else fallback

@@ -4,6 +4,7 @@ import os
 import shutil
 import socket
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,20 @@ from app.models import Artifact, Project, Task, utc_now
 from app.preview.image_preprocess import normalize_image_directory
 from app.preview.weights import ModelDownloadError, download_model_weights, weights_for_pipeline
 from app.storage import Storage, sha256_path, storage_key
-from app.worker import append_log, download_media, emit, fail_task, heartbeat, read_positive_int, task_payload
+from app.worker import (
+    TaskLogCapture,
+    append_log,
+    download_media,
+    emit,
+    fail_task,
+    heartbeat,
+    read_positive_int,
+    run_task_in_subprocess,
+    task_log_path,
+    task_source_version,
+    task_payload,
+    upload_task_log,
+)
 
 settings = get_settings()
 storage = Storage(settings)
@@ -41,7 +55,7 @@ def main() -> None:
             continue
         _, task_id = item
         try:
-            run_fine_task(task_id, worker_id)
+            run_task_in_subprocess(task_id, worker_id, redis_client, run_fine_task, "fine-worker")
         except Exception as exc:
             print(f"[fine-worker] unexpected failure for {task_id}: {exc}", flush=True)
 
@@ -76,10 +90,16 @@ def run_fine_task(task_id: str, worker_id: str) -> None:
     if work_dir.exists():
         shutil.rmtree(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
+    log_capture = TaskLogCapture(task_log_path(task_id))
+    source_version = 0
 
     with SessionLocal() as db:
         task = db.get(Task, task_id)
         if not task:
+            return
+        if task.status == "canceled":
+            return
+        if task.status not in {"queued", "running"}:
             return
         project = db.scalar(
             select(Project)
@@ -89,6 +109,7 @@ def run_fine_task(task_id: str, worker_id: str) -> None:
         if not project:
             fail_task(db, task, None, "PROJECT_NOT_FOUND", "Project not found")
             return
+        source_version = task_source_version(task, project)
         task.status = "running"
         task.worker_id = worker_id
         task.started_at = utc_now()
@@ -101,6 +122,7 @@ def run_fine_task(task_id: str, worker_id: str) -> None:
         emit(db, project.id, "task_started", task_payload(task), task.id)
         db.commit()
 
+    log_capture.start()
     heartbeat(worker_id, task_id)
     try:
         with SessionLocal() as db:
@@ -132,7 +154,7 @@ def run_fine_task(task_id: str, worker_id: str) -> None:
             )
             ensure_fine_weights(db, task, project, started)
 
-            source_version = int((task.options or {}).get("source_version") or project.source_version)
+            source_version = task_source_version(task, project)
             ctx = FineContext(
                 task_id=task.id,
                 project_id=project.id,
@@ -160,6 +182,8 @@ def run_fine_task(task_id: str, worker_id: str) -> None:
 
             with SessionLocal() as upload_db:
                 task = upload_db.get(Task, task_id)
+                if not task or task.status == "canceled":
+                    return
                 project = upload_db.scalar(
                     select(Project)
                     .where(Project.id == task.project_id)
@@ -184,24 +208,45 @@ def run_fine_task(task_id: str, worker_id: str) -> None:
                 task.logs = append_log(task.logs, "uploaded final.ply", "uploaded final_web.spz", "uploaded metrics.json")
                 if result.lod_rad:
                     task.logs = append_log(task.logs, "uploaded final_lod.rad")
+                log_capture.flush()
+                log_artifact = upload_task_log(upload_db, project, task, worker_id, source_version)
+                if log_artifact:
+                    task.logs = append_log(task.logs, f"uploaded {log_artifact.file_name}")
                 project.status = "COMPLETED"
                 project.error_message = None
                 for artifact in artifacts:
                     emit(upload_db, project.id, "artifact_created", {"artifact_id": artifact.id, "kind": artifact.kind}, task.id)
+                if log_artifact:
+                    emit(upload_db, project.id, "artifact_created", {"artifact_id": log_artifact.id, "kind": log_artifact.kind}, task.id)
                 emit(upload_db, project.id, "task_succeeded", task_payload(task), task.id)
                 upload_db.commit()
     except FineFailure as exc:
+        traceback.print_exc()
         with SessionLocal() as db:
             task = db.get(Task, task_id)
             project = db.get(Project, task.project_id) if task else None
+            log_capture.flush()
+            if task and project:
+                log_artifact = upload_task_log(db, project, task, worker_id, source_version or task_source_version(task, project))
+                if log_artifact:
+                    task.logs = append_log(task.logs, f"uploaded {log_artifact.file_name}")
+                    emit(db, project.id, "artifact_created", {"artifact_id": log_artifact.id, "kind": log_artifact.kind}, task.id)
             fail_task(db, task, project, exc.code, exc.message)
     except Exception as exc:
+        traceback.print_exc()
         with SessionLocal() as db:
             task = db.get(Task, task_id)
             project = db.get(Project, task.project_id) if task else None
+            log_capture.flush()
+            if task and project:
+                log_artifact = upload_task_log(db, project, task, worker_id, source_version or task_source_version(task, project))
+                if log_artifact:
+                    task.logs = append_log(task.logs, f"uploaded {log_artifact.file_name}")
+                    emit(db, project.id, "artifact_created", {"artifact_id": log_artifact.id, "kind": log_artifact.kind}, task.id)
             fail_task(db, task, project, "FINE_RECONSTRUCTION_FAILED", str(exc))
     finally:
         heartbeat(worker_id)
+        log_capture.stop()
 
 
 def upload_fine_artifacts(

@@ -33,10 +33,12 @@ def run_edgs_preview(
     roma_weight: Path,
     dinov2_weight: Path,
     progress: Progress,
-    colmap_max_num_features: int = 512 * 2,
-    colmap_max_image_size: int = 512,
+    colmap_max_num_features: int = 4096,
+    colmap_max_image_size: int = 1024,
     colmap_min_model_size: int = 10,
     colmap_num_threads: int = 8,
+    nns_per_ref: int = 3,
+    scaling_factor: float = 0.001,
     fine_profile: bool = False,
 ) -> dict[str, object]:
     """执行 EDGS 预览训练，返回最终 Gaussian PLY 路径和训练指标。"""
@@ -51,6 +53,7 @@ def run_edgs_preview(
     roma_root = edgs_root / "roma"
     with prepend_sys_path(edgs_root, gs_root, roma_root):
         ensure_edgs_imports()
+        import diff_gaussian_rasterization as rasterizer_module
         from hydra import compose, initialize_config_dir
         import hydra
         from romatch import roma_indoor
@@ -63,6 +66,7 @@ def run_edgs_preview(
             raise PreviewFailure("EDGS_NOT_ENOUGH_IMAGES", "EDGS preview requires at least 3 images")
 
         selected_count = min(num_ref_views, len(frames))
+        resolved_nns_per_ref = max(1, min(int(nns_per_ref), selected_count - 1))
         progress("edgs_select_frames", 26, f"selecting {selected_count} sharp frames for COLMAP")
         scores = preprocess_frames(frames, verbose=False)
         selected = select_optimal_frames(scores, selected_count)
@@ -78,7 +82,7 @@ def run_edgs_preview(
             num_threads=colmap_num_threads,
         )
 
-        progress("edgs_config", 44, "initializing EDGS trainer")
+        progress("edgs_config", 44, f"initializing EDGS trainer ({num_steps} iterations, {resolved_nns_per_ref} NN/ref)")
         with initialize_config_dir(config_dir=str((edgs_root / "configs").resolve()), version_base="1.1"):
             cfg = compose(config_name="train")
 
@@ -94,10 +98,10 @@ def run_edgs_preview(
         cfg.train.max_lr = not fine_profile
         cfg.init_wC.use = True
         cfg.init_wC.matches_per_ref = num_corrs_per_view
-        cfg.init_wC.nns_per_ref = 1
+        cfg.init_wC.nns_per_ref = resolved_nns_per_ref
         cfg.init_wC.num_refs = selected_count
         cfg.init_wC.add_SfM_init = False
-        cfg.init_wC.scaling_factor = 0.00077 * 2.0
+        cfg.init_wC.scaling_factor = float(scaling_factor)
 
         set_seed(cfg.seed)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -111,7 +115,7 @@ def run_edgs_preview(
         trainer.saving_iterations = []
         trainer.evaluate_iterations = []
 
-        progress("edgs_corr_init", 52, "initializing Gaussians with local RoMA correspondences")
+        progress("edgs_corr_init", 52, f"initializing Gaussians with local RoMA correspondences ({selected_count} refs)")
         torch.set_float32_matmul_precision("highest")
         roma_state = torch.load(roma_weight, map_location="cuda:0")
         dinov2_state = torch.load(dinov2_weight, map_location="cuda:0")
@@ -141,6 +145,17 @@ def run_edgs_preview(
             "ply_path": ply_path,
             "input_frame_count": len(frames),
             "selected_frame_count": len(selected_frames),
+            "edgs_num_ref_views_requested": num_ref_views,
+            "edgs_selected_ref_views": selected_count,
+            "edgs_matches_per_ref": num_corrs_per_view,
+            "edgs_nns_per_ref": resolved_nns_per_ref,
+            "edgs_preview_steps": num_steps,
+            "edgs_colmap_max_num_features": colmap_max_num_features,
+            "edgs_colmap_max_image_size": colmap_max_image_size,
+            "edgs_colmap_min_model_size": colmap_min_model_size,
+            "edgs_scaling_factor": float(scaling_factor),
+            "edgs_rasterizer_module": getattr(rasterizer_module, "__file__", None),
+            "edgs_rasterizer_fields": list(getattr(rasterizer_module.GaussianRasterizationSettings, "_fields", ())),
             "edgs_iterations": trainer.gs_step,
             "cuda_memory_peak_mb": peak_mb,
         }

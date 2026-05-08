@@ -32,6 +32,7 @@ from app.security import (
     verify_password,
 )
 from app.storage import Storage, safe_filename, storage_key
+from app.task_control import request_task_cancel
 
 settings = get_settings()
 storage = Storage(settings)
@@ -297,6 +298,13 @@ def enqueue_fine_task(task_id: str) -> None:
     get_redis().rpush(settings.fine_queue_name, task_id)
 
 
+def request_worker_cancel(task: Task) -> None:
+    try:
+        request_task_cancel(get_redis(), task.id, task.type)
+    except Exception:
+        pass
+
+
 def seed_database(db: Session) -> None:
     admin = db.scalar(select(User).where(User.username == settings.admin_username))
     if not admin:
@@ -427,6 +435,9 @@ def get_project(project_id: str, user: User = Depends(get_current_user), db: Ses
 @app.delete("/api/projects/{project_id}")
 def delete_project(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, bool]:
     project = owned_project(db, project_id, user, include_children=True)
+    for task in project.tasks:
+        if task.status in {"queued", "running"}:
+            request_worker_cancel(task)
     for media in project.media:
         storage.delete(media.object_uri)
         storage.delete(media.thumbnail_uri)
@@ -641,8 +652,10 @@ def cancel_task(task_id: str, user: User = Depends(get_current_user), db: Sessio
         raise HTTPException(status_code=404, detail="Task not found")
     project = owned_project(db, task.project_id, user)
     if task.status in {"queued", "running"}:
+        request_worker_cancel(task)
         task.status = "canceled"
         task.finished_at = utc_now()
+        task.current_stage = "canceled"
         task.error_message = "用户取消任务"
         project.status = "CANCELED"
         emit_event(db, project.id, "task_failed", task_dict(task), task.id)

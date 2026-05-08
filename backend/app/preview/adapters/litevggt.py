@@ -19,6 +19,7 @@ def run(ctx: PreviewContext) -> PreviewResult:
     ply_path = ctx.work_dir / "litevggt" / "recon.ply"
     keep_ratio = float(ctx.options.get("litevggt_keep_ratio") or 0.42)
     max_points = int(ctx.options.get("preview_max_points") or 15_000_000)
+    spatial_keep_quantile = float(ctx.options.get("litevggt_spatial_keep_quantile") or 0.995)
 
     def report(stage: str, progress: int, message: str) -> None:
         ctx.report(stage, progress, message)
@@ -29,6 +30,7 @@ def run(ctx: PreviewContext) -> PreviewResult:
         output_ply=ply_path,
         keep_ratio=keep_ratio,
         max_points=max_points,
+        spatial_keep_quantile=spatial_keep_quantile,
         progress=report,
     )
     timer.mark("litevggt_inference")
@@ -48,4 +50,3 @@ def run(ctx: PreviewContext) -> PreviewResult:
         },
         source_commits={"LiteVGGT": SOURCE_COMMITS["LiteVGGT"], "Spark": SOURCE_COMMITS["Spark"]},
     )
-

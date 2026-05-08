@@ -198,6 +198,26 @@ while [ "$attempt" -le 5 ]; do
 done
 EOF
 
+RUN --mount=type=cache,id=three-dgs-worker-pycolmap-pip-cache,target=/root/.cache/pip,sharing=locked <<'EOF'
+set -eu
+attempt=1
+while [ "$attempt" -le 5 ]; do
+  if python -m pip install --constraint /tmp/worker/constraints.txt 'pycolmap==3.12.6'; then
+    python - <<'PY'
+import pycolmap
+print("pycolmap import ok")
+PY
+    exit 0
+  fi
+  if [ "$attempt" -eq 5 ]; then
+    exit 1
+  fi
+  echo "pycolmap install failed, retrying in $((attempt * 20)) seconds ($attempt/5)"
+  sleep $((attempt * 20))
+  attempt=$((attempt + 1))
+done
+EOF
+
 COPY backend/app ./app
 
 RUN --mount=type=cache,id=three-dgs-worker-runtime-extension-pip-cache,target=/root/.cache/pip,sharing=locked \
@@ -249,6 +269,7 @@ PYTHONPATH=/app:/app/app/preview/vendor/edgs:/app/app/preview/vendor/edgs/gaussi
 import torch
 import torchvision
 import romatch
+import pycolmap
 import transformer_engine.pytorch as te
 import diff_gaussian_rasterization
 import simple_knn

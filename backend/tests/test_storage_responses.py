@@ -23,11 +23,36 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
 from app.main import app, storage  # noqa: E402
 from app.models import Artifact, MediaAsset, Task  # noqa: E402
+from app.task_control import task_cancel_key  # noqa: E402
 
 
 PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
 )
+
+
+class FakeRedis:
+    def __init__(self) -> None:
+        self.lists: dict[str, list[str]] = {}
+        self.values: dict[str, tuple[str, int | None]] = {}
+
+    def rpush(self, name: str, value: str) -> int:
+        self.lists.setdefault(name, []).append(value)
+        return len(self.lists[name])
+
+    def lrem(self, name: str, count: int, value: str) -> int:
+        items = self.lists.get(name, [])
+        kept = [item for item in items if item != value]
+        removed = len(items) - len(kept)
+        self.lists[name] = kept
+        return removed
+
+    def set(self, name: str, value: str, ex: int | None = None) -> bool:
+        self.values[name] = (value, ex)
+        return True
+
+    def exists(self, name: str) -> int:
+        return int(name in self.values)
 
 
 class StorageResponseTests(unittest.TestCase):
@@ -182,6 +207,56 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(payload["status"], "queued")
             self.assertEqual(payload["options"]["fine_pipeline"], "mobilegs_lmrs")
             self.assertEqual(payload["options"]["source_version"], 3)
+            self.assertEqual(payload["options"]["fine_iterations"], 2000)
+
+    def test_cancel_queued_task_removes_it_from_redis_queue(self) -> None:
+        fake_redis = FakeRedis()
+        with TestClient(app) as client, patch("app.main.get_redis", return_value=fake_redis):
+            headers = auth_headers(client)
+            project_id = create_image_project(client, headers, "cancel queued preview")
+            upload_response = client.post(
+                f"/api/projects/{project_id}/media",
+                files={"file": ("one.png", PNG_BYTES, "image/png")},
+                headers=headers,
+            )
+            upload_response.raise_for_status()
+            task_response = client.post(f"/api/projects/{project_id}/tasks/preview", json={"options": {}}, headers=headers)
+            task_response.raise_for_status()
+            task_id = task_response.json()["id"]
+
+            self.assertIn(task_id, fake_redis.lists["preview_tasks"])
+
+            cancel_response = client.post(f"/api/tasks/{task_id}/cancel", headers=headers)
+            cancel_response.raise_for_status()
+
+            self.assertEqual(cancel_response.json()["status"], "canceled")
+            self.assertNotIn(task_id, fake_redis.lists["preview_tasks"])
+            self.assertIn(task_cancel_key(task_id), fake_redis.values)
+            with SessionLocal() as db:
+                task = db.get(Task, task_id)
+                assert task is not None
+                self.assertEqual(task.status, "canceled")
+
+    def test_delete_project_requests_active_task_cancel(self) -> None:
+        fake_redis = FakeRedis()
+        with TestClient(app) as client, patch("app.main.get_redis", return_value=fake_redis):
+            headers = auth_headers(client)
+            project_id = create_image_project(client, headers, "delete cancels active task")
+            upload_response = client.post(
+                f"/api/projects/{project_id}/media",
+                files={"file": ("one.png", PNG_BYTES, "image/png")},
+                headers=headers,
+            )
+            upload_response.raise_for_status()
+            task_response = client.post(f"/api/projects/{project_id}/tasks/preview", json={"options": {}}, headers=headers)
+            task_response.raise_for_status()
+            task_id = task_response.json()["id"]
+
+            delete_response = client.delete(f"/api/projects/{project_id}", headers=headers)
+            delete_response.raise_for_status()
+
+            self.assertTrue(delete_response.json()["deleted"])
+            self.assertIn(task_cancel_key(task_id), fake_redis.values)
 
     def test_viewer_config_prefers_fresh_final_spz(self) -> None:
         with TestClient(app) as client:
