@@ -15,15 +15,23 @@ def render_gaussians(
     cg_state: Any | None = None,
     current_batch: int = -1,
     is_batched: bool = False,
+    scaling_modifier: float = 1.0,
+    fastgs_mult: float = 0.5,
+    fastgs_get_flag: bool = False,
+    fastgs_metric_map: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
     from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 
-    screen = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device=pc.get_xyz.device) + 0
+    screen_shape = (int(pc.get_xyz.shape[0]), 4) if fastgs_get_flag else tuple(pc.get_xyz.shape)
+    screen = torch.zeros(screen_shape, dtype=pc.get_xyz.dtype, requires_grad=True, device=pc.get_xyz.device) + 0
     try:
         screen.retain_grad()
     except Exception:
         pass
 
+    metric_map = fastgs_metric_map
+    if metric_map is None and fastgs_get_flag:
+        metric_map = torch.zeros(int(viewpoint_camera.image_height) * int(viewpoint_camera.image_width), dtype=torch.int32, device=bg_color.device)
     settings = _settings(
         GaussianRasterizationSettings,
         image_height=int(viewpoint_camera.image_height),
@@ -31,13 +39,16 @@ def render_gaussians(
         tanfovx=math.tan(viewpoint_camera.FoVx * 0.5),
         tanfovy=math.tan(viewpoint_camera.FoVy * 0.5),
         bg=bg_color,
-        scale_modifier=1.0,
+        scale_modifier=scaling_modifier,
         viewmatrix=viewpoint_camera.world_view_transform,
         projmatrix=viewpoint_camera.full_proj_transform,
         sh_degree=pc.active_sh_degree,
         campos=viewpoint_camera.camera_center,
+        mult=fastgs_mult,
         prefiltered=False,
         debug=bool(getattr(pipe, "debug", False)),
+        get_flag=fastgs_get_flag,
+        metric_map=metric_map,
         antialiasing=bool(getattr(pipe, "antialiasing", False)),
         isbatched=is_batched,
         end_transmittance=0.0001,
@@ -59,14 +70,17 @@ def render_gaussians(
         cgState=cg_state,
         current_batch=current_batch,
     )
-    image, radii, depth = _unpack(output)
-    return {
+    image, radii, depth, accum_metric_counts = _unpack(output, fastgs_get_flag=fastgs_get_flag)
+    result = {
         "render": image.clamp(0.0, 1.0),
         "viewspace_points": screen,
         "visibility_filter": radii > 0,
         "radii": radii,
         "depth": depth,
     }
+    if accum_metric_counts is not None:
+        result["accum_metric_counts"] = accum_metric_counts
+    return result
 
 
 def _settings(settings_type: type, **values: Any) -> Any:
@@ -88,8 +102,9 @@ def _colors(viewpoint_camera: Any, pc: Any, pipe: Any) -> tuple[torch.Tensor | N
     return None, colors
 
 
-def _unpack(output: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+def _unpack(output: tuple[torch.Tensor, ...], *, fastgs_get_flag: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     if len(output) == 3:
-        return output[0], output[1], output[2]
-    return output[0], output[1], None
-
+        if fastgs_get_flag:
+            return output[0], output[1], None, output[2]
+        return output[0], output[1], output[2], None
+    return output[0], output[1], None, None

@@ -7,15 +7,25 @@ from ..amb3r.tools.keyframes import select_keyframes_iteratively
 from .clustering import find_best_kf_clustering
 
 
+def materialize_tensor(value, device):
+    if not torch.is_tensor(value):
+        return value
+    return value.detach().to(device).clone()
+
+
 class SfMemory():
     def __init__(self, cfg, num_frames, H, W):
         self.cfg = cfg
         self.num_frames = num_frames
-        self.pts = torch.zeros((num_frames, H, W, 3))
-        self.conf = torch.zeros((num_frames, H, W))
-        self.poses = torch.zeros((num_frames, 4, 4))
-        self.intrinsics = torch.zeros((num_frames, 3, 3))
-        self.iter = torch.zeros((num_frames))
+        requested_device = str(getattr(cfg, "device", "cuda:0"))
+        if requested_device.startswith("cuda") and not torch.cuda.is_available():
+            requested_device = "cpu"
+        self.device = torch.device(requested_device)
+        self.pts = torch.zeros((num_frames, H, W, 3), device=self.device)
+        self.conf = torch.zeros((num_frames, H, W), device=self.device)
+        self.poses = torch.zeros((num_frames, 4, 4), device=self.device)
+        self.intrinsics = torch.zeros((num_frames, 3, 3), device=self.device)
+        self.iter = torch.zeros((num_frames), device=self.device)
         self.kf_idx = None
         self.kf_clusters = None
         self.unmapped_frames = set()
@@ -34,14 +44,14 @@ class SfMemory():
         T, H, W, _ = cluster_res_best['pred']['pts'].shape
 
         predictions = {
-            'pts': cluster_res_best['pred']['pts'].cpu(),
-            'pose': cluster_res_best['pred']['pose'].cpu(),
-            'conf_sig': cluster_res_best['pred']['conf_sig'].cpu(),
+            'pts': materialize_tensor(cluster_res_best['pred']['pts'], self.device),
+            'pose': materialize_tensor(cluster_res_best['pred']['pose'], self.device),
+            'conf_sig': materialize_tensor(cluster_res_best['pred']['conf_sig'], self.device),
             'idx': cluster_res_best['idx'],
-            'iter': torch.ones(len(cluster_res_best['idx']))
+            'iter': torch.ones(len(cluster_res_best['idx']), device=self.device)
         }
         if 'intrinsic' in cluster_res_best['pred']:
-            predictions['intrinsic'] = cluster_res_best['pred']['intrinsic'].cpu()
+            predictions['intrinsic'] = materialize_tensor(cluster_res_best['pred']['intrinsic'], self.device)
 
         remaining_chunks = sorted(
             cluster_pred_all.items(),
@@ -206,14 +216,14 @@ class SfMemory():
         Align local predictions to global frame, then fuse keyframes (and optionally non-KFs).
         Used during coarse registration
         """
-        pts_local = res['world_points'][0].cpu()
-        pose_local = res['pose'][0].cpu()
-        conf_local = res['world_points_conf'][0].cpu()
+        pts_local = materialize_tensor(res['world_points'][0], self.device)
+        pose_local = materialize_tensor(res['pose'][0], self.device)
+        conf_local = materialize_tensor(res['world_points_conf'][0], self.device)
         conf_sig_local = (conf_local - 1) / conf_local
         map_idx_ori = map_idx.copy()
         intrinsic_local = res.get('intrinsic', None)
         if intrinsic_local is not None:
-            intrinsic_local = intrinsic_local[0].cpu()
+            intrinsic_local = materialize_tensor(intrinsic_local[0], self.device)
 
         # Align local coordinate system to global
         pts_global_from_local, c2w_global_from_local = coordinate_alignment(
@@ -222,7 +232,7 @@ class SfMemory():
             num_kf=num_kf, transform=True, scale=None, trunc=1.0)
 
         # ── Fuse keyframes ──
-        map_idx_kf = torch.tensor(map_idx[:num_kf])
+        map_idx_kf = torch.tensor(map_idx[:num_kf], device=self.device)
         conf_sig_local_kf = conf_sig_local[:num_kf]
         pts_global_from_local_kf = pts_global_from_local[:num_kf]
         c2w_global_from_local_kf = c2w_global_from_local[:num_kf]
@@ -255,7 +265,7 @@ class SfMemory():
             max_conf_kf = conf_sig_local_kf.mean(dim=(-1, -2)).max()
 
             if merge_mask.sum() > 0 and max_conf_kf > non_kf_conf_threshold:
-                non_kf_map_idx = torch.tensor(map_idx[num_kf:])
+                non_kf_map_idx = torch.tensor(map_idx[num_kf:], device=self.device)
                 merge_idx = non_kf_map_idx[merge_mask]
 
                 self.fuse_into_memory(
@@ -271,14 +281,14 @@ class SfMemory():
                 self.update_global_kf_clusters(merged_non_kf_global)
         
         if intrinsic_local is not None:
-            self.intrinsics[torch.tensor(map_idx)] = intrinsic_local
+            self.intrinsics[torch.tensor(map_idx, device=self.device)] = intrinsic_local
 
         aligned_res = {
             'pts': pts_global_from_local,
             'pose': c2w_global_from_local,
             'conf_sig': conf_sig_local,
             'idx': map_idx_ori,
-            'iter': torch.ones(len(map_idx_ori)),
+            'iter': torch.ones(len(map_idx_ori), device=self.device),
         }
         if intrinsic_local is not None:
             aligned_res['intrinsic'] = intrinsic_local
@@ -291,11 +301,13 @@ class SfMemory():
         Fuse a prediction dict into global memory, optionally with alignment.
         """
         
-        pts_local = res['pts']
-        c2w_local = res['pose']
-        conf_sig_local = res['conf_sig'] + 1e-6
+        pts_local = materialize_tensor(res['pts'], self.device)
+        c2w_local = materialize_tensor(res['pose'], self.device)
+        conf_sig_local = materialize_tensor(res['conf_sig'], self.device) + 1e-6
         map_idx = res['idx']
         intrinsic_local = res.get('intrinsic')
+        if intrinsic_local is not None:
+            intrinsic_local = materialize_tensor(intrinsic_local, self.device)
 
         # Optional coordinate alignment
         if not align:
@@ -309,7 +321,7 @@ class SfMemory():
 
         # Determine which frames to update
         if adaptive:
-            map_idx_t = torch.tensor(map_idx)
+            map_idx_t = torch.tensor(map_idx, device=self.device)
             conf_global_existing = self.conf[map_idx_t]
             mask = conf_sig_local.mean(dim=(-1, -2)) >= conf_global_existing.mean(dim=(-1, -2))
 
@@ -324,7 +336,7 @@ class SfMemory():
                 c2w_aligned = c2w_aligned[mask]
                 conf_sig_local = conf_sig_local[mask]
         else:
-            map_idx_update = torch.tensor(map_idx)
+            map_idx_update = torch.tensor(map_idx, device=self.device)
 
         # Fuse into global memory
         if len(map_idx_update) > 0:

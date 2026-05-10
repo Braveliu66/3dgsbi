@@ -120,7 +120,8 @@ class AggregatorBase(nn.Module, ABC):
         self.use_gradient_checkpoint = use_gradient_checkpoint
         self.pretrained_path = pretrained_path
 
-        print("pretrained_path:", self.pretrained_path)
+        if self.pretrained_path:
+            print("pretrained_path:", self.pretrained_path)
 
         # Validate depth
         if self.depth % self.aa_block_size != 0:
@@ -218,18 +219,21 @@ class AggregatorBase(nn.Module, ABC):
             )
 
             # Load pretrained weights
-            try:
-                ckpt = torch.load(pretrained_path)
-                del ckpt['pos_embed']
-                logger.info("Loading pretrained weights for DINOv2")
-                missing, unexpected = self.patch_embed.load_state_dict(ckpt, strict=False)
-                logger.info(f"Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)}")
-
-                # Store checkpoint for block initialization
-                self._dino_checkpoint = ckpt
-            except Exception as e:
-                logger.warning(f"Failed to load pretrained weights: {e}")
+            if not pretrained_path:
                 self._dino_checkpoint = None
+            else:
+                try:
+                    ckpt = torch.load(pretrained_path)
+                    del ckpt['pos_embed']
+                    logger.info("Loading pretrained weights for DINOv2")
+                    missing, unexpected = self.patch_embed.load_state_dict(ckpt, strict=False)
+                    logger.info(f"Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)}")
+
+                    # Store checkpoint for block initialization
+                    self._dino_checkpoint = ckpt
+                except Exception as e:
+                    logger.warning(f"Failed to load pretrained weights: {e}")
+                    self._dino_checkpoint = None
 
             # Disable gradients for mask token
             if hasattr(self.patch_embed, "mask_token"):

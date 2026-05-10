@@ -10,9 +10,10 @@ Provides streaming inference functionality:
 """
 
 import logging
+import time
 import torch
 import torch.nn as nn
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Callable
 from tqdm.auto import tqdm
 
 from lingbot_map.utils.rotation import quat_to_mat, mat_to_quat
@@ -969,6 +970,7 @@ class GCTStream(GCTBase):
         keyframe_interval: int = 1,
         flow_threshold: float = 0.0,
         max_non_keyframe_gap: int = 30,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         Windowed inference with keyframe detection and cross-window alignment.
@@ -1020,6 +1022,7 @@ class GCTStream(GCTBase):
         if len(images.shape) == 4:
             images = images.unsqueeze(0)
         B, S, C, H, W = images.shape
+        progress_started_at = time.monotonic()
 
         # Slice-then-move per iteration so `images` may live on CPU and we
         # keep peak GPU memory at one window (not the full sequence).
@@ -1173,6 +1176,20 @@ class GCTStream(GCTBase):
 
                 all_window_predictions.append(_make_window_pred(w_lists))
                 window_idx += 1
+                if progress_callback is not None:
+                    elapsed = max(0.001, time.monotonic() - progress_started_at)
+                    progress_callback(
+                        {
+                            "type": "windowed_window",
+                            "current_window": window_idx,
+                            "total_windows": 0,
+                            "window_start": window_start,
+                            "window_end": cursor,
+                            "covered_frames": min(cursor, S),
+                            "total_frames": S,
+                            "elapsed_seconds": elapsed,
+                        }
+                    )
 
                 # Next window starts overlap_size frames back (= scale frames)
                 if cursor < S:
@@ -1206,7 +1223,8 @@ class GCTStream(GCTBase):
                         break
 
             all_window_predictions: List[Dict] = []
-            for start, end in tqdm(windows, desc='Windowed inference'):
+            total_windows = len(windows)
+            for window_index, (start, end) in enumerate(tqdm(windows, desc='Windowed inference'), start=1):
                 # Slice on whichever device `images` lives on, then move just
                 # this window to the model device.  Keeps peak memory at one
                 # window instead of the full sequence.
@@ -1257,6 +1275,20 @@ class GCTStream(GCTBase):
                     del frame_out
 
                 all_window_predictions.append(_make_window_pred(w_lists))
+                if progress_callback is not None:
+                    elapsed = max(0.001, time.monotonic() - progress_started_at)
+                    progress_callback(
+                        {
+                            "type": "windowed_window",
+                            "current_window": window_index,
+                            "total_windows": total_windows,
+                            "window_start": start,
+                            "window_end": end,
+                            "covered_frames": end,
+                            "total_frames": S,
+                            "elapsed_seconds": elapsed,
+                        }
+                    )
 
         # Store for merge helpers
         self._last_window_size = eff_overlap  # not used directly, but kept for compat

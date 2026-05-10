@@ -59,7 +59,7 @@ def select_keyframes_iteratively(
         candidate_indices.remove(next_keyframe_idx)
 
     is_keyframe = torch.zeros(num_frames, dtype=torch.bool, device=dists.device)
-    is_keyframe[torch.tensor(keyframe_indices, dtype=torch.long)] = True
+    is_keyframe[torch.tensor(keyframe_indices, dtype=torch.long, device=dists.device)] = True
     
     return is_keyframe
 

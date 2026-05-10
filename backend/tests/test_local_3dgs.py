@@ -65,6 +65,36 @@ class Local3DGSTests(unittest.TestCase):
         self.assertEqual(float(score[1].item()), 0.0)
         self.assertEqual(FastGSPolicy({"fine_fastgs_sample_cameras": 3}).metrics()["fastgs_sample_cameras"], 3)
 
+    @unittest.skipIf(torch is None, f"torch import failed: {IMPORT_ERROR}")
+    def test_fastgs_final_prune_removes_low_opacity_and_high_score(self) -> None:
+        class DummyGaussians:
+            def __init__(self) -> None:
+                self.xyz = torch.zeros((4, 3))
+                self.opacity = torch.tensor([[0.05], [0.2], [0.2], [0.2]])
+
+            @property
+            def get_xyz(self):
+                return self.xyz
+
+            def final_prune_fastgs(self, min_opacity, pruning_score=None):
+                score = torch.zeros((self.xyz.shape[0],)) if pruning_score is None else pruning_score
+                mask = torch.logical_or(self.opacity.squeeze(-1) < min_opacity, score > 0.9)
+                self.prune_points(mask)
+
+            def prune_points(self, mask):
+                keep = ~mask
+                self.xyz = self.xyz[keep]
+                self.opacity = self.opacity[keep]
+
+        policy = FastGSPolicy()
+        policy.pruning_score = torch.tensor([[0.0], [0.95], [0.0], [0.0]])
+        gaussians = DummyGaussians()
+
+        policy.apply_final_prune(gaussians, min_opacity=0.1)
+
+        self.assertEqual(tuple(gaussians.get_xyz.shape), (2, 3))
+        self.assertEqual(policy.metrics()["fastgs_final_pruned_points"], 2)
+
 
 def write_test_ply(path: Path, xyz: np.ndarray, rgb: np.ndarray) -> None:
     normals = np.zeros_like(xyz, dtype=np.float32)

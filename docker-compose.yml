@@ -150,9 +150,11 @@ services:
         - type=local,dest=.docker-build-cache/frontend,mode=max
       args:
         NEXT_PUBLIC_API_BASE_URL: ""
+        NEXT_PUBLIC_UPLOAD_API_BASE_URL: "http://127.0.0.1:8000"
         INTERNAL_API_BASE_URL: http://backend:8000
     environment:
       NEXT_PUBLIC_API_BASE_URL: ""
+      NEXT_PUBLIC_UPLOAD_API_BASE_URL: "http://127.0.0.1:8000"
       INTERNAL_API_BASE_URL: http://backend:8000
     depends_on:
       backend:

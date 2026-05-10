@@ -17,34 +17,9 @@ def write_point_cloud_ply(
     max_points: int = 15_000_000,
     default_alpha: int = 255,
 ) -> int:
-    """写 Spark 可转码的点云 PLY。
+    """Write a plain colored point-cloud PLY."""
 
-    Spark 的 PlyReader 对纯点云 PLY 会自动补默认 Gaussian scale/rotation，
-    所以 LiteVGGT/LingBot 的稠密点云可以先落成 PLY，再统一转 SPZ。
-    """
-
-    pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
-    rgb = np.asarray(colors).reshape(-1, 3)
-    if pts.shape[0] != rgb.shape[0]:
-        raise PreviewFailure("PLY_SHAPE_MISMATCH", "points and colors must have the same length")
-
-    valid = np.isfinite(pts).all(axis=1)
-    if confidence is not None:
-        conf = np.asarray(confidence).reshape(-1)
-        if conf.shape[0] == pts.shape[0]:
-            valid &= np.isfinite(conf)
-    pts = pts[valid]
-    rgb = np.clip(rgb[valid], 0, 255).astype(np.uint8)
-
-    if pts.shape[0] == 0:
-        raise PreviewFailure("EMPTY_POINT_CLOUD", "algorithm produced no valid 3D points")
-
-    if pts.shape[0] > max_points:
-        # 固定随机种子保证同一输入的预览点采样稳定，方便缓存和排错。
-        rng = np.random.default_rng(20260505)
-        keep = rng.choice(pts.shape[0], size=max_points, replace=False)
-        pts = pts[keep]
-        rgb = rgb[keep]
+    pts, rgb, _conf = prepare_point_data(points, colors, confidence=confidence, max_points=max_points)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     dtype = np.dtype(
@@ -84,3 +59,40 @@ def write_point_cloud_ply(
         handle.write(header.encode("ascii"))
         handle.write(records.tobytes())
     return int(pts.shape[0])
+
+
+def prepare_point_data(
+    points: Any,
+    colors: Any,
+    *,
+    confidence: Any | None,
+    max_points: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+    rgb = np.asarray(colors).reshape(-1, 3)
+    if pts.shape[0] != rgb.shape[0]:
+        raise PreviewFailure("PLY_SHAPE_MISMATCH", "points and colors must have the same length")
+
+    conf = None
+    valid = np.isfinite(pts).all(axis=1)
+    if confidence is not None:
+        candidate = np.asarray(confidence, dtype=np.float32).reshape(-1)
+        if candidate.shape[0] == pts.shape[0]:
+            conf = candidate
+            valid &= np.isfinite(conf)
+    pts = pts[valid]
+    rgb = np.clip(rgb[valid], 0, 255).astype(np.uint8)
+    if conf is not None:
+        conf = conf[valid]
+
+    if pts.shape[0] == 0:
+        raise PreviewFailure("EMPTY_POINT_CLOUD", "algorithm produced no valid 3D points")
+
+    if max_points > 0 and pts.shape[0] > max_points:
+        rng = np.random.default_rng(20260505)
+        keep = rng.choice(pts.shape[0], size=max_points, replace=False)
+        pts = pts[keep]
+        rgb = rgb[keep]
+        if conf is not None:
+            conf = conf[keep]
+    return pts, rgb, conf

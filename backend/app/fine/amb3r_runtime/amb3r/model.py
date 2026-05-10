@@ -410,7 +410,7 @@ class AMB3R(nn.Module):
         return descriptors_chunk
     
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def run_amb3r_sfm(self, frames, cfg, keyframe_memory=None, benchmark_conf0=None):
         '''
         AMB3R-SfM interface, benchmark_conf0 is for AMB3R base model for early stopping
@@ -422,12 +422,12 @@ class AMB3R(nn.Module):
         images, patch_tokens = self.front_end.encode_patch_tokens(frames)
 
         res = self.front_end.decode_patch_tokens_and_heads(images, patch_tokens)
-        conf_0 = res['world_points_conf'][0].mean(dim=(1, 2)).cpu()
+        conf_0 = res['world_points_conf'][0].mean(dim=(1, 2))
         res['benchmark_conf0'] = conf_0
         res_all.append(res)
 
         if benchmark_conf0 is not None:
-            conf_mean = res['world_points_conf'][0].mean(dim=(1, 2)).cpu() # (T, )
+            conf_mean = res['world_points_conf'][0].mean(dim=(1, 2)) # (T, )
             # Check if any frame has confidence higher than benchmark_conf0
             if not (conf_mean > benchmark_conf0 - 1e-2).any():
                 return None

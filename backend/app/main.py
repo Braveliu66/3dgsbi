@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import mimetypes
+import os
+import shutil
 import tempfile
+import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,13 +19,13 @@ from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, st
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, inspect, select, text
 from sqlalchemy.orm import Session, selectinload
 
 from app.algorithms import license_notice_for, normalize_preview_pipeline, runtime_preflight, seed_algorithm_registry
 from app.config import get_settings
-from app.database import SessionLocal, get_db, initialize_database_schema
-from app.models import AlgorithmRegistry, Artifact, Feedback, MediaAsset, Project, Task, TaskEvent, User, new_id, utc_now
+from app.database import SessionLocal, engine, get_db, initialize_database_schema
+from app.models import AlgorithmRegistry, Artifact, Feedback, MediaAsset, Project, Task, TaskEvent, UploadSession, User, new_id, utc_now
 from app.resources import collect_resources
 from app.security import (
     create_access_token,
@@ -37,6 +42,8 @@ from app.task_control import request_task_cancel
 settings = get_settings()
 storage = Storage(settings)
 app = FastAPI(title=settings.app_name)
+MAX_UPLOAD_CHUNK_SIZE = 64 * 1024 * 1024
+UPLOAD_COMPLETE_LOCK_TIMEOUT_SECONDS = 30
 
 app.add_middleware(
     CORSMiddleware,
@@ -74,6 +81,15 @@ class FeedbackPayload(BaseModel):
     project_id: str | None = None
 
 
+class UploadCheckPayload(BaseModel):
+    file_name: str
+    file_size: int
+    chunk_size: int
+    total_chunks: int
+    file_hash: str
+    content_type: str | None = None
+
+
 def iso(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
 
@@ -104,11 +120,13 @@ def media_dict(item: MediaAsset) -> dict[str, Any]:
     }
 
 
-def task_dict(task: Task) -> dict[str, Any]:
+def task_dict(task: Task, project_name: str | None = None) -> dict[str, Any]:
+    project = task.__dict__.get("project")
+    resolved_project_name = project_name if project_name is not None else project.name if project else None
     return {
         "id": task.id,
         "project_id": task.project_id,
-        "project_name": task.project.name if task.project else None,
+        "project_name": resolved_project_name,
         "type": task.type,
         "status": task.status,
         "priority": task.priority,
@@ -178,7 +196,7 @@ def project_dict(project: Project, include_children: bool = False) -> dict[str, 
     }
     if include_children:
         payload["media"] = [media_dict(item) for item in project.media]
-        payload["tasks"] = [task_dict(item) for item in project.tasks]
+        payload["tasks"] = [task_dict(item, project.name) for item in project.tasks]
         payload["artifacts"] = [artifact_dict(item) for item in project.artifacts]
     return payload
 
@@ -279,6 +297,130 @@ def create_video_thumbnail(uri: str, project: Project, media_id: str) -> tuple[s
             temp_path.unlink(missing_ok=True)
 
 
+def media_kind_for_upload(file_name: str, content_type: str | None) -> str:
+    content_type = content_type or mimetypes.guess_type(file_name)[0] or ""
+    if content_type.startswith("image/"):
+        return "image"
+    if content_type.startswith("video/"):
+        return "video"
+    suffix = Path(file_name).suffix.lower()
+    return "image" if suffix in {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"} else "video"
+
+
+def validate_media_kind(project: Project, kind: str) -> None:
+    if project.input_type == "images" and kind != "image":
+        raise HTTPException(status_code=400, detail="图片项目只能上传图片")
+    if project.input_type == "video" and kind != "video":
+        raise HTTPException(status_code=400, detail="视频项目只能上传视频")
+
+
+def add_media_asset(db: Session, project: Project, file_name: str, kind: str, uri: str, size: int, media_id: str | None = None) -> MediaAsset:
+    media = MediaAsset(project_id=project.id, id=media_id or new_id(), kind=kind, object_uri=uri, file_name=file_name, file_size=size)
+    project.total_size_bytes += size
+    project.source_version += 1
+    media.source_version = project.source_version
+    project.status = "UPLOADING"
+    project.updated_at = utc_now()
+    if kind == "image":
+        thumb_uri, width, height = create_thumbnail(uri, project, media.id)
+        media.thumbnail_uri = thumb_uri
+        media.width = width
+        media.height = height
+        if thumb_uri and not project.preview_image_uri:
+            project.preview_image_uri = media.thumbnail_uri
+    else:
+        thumb_uri, width, height, duration = create_video_thumbnail(uri, project, media.id)
+        media.thumbnail_uri = thumb_uri
+        media.width = width
+        media.height = height
+        media.duration_seconds = duration
+        if thumb_uri and not project.preview_image_uri:
+            project.preview_image_uri = media.thumbnail_uri
+    db.add(media)
+    return media
+
+
+def validate_upload_payload(payload: UploadCheckPayload) -> None:
+    if payload.file_size <= 0:
+        raise HTTPException(status_code=400, detail="file_size must be positive")
+    if payload.chunk_size <= 0:
+        raise HTTPException(status_code=400, detail="chunk_size must be positive")
+    if payload.chunk_size > MAX_UPLOAD_CHUNK_SIZE:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="chunk_size exceeds 64MB limit")
+    expected_chunks = (payload.file_size + payload.chunk_size - 1) // payload.chunk_size
+    if payload.total_chunks != expected_chunks:
+        raise HTTPException(status_code=400, detail="total_chunks does not match file_size and chunk_size")
+    if len(payload.file_hash) != 64 or any(char not in "0123456789abcdef" for char in payload.file_hash.lower()):
+        raise HTTPException(status_code=400, detail="file_hash must be a SHA-256 hex digest")
+
+
+def upload_session_dir(session: UploadSession) -> Path:
+    return settings.local_work_root / "uploads" / session.user_id / session.project_id / session.file_hash
+
+
+def chunk_path(session: UploadSession, chunk_index: int) -> Path:
+    return upload_session_dir(session) / f"{chunk_index:08d}.part"
+
+
+def expected_chunk_size(session: UploadSession, chunk_index: int) -> int:
+    if chunk_index < 0 or chunk_index >= session.total_chunks:
+        raise HTTPException(status_code=404, detail="Chunk index out of range")
+    if chunk_index == session.total_chunks - 1:
+        return session.file_size - session.chunk_size * (session.total_chunks - 1)
+    return session.chunk_size
+
+
+def uploaded_chunk_indexes(session: UploadSession) -> list[int]:
+    root = upload_session_dir(session)
+    if not root.exists():
+        return []
+    indexes: list[int] = []
+    for index in range(session.total_chunks):
+        path = chunk_path(session, index)
+        if path.exists() and path.stat().st_size == expected_chunk_size(session, index):
+            indexes.append(index)
+    return indexes
+
+
+def owned_upload_session(db: Session, upload_id: str, user: User) -> UploadSession:
+    session = db.get(UploadSession, upload_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Upload session not found")
+    if user.role != "admin" and session.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Upload session access denied")
+    return session
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+@contextmanager
+def upload_complete_lock(session: UploadSession):
+    root = upload_session_dir(session)
+    root.mkdir(parents=True, exist_ok=True)
+    lock_path = root / ".complete.lock"
+    deadline = time.monotonic() + UPLOAD_COMPLETE_LOCK_TIMEOUT_SECONDS
+    handle: int | None = None
+    while handle is None:
+        try:
+            handle = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise HTTPException(status_code=409, detail="Upload is already being completed")
+            time.sleep(0.2)
+    try:
+        os.write(handle, str(os.getpid()).encode("ascii"))
+        yield
+    finally:
+        os.close(handle)
+        lock_path.unlink(missing_ok=True)
+
+
 def first_media_thumbnail(project: Project, exclude_media_id: str | None = None) -> str | None:
     for item in project.media:
         if item.id != exclude_media_id and item.thumbnail_uri:
@@ -320,9 +462,21 @@ def seed_database(db: Session) -> None:
     db.commit()
 
 
+def ensure_upload_session_schema() -> None:
+    inspector = inspect(engine)
+    if "upload_sessions" not in inspector.get_table_names():
+        return
+    columns = {item["name"] for item in inspector.get_columns("upload_sessions")}
+    if "error_message" in columns:
+        return
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE upload_sessions ADD COLUMN error_message TEXT"))
+
+
 @app.on_event("startup")
 def startup() -> None:
     initialize_database_schema()
+    ensure_upload_session_schema()
     storage.ensure_bucket()
     with SessionLocal() as db:
         seed_database(db)
@@ -496,6 +650,166 @@ async def upload_media(
     return media_dict(media)
 
 
+@app.post("/api/projects/{project_id}/uploads/check")
+def check_upload(
+    project_id: str,
+    payload: UploadCheckPayload,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    validate_upload_payload(payload)
+    project = owned_project(db, project_id, user)
+    file_name = safe_filename(payload.file_name or "upload.bin")
+    kind = media_kind_for_upload(file_name, payload.content_type)
+    validate_media_kind(project, kind)
+
+    completed_session = db.scalar(
+        select(UploadSession)
+        .where(
+            UploadSession.project_id == project.id,
+            UploadSession.user_id == user.id,
+            UploadSession.file_hash == payload.file_hash.lower(),
+            UploadSession.status == "completed",
+        )
+        .order_by(UploadSession.updated_at.desc())
+    )
+    if completed_session and completed_session.media_id:
+        media = db.get(MediaAsset, completed_session.media_id)
+        if media:
+            return {"upload_id": completed_session.id, "uploaded_chunks": list(range(completed_session.total_chunks)), "completed": True, "media": media_dict(media)}
+
+    session = db.scalar(
+        select(UploadSession)
+        .where(
+            UploadSession.project_id == project.id,
+            UploadSession.user_id == user.id,
+            UploadSession.file_hash == payload.file_hash.lower(),
+            UploadSession.status == "uploading",
+        )
+        .order_by(UploadSession.updated_at.desc())
+    )
+    if not session:
+        session = UploadSession(
+            project_id=project.id,
+            user_id=user.id,
+            file_hash=payload.file_hash.lower(),
+            file_name=file_name,
+            file_size=payload.file_size,
+            chunk_size=payload.chunk_size,
+            total_chunks=payload.total_chunks,
+            content_type=payload.content_type,
+            kind=kind,
+            status="uploading",
+            error_message=None,
+        )
+        db.add(session)
+        db.commit()
+        db.refresh(session)
+    elif session.file_size != payload.file_size or session.chunk_size != payload.chunk_size or session.total_chunks != payload.total_chunks:
+        raise HTTPException(status_code=409, detail="Existing upload session metadata does not match")
+    elif session.status == "failed":
+        session.status = "uploading"
+        session.error_message = None
+        session.updated_at = utc_now()
+        db.commit()
+    return {"upload_id": session.id, "uploaded_chunks": uploaded_chunk_indexes(session), "completed": False}
+
+
+@app.put("/api/uploads/{upload_id}/chunks/{chunk_index}")
+async def upload_chunk(
+    upload_id: str,
+    chunk_index: int,
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    session = owned_upload_session(db, upload_id, user)
+    if session.status == "completed":
+        return {"chunk_index": chunk_index, "uploaded_chunks": uploaded_chunk_indexes(session)}
+    if session.status == "failed":
+        raise HTTPException(status_code=409, detail=session.error_message or "Upload session failed")
+    expected_size = expected_chunk_size(session, chunk_index)
+    if expected_size > MAX_UPLOAD_CHUNK_SIZE:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Chunk exceeds 64MB limit")
+    root = upload_session_dir(session)
+    root.mkdir(parents=True, exist_ok=True)
+    target = chunk_path(session, chunk_index)
+    temp_path = root / f"{target.name}.{new_id()}.tmp"
+    size = 0
+    try:
+        with temp_path.open("wb") as handle:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                handle.write(chunk)
+        if size != expected_size:
+            temp_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail="Chunk size does not match expected size")
+        temp_path.replace(target)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+    session.updated_at = utc_now()
+    db.commit()
+    return {"chunk_index": chunk_index, "uploaded_chunks": uploaded_chunk_indexes(session)}
+
+
+@app.post("/api/uploads/{upload_id}/complete")
+def complete_upload(upload_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    session = owned_upload_session(db, upload_id, user)
+    if session.status == "completed" and session.media_id:
+        media = db.get(MediaAsset, session.media_id)
+        if media:
+            return {"media": media_dict(media)}
+    if session.status == "failed":
+        raise HTTPException(status_code=409, detail=session.error_message or "Upload session failed")
+    project = owned_project(db, session.project_id, user)
+    indexes = uploaded_chunk_indexes(session)
+    if len(indexes) != session.total_chunks:
+        raise HTTPException(status_code=400, detail="Upload chunks are incomplete")
+
+    merge_root = upload_session_dir(session)
+    merged_path = merge_root / f"merged-{new_id()}-{session.file_name}"
+    try:
+        with upload_complete_lock(session):
+            db.refresh(session)
+            if session.status == "completed" and session.media_id:
+                media = db.get(MediaAsset, session.media_id)
+                if media:
+                    return {"media": media_dict(media)}
+            with merged_path.open("wb") as out:
+                for index in range(session.total_chunks):
+                    with chunk_path(session, index).open("rb") as handle:
+                        shutil.copyfileobj(handle, out)
+            if merged_path.stat().st_size != session.file_size:
+                session.status = "failed"
+                session.error_message = "Merged file size does not match expected size"
+                session.updated_at = utc_now()
+                db.commit()
+                raise HTTPException(status_code=400, detail=session.error_message)
+            merged_hash = sha256_file(merged_path)
+            if merged_hash != session.file_hash:
+                session.status = "failed"
+                session.error_message = "Merged file SHA-256 does not match expected hash"
+                session.updated_at = utc_now()
+                db.commit()
+                raise HTTPException(status_code=400, detail=session.error_message)
+            media_id = new_id()
+            uri = storage.upload_path(merged_path, media_key(project, media_id, session.file_name, session.kind))
+            media = add_media_asset(db, project, session.file_name, session.kind, uri, session.file_size, media_id)
+            session.status = "completed"
+            session.object_uri = uri
+            session.media_id = media.id
+            session.error_message = None
+            session.updated_at = utc_now()
+            db.commit()
+            db.refresh(media)
+            shutil.rmtree(merge_root, ignore_errors=True)
+            return {"media": media_dict(media)}
+    finally:
+        if merged_path.exists():
+            merged_path.unlink(missing_ok=True)
+
+
 @app.get("/api/projects/{project_id}/media")
 def list_media(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
     project = owned_project(db, project_id, user, include_children=True)
@@ -565,7 +879,7 @@ def create_preview_task(
     project.error_message = None
     db.add(task)
     db.flush()
-    emit_event(db, project.id, "task_queued", task_dict(task), task.id)
+    emit_event(db, project.id, "task_queued", task_dict(task, project.name), task.id)
     db.commit()
     try:
         enqueue_preview_task(task.id)
@@ -576,10 +890,10 @@ def create_preview_task(
         task.finished_at = utc_now()
         project.status = "FAILED"
         project.error_message = task.error_message
-        emit_event(db, project.id, "task_failed", task_dict(task), task.id)
+        emit_event(db, project.id, "task_failed", task_dict(task, project.name), task.id)
         db.commit()
     db.refresh(task)
-    return task_dict(task)
+    return task_dict(task, project.name)
 
 
 @app.post("/api/projects/{project_id}/tasks/fine")
@@ -619,7 +933,7 @@ def create_fine_task(
     project.error_message = None
     db.add(task)
     db.flush()
-    emit_event(db, project.id, "task_queued", task_dict(task), task.id)
+    emit_event(db, project.id, "task_queued", task_dict(task, project.name), task.id)
     db.commit()
     try:
         enqueue_fine_task(task.id)
@@ -630,10 +944,10 @@ def create_fine_task(
         task.finished_at = utc_now()
         project.status = "FAILED"
         project.error_message = task.error_message
-        emit_event(db, project.id, "task_failed", task_dict(task), task.id)
+        emit_event(db, project.id, "task_failed", task_dict(task, project.name), task.id)
         db.commit()
     db.refresh(task)
-    return task_dict(task)
+    return task_dict(task, project.name)
 
 
 @app.get("/api/tasks/{task_id}")
@@ -641,8 +955,8 @@ def get_task(task_id: str, user: User = Depends(get_current_user), db: Session =
     task = db.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    owned_project(db, task.project_id, user)
-    return task_dict(task)
+    project = owned_project(db, task.project_id, user)
+    return task_dict(task, project.name)
 
 
 @app.post("/api/tasks/{task_id}/cancel")
@@ -658,9 +972,9 @@ def cancel_task(task_id: str, user: User = Depends(get_current_user), db: Sessio
         task.current_stage = "canceled"
         task.error_message = "用户取消任务"
         project.status = "CANCELED"
-        emit_event(db, project.id, "task_failed", task_dict(task), task.id)
+        emit_event(db, project.id, "task_failed", task_dict(task, project.name), task.id)
         db.commit()
-    return task_dict(task)
+    return task_dict(task, project.name)
 
 
 @app.get("/api/projects/{project_id}/artifacts")
@@ -791,6 +1105,48 @@ def stored_file_response(uri: str, *, filename: str | None = None, media_type: s
     return FileResponse(storage.local_path(uri), filename=filename if attachment else None, media_type=media_type)
 
 
+def camera_preview_segments(project: Project, artifacts: list[Artifact]) -> list[dict[str, Any]]:
+    valid_segments = set()
+    for media in project.media:
+        segment_index = metadata_int((media.quality_flags or {}).get("segment_index"))
+        if segment_index is not None:
+            valid_segments.add(segment_index)
+    latest: dict[int, Artifact] = {}
+    for artifact in artifacts:
+        metadata = artifact.metadata_json or {}
+        segment_index = metadata_int(metadata.get("segment_index"))
+        if segment_index is None or artifact.source_version > project.source_version:
+            continue
+        if valid_segments and segment_index not in valid_segments:
+            continue
+        previous = latest.get(segment_index)
+        if previous is None or (artifact.source_version, artifact.created_at) > (previous.source_version, previous.created_at):
+            latest[segment_index] = artifact
+    segments = []
+    for segment_index, artifact in sorted(latest.items()):
+        metadata = artifact.metadata_json or {}
+        segments.append(
+            {
+                "artifact_id": artifact.id,
+                "model_url": artifact_url(artifact),
+                "format": "spz",
+                "segment_index": segment_index,
+                "segment_start_seconds": metadata.get("segment_start_seconds"),
+                "segment_end_seconds": metadata.get("segment_end_seconds"),
+                "estimated_splats": metadata.get("splat_count"),
+                "file_size": artifact.file_size,
+            }
+        )
+    return segments
+
+
+def metadata_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 @app.get("/api/projects/{project_id}/viewer-config")
 def viewer_config(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
     project = owned_project(db, project_id, user, include_children=True)
@@ -808,6 +1164,17 @@ def viewer_config(project_id: str, user: User = Depends(get_current_user), db: S
             "progressive": False,
         }
     preview_artifacts = [item for item in project.artifacts if item.kind == "preview_spz"]
+    if project.input_type == "camera":
+        segments = camera_preview_segments(project, preview_artifacts)
+        if segments:
+            return {
+                "status": "ready",
+                "mode": "progressive",
+                "source": "preview",
+                "segments": segments,
+                "format": "spz",
+                "progressive": True,
+            }
     fresh = [item for item in preview_artifacts if item.source_version == project.source_version]
     if fresh:
         artifact = sorted(fresh, key=lambda item: item.created_at, reverse=True)[0]
@@ -880,7 +1247,7 @@ def preflight(_: User = Depends(require_admin), db: Session = Depends(get_db)) -
 
 @app.get("/api/admin/tasks")
 def admin_tasks(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, Any]:
-    tasks = db.scalars(select(Task).order_by(Task.created_at.desc()).limit(100)).all()
+    tasks = db.scalars(select(Task).options(selectinload(Task.project)).order_by(Task.created_at.desc()).limit(100)).all()
     return {"tasks": [task_dict(item) for item in tasks]}
 
 
@@ -909,11 +1276,13 @@ def admin_workers(_: User = Depends(require_admin), db: Session = Depends(get_db
 
 @app.get("/api/projects/{project_id}/events")
 async def project_events(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    project = owned_project(db, project_id, user, include_children=True)
+    owned_project(db, project_id, user)
 
     async def stream():
-        yield sse("project_snapshot", project_dict(project, include_children=True))
-        last_id = db.scalar(select(func.max(TaskEvent.id)).where(TaskEvent.project_id == project_id)) or 0
+        with SessionLocal() as snapshot_db:
+            project = owned_project(snapshot_db, project_id, user, include_children=True)
+            yield sse("project_snapshot", project_dict(project, include_children=True))
+            last_id = snapshot_db.scalar(select(func.max(TaskEvent.id)).where(TaskEvent.project_id == project_id)) or 0
         while True:
             with SessionLocal() as event_db:
                 events = event_db.scalars(
@@ -970,7 +1339,7 @@ async def camera_chunk(
         enqueue_preview_task(task.id)
     except Exception:
         pass
-    return {"media": media_dict(media), "task": task_dict(task)}
+    return {"media": media_dict(media), "task": task_dict(task, project.name)}
 
 
 @app.post("/api/projects/{project_id}/camera/finish")

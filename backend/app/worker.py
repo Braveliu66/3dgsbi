@@ -321,7 +321,7 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
 
             pipeline = normalize_preview_pipeline((task.options or {}).get("preview_pipeline"), project.input_type)
             ensure_pipeline_weights(db, task, project, pipeline, started)
-            input_dir, input_video = download_media(project, work_dir)
+            input_dir, input_video = download_media(project, work_dir, task)
             update_task(db, task, project, "input_downloaded", 13, started, f"downloaded {len(project.media)} media files")
             input_metrics: dict[str, Any] = {}
             if any(media.kind == "image" for media in project.media):
@@ -380,7 +380,14 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
                     .options(selectinload(Project.media), selectinload(Project.artifacts))
                 )
                 update_task(upload_db, task, project, "uploading_artifact", 92, started, "validated non-empty preview.spz")
-                key = storage_key("users", project.owner_id, "projects", project.id, "preview", "preview.spz")
+                segment_index = read_optional_int((task.options or {}).get("segment_index"))
+                segment_metadata = camera_segment_metadata(project, segment_index, source_version) if segment_index is not None else {}
+                preview_file_name = f"preview-segment-{segment_index:04d}.spz" if segment_index is not None else "preview.spz"
+                key = (
+                    storage_key("users", project.owner_id, "projects", project.id, "preview", "segments", preview_file_name)
+                    if segment_index is not None
+                    else storage_key("users", project.owner_id, "projects", project.id, "preview", preview_file_name)
+                )
                 checksum = sha256_path(output_spz)
                 uri = storage.upload_path(output_spz, key)
                 artifact = Artifact(
@@ -388,7 +395,7 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
                     task_id=task.id,
                     kind="preview_spz",
                     object_uri=uri,
-                    file_name="preview.spz",
+                    file_name=preview_file_name,
                     file_size=output_spz.stat().st_size,
                     checksum=checksum,
                     source_version=source_version,
@@ -397,6 +404,9 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
                         "source_version": source_version,
                         "generated_by": worker_id,
                         "adapter": result.metrics.get("adapter"),
+                        "input_mode": "realtime_camera" if segment_index is not None else project.input_type,
+                        "segment_index": segment_index,
+                        **segment_metadata,
                         "source_commits": result.source_commits,
                         "splat_count": result.splat_count,
                         "intermediate_ply": str(result.intermediate_ply) if result.intermediate_ply else None,
@@ -440,7 +450,7 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
                     **input_metrics,
                     **result.metrics,
                 }
-                task.logs = append_log(task.logs, "uploaded preview.spz")
+                task.logs = append_log(task.logs, f"uploaded {preview_file_name}")
                 if ply_artifact:
                     task.logs = append_log(task.logs, "uploaded original.ply")
                 log_capture.flush()
@@ -451,6 +461,14 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
                 project.preview_source_version = artifact.source_version
                 project.error_message = None
                 emit(upload_db, project.id, "artifact_created", {"artifact_id": artifact.id, "kind": artifact.kind}, task.id)
+                if segment_index is not None:
+                    emit(
+                        upload_db,
+                        project.id,
+                        "preview_segment_ready",
+                        {"artifact_id": artifact.id, "segment_index": segment_index, **segment_metadata},
+                        task.id,
+                    )
                 if ply_artifact:
                     emit(upload_db, project.id, "artifact_created", {"artifact_id": ply_artifact.id, "kind": ply_artifact.kind}, task.id)
                 if log_artifact:
@@ -512,17 +530,48 @@ def ensure_pipeline_weights(db, task: Task, project: Project, pipeline: str, sta
     update_task(db, task, project, "weights_ready", 12, started, f"model weights ready for {pipeline}")
 
 
-def download_media(project: Project, work_dir: Path) -> tuple[Path, Path | None]:
+def download_media(project: Project, work_dir: Path, task: Task | None = None) -> tuple[Path, Path | None]:
     input_dir = work_dir / "input"
     input_dir.mkdir(parents=True, exist_ok=True)
     input_video: Path | None = None
-    for index, media in enumerate(project.media):
+    media_items = list(project.media)
+    if project.input_type == "camera" and task is not None:
+        options = task.options or {}
+        segment_index = read_optional_int(options.get("segment_index"))
+        source_version = task_source_version(task, project)
+        selected = []
+        if segment_index is not None:
+            selected = [
+                media
+                for media in media_items
+                if read_optional_int((media.quality_flags or {}).get("segment_index")) == segment_index
+            ]
+        if not selected:
+            selected = [media for media in media_items if media.source_version == source_version]
+        if selected:
+            media_items = selected[-1:]
+    for index, media in enumerate(media_items):
         suffix = Path(media.file_name).suffix or (".jpg" if media.kind == "image" else ".mp4")
         target = input_dir / f"{index:06d}-{media.id}{suffix}"
         storage.download_to_path(media.object_uri, target)
         if media.kind == "video" and input_video is None:
             input_video = target
     return input_dir, input_video
+
+
+def camera_segment_metadata(project: Project, segment_index: int | None, source_version: int) -> dict[str, Any]:
+    if segment_index is None:
+        return {}
+    for media in project.media:
+        flags = media.quality_flags or {}
+        if read_optional_int(flags.get("segment_index")) != segment_index and media.source_version != source_version:
+            continue
+        return {
+            "segment_start_seconds": flags.get("segment_start_seconds"),
+            "segment_end_seconds": flags.get("segment_end_seconds"),
+            "media_id": media.id,
+        }
+    return {}
 
 
 def task_log_path(task_id: str) -> Path:
@@ -584,6 +633,13 @@ def read_positive_int(value: Any, fallback: int) -> int:
     except (TypeError, ValueError):
         return fallback
     return parsed if parsed > 0 else fallback
+
+
+def read_optional_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def update_task(db, task: Task, project: Project, stage: str, progress: int, started: float, *logs: str) -> None:
@@ -666,6 +722,9 @@ def task_payload(task: Task) -> dict[str, Any]:
 
 
 def estimate_eta(task: Task, project: Project, started: float) -> int | None:
+    lingbot_eta = estimate_lingbot_eta(task)
+    if lingbot_eta is not None:
+        return lingbot_eta
     progress = max(1, min(99, int(task.progress or 0)))
     if progress >= 100:
         return 0
@@ -676,6 +735,36 @@ def estimate_eta(task: Task, project: Project, started: float) -> int | None:
     if progress < 20:
         return int(by_expected)
     return int(max(0, by_progress * 0.55 + by_expected * 0.45))
+
+
+def estimate_lingbot_eta(task: Task) -> int | None:
+    if task.current_stage != "lingbot_inference":
+        return None
+    metrics = task.metrics or {}
+    explicit_eta = metric_float(metrics.get("lingbot_inference_eta_seconds"))
+    if explicit_eta is not None:
+        return max(0, int(explicit_eta))
+
+    current_frame = metric_float(metrics.get("lingbot_current_frame"))
+    total_frames = metric_float(metrics.get("lingbot_total_frames"))
+    seconds_per_frame = metric_float(metrics.get("lingbot_seconds_per_frame"))
+    if current_frame is not None and total_frames is not None and seconds_per_frame is not None:
+        return max(0, int((total_frames - current_frame) * seconds_per_frame))
+
+    current_window = metric_float(metrics.get("lingbot_current_window"))
+    total_windows = metric_float(metrics.get("lingbot_total_windows"))
+    seconds_per_window = metric_float(metrics.get("lingbot_seconds_per_window"))
+    if current_window is not None and total_windows is not None and seconds_per_window is not None:
+        return max(0, int((total_windows - current_window) * seconds_per_window))
+    return None
+
+
+def metric_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
 
 
 def expected_seconds_for_task(task: Task, project: Project) -> int:

@@ -90,7 +90,7 @@ def average_transforms_with_weights(transforms, weights):
     avg_translation = torch.sum(weights.view(-1, 1) * translations, dim=0)
 
     # 3. Weighted average of the rotation component (using quaternions)
-    rot_matrices_np = transforms[:, :3, :3].cpu().numpy()
+    rot_matrices_np = transforms[:, :3, :3].detach().to(torch.float32).cpu().numpy()
     quats_np = Rotation.from_matrix(rot_matrices_np).as_quat()
 
     # Align quaternions to handle the double-cover problem
@@ -98,7 +98,8 @@ def average_transforms_with_weights(transforms, weights):
         if np.dot(quats_np[0], quats_np[i]) < 0:
             quats_np[i] *= -1
 
-    avg_quat_np = np.sum(weights.cpu().numpy().reshape(-1, 1) * quats_np, axis=0)
+    weights_np = weights.detach().to(torch.float32).cpu().numpy().reshape(-1, 1)
+    avg_quat_np = np.sum(weights_np * quats_np, axis=0)
     avg_quat_np /= np.linalg.norm(avg_quat_np)
 
     avg_rot_matrix = torch.from_numpy(

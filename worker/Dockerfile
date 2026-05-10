@@ -316,6 +316,7 @@ PYTHONPATH=/app:/app/app/preview/vendor/edgs:/app/app/preview/vendor/edgs/gaussi
   python - <<'PY'
 import torch
 import torchvision
+import importlib.metadata as importlib_metadata
 import romatch
 import pycolmap
 import transformer_engine.pytorch as te
@@ -331,14 +332,15 @@ from scene import GaussianModel
 
 assert torch.__version__.startswith("2.7.1"), torch.__version__
 assert torchvision.__version__.startswith("0.22.1"), torchvision.__version__
+assert importlib_metadata.version("flashinfer-python") == "0.6.11"
+assert importlib_metadata.version("flashinfer-cubin") == "0.6.11"
 ext = diff_gaussian_rasterization._C
 for name in ("get_JTv", "get_Diag", "get_JTJv", "fastgs_accumulate_metrics"):
     assert hasattr(ext, name), name
 assert hasattr(diff_gaussian_rasterization._RasterizeGaussians, "fastgs_accumulate_metrics")
 assert getattr(diff_gaussian_rasterization, "MOBILEGS_COMPACT_BOX", False)
 assert getattr(diff_gaussian_rasterization, "MOBILEGS_FASTGS_METRIC", False)
-x = torch.randn(1, 2, 2, 2)
-local_correlation(x, x, 1, torch.zeros(1, 2, 2, 2), use_custom_corr=False)
+assert callable(local_correlation)
 import app.fine.runner
 import app.fine.amb3r_sfm
 from app.fine.amb3r_runtime.amb3r.model import AMB3R

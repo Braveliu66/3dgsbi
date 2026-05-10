@@ -147,6 +147,7 @@ def build_scene(
             keep_ratio=read_float(ctx.options.get("fine_amb3r_keep_ratio", ctx.options.get("fine_litevggt_keep_ratio")), 0.12, minimum=0.001, maximum=1.0),
             max_points=read_int(ctx.options.get("fine_amb3r_max_points", ctx.options.get("fine_litevggt_max_points")), 1_000_000, minimum=10_000, maximum=15_000_000),
             progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
+            options=ctx.options,
         )
         if sfm_backend == "litevggt":
             result.metrics["sfm_backend_requested_alias"] = "litevggt_deprecated_maps_to_amb3r"

@@ -1,5 +1,6 @@
 import torch
 import heapq
+import time
 from pathlib import Path
 from tqdm import tqdm
 from omegaconf import OmegaConf
@@ -8,13 +9,134 @@ from .clustering import image_clustering, get_distance_matrix, find_best_image_c
 from .memory import SfMemory
 
 
+def materialize_tensor(value, device=None):
+    if not torch.is_tensor(value):
+        return value
+    tensor = value.detach()
+    if device is not None:
+        tensor = tensor.to(device)
+    return tensor.clone()
+
+
+def materialize_result(result, device=None):
+    if result is None:
+        return None
+    return {
+        key: materialize_tensor(value, device=device) if torch.is_tensor(value) else value
+        for key, value in result.items()
+    }
+
 
 class AMB3R_SfM():
-    def __init__(self, model, cfg_path=None):
+    def __init__(self, model, cfg_path=None, progress=None, options=None):
         if cfg_path is None:
             cfg_path = Path(__file__).with_name("sfm_config.yaml")
         self.cfg = OmegaConf.load(cfg_path)
-        self.model = model.to(self.cfg.device)
+        OmegaConf.set_struct(self.cfg, False)
+        self.progress = progress
+        self.options = options or {}
+        self.profile_metrics = {}
+        device = torch.device(str(self.cfg.device))
+        if device.type == "cuda" and not torch.cuda.is_available():
+            device = torch.device("cpu")
+            self.cfg.device = "cpu"
+        self.model = model.to(device)
+        self.model.device = str(device)
+        self.device = device
+
+    def report(self, stage, progress, message):
+        if self.progress is not None:
+            self.progress(stage, progress, message)
+
+    def configure_speed_profile(self, frame_count):
+        profile = str(self.options.get("fine_amb3r_sfm_profile") or "auto").strip().lower()
+        if profile == "auto":
+            if frame_count >= 80:
+                profile = "fast"
+            elif frame_count >= 40:
+                profile = "balanced"
+            else:
+                profile = "quality"
+        if profile not in {"quality", "balanced", "fast"}:
+            profile = "balanced"
+
+        profiles = {
+            "quality": {
+                "min_cluster_size": 5,
+                "max_cluster_size": 8,
+                "k_candidate_clusters": 5,
+                "k_kf_candidates_clusters": 5,
+                "max_coarse_registration_iters": 5,
+                "max_global_refinement_iters": 1,
+                "max_kf_per_refinement": 8,
+                "clustering_num_runs": 50,
+                "clustering_refinement_iterations": 2,
+                "clustering_patience": 20,
+            },
+            "balanced": {
+                "min_cluster_size": 7,
+                "max_cluster_size": 12,
+                "k_candidate_clusters": 3,
+                "k_kf_candidates_clusters": 3,
+                "max_coarse_registration_iters": 3,
+                "max_global_refinement_iters": 1,
+                "max_kf_per_refinement": 6,
+                "clustering_num_runs": 12,
+                "clustering_refinement_iterations": 1,
+                "clustering_patience": 6,
+            },
+            "fast": {
+                "min_cluster_size": 10,
+                "max_cluster_size": 16,
+                "k_candidate_clusters": 2,
+                "k_kf_candidates_clusters": 2,
+                "max_coarse_registration_iters": 2,
+                "max_global_refinement_iters": 0,
+                "max_kf_per_refinement": 4,
+                "clustering_num_runs": 4,
+                "clustering_refinement_iterations": 0,
+                "clustering_patience": 3,
+            },
+        }
+        values = profiles[profile].copy()
+        option_map = {
+            "fine_amb3r_min_cluster_size": "min_cluster_size",
+            "fine_amb3r_max_cluster_size": "max_cluster_size",
+            "fine_amb3r_k_candidate_clusters": "k_candidate_clusters",
+            "fine_amb3r_k_kf_candidate_clusters": "k_kf_candidates_clusters",
+            "fine_amb3r_max_coarse_registration_iters": "max_coarse_registration_iters",
+            "fine_amb3r_max_global_refinement_iters": "max_global_refinement_iters",
+            "fine_amb3r_max_kf_per_refinement": "max_kf_per_refinement",
+            "fine_amb3r_clustering_runs": "clustering_num_runs",
+            "fine_amb3r_clustering_refinement_iterations": "clustering_refinement_iterations",
+            "fine_amb3r_clustering_patience": "clustering_patience",
+        }
+        for option_name, cfg_name in option_map.items():
+            if option_name in self.options:
+                try:
+                    values[cfg_name] = int(self.options[option_name])
+                except (TypeError, ValueError):
+                    pass
+        for key, value in values.items():
+            setattr(self.cfg, key, max(0, int(value)))
+        self.cfg.min_cluster_size = max(2, int(self.cfg.min_cluster_size))
+        self.cfg.max_cluster_size = max(self.cfg.min_cluster_size, int(self.cfg.max_cluster_size))
+        self.profile_metrics = {
+            "amb3r_sfm_profile": profile,
+            "amb3r_sfm_min_cluster_size": int(self.cfg.min_cluster_size),
+            "amb3r_sfm_max_cluster_size": int(self.cfg.max_cluster_size),
+            "amb3r_sfm_k_candidate_clusters": int(self.cfg.k_candidate_clusters),
+            "amb3r_sfm_k_kf_candidates_clusters": int(self.cfg.k_kf_candidates_clusters),
+            "amb3r_sfm_max_coarse_registration_iters": int(self.cfg.max_coarse_registration_iters),
+            "amb3r_sfm_max_global_refinement_iters": int(self.cfg.max_global_refinement_iters),
+            "amb3r_sfm_clustering_runs": int(self.cfg.clustering_num_runs),
+            "amb3r_sfm_clustering_refinement_iterations": int(self.cfg.clustering_refinement_iterations),
+            "amb3r_sfm_clustering_patience": int(self.cfg.clustering_patience),
+        }
+        return profile
+
+    def metrics(self):
+        return dict(self.profile_metrics)
 
 
     def extract_features(self, images, chunk_size=128):
@@ -35,7 +157,7 @@ class AMB3R_SfM():
                 'images': images_chunk.unsqueeze(0).to(self.model.device)
                 }  # Add batch dim: (1, chunk, C, H, W)
 
-            feat_chunk = self.model.extract_amb3r_sfm_features(views).cpu()  # patch_tokens['x_norm_patchtokens'] shape: (chunk, N, C)
+            feat_chunk = self.model.extract_amb3r_sfm_features(views).to(self.device)  # patch_tokens['x_norm_patchtokens'] shape: (chunk, N, C)
             all_descriptors.append(feat_chunk)
             
         feature_descriptors = torch.cat(all_descriptors, dim=0) # Shape: (T, C)
@@ -52,7 +174,7 @@ class AMB3R_SfM():
         device_type = str(self.model.device).split(":")[0]
         with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
             res = self.model.run_amb3r_sfm(views_all, cfg, keyframe_memory, benchmark_conf0=benchmark_conf0)
-        return res
+        return materialize_result(res, device=self.device)
     
     
     def process_one_cluster(self, images, cluster_kf_idx, cluster_member_indices):
@@ -70,12 +192,12 @@ class AMB3R_SfM():
         res = self.local_mapping(views_to_map, self.cfg)
 
         cluster_prediction = {
-            'pts': res['world_points'][0].cpu(), # T, H, W, 3
-            'conf': res['world_points_conf'][0].cpu(), # T, H, W
-            'pose': res['pose'][0].cpu(), # T, 4, 4
+            'pts': materialize_tensor(res['world_points'][0], device=self.device), # T, H, W, 3
+            'conf': materialize_tensor(res['world_points_conf'][0], device=self.device), # T, H, W
+            'pose': materialize_tensor(res['pose'][0], device=self.device), # T, 4, 4
         }
         if 'intrinsic' in res:
-            cluster_prediction['intrinsic'] = res['intrinsic'][0].cpu()
+            cluster_prediction['intrinsic'] = materialize_tensor(res['intrinsic'][0], device=self.device)
         cluster_prediction['conf_sig'] = (cluster_prediction['conf'] - 1) / cluster_prediction['conf']
         cluster_prediction['conf_mean'] = cluster_prediction['conf_sig'].mean()
         cluster_prediction['conf_sig_mean'] = cluster_prediction['conf_sig'].mean()
@@ -110,17 +232,17 @@ class AMB3R_SfM():
         Build a standard prediction dict from local_mapping results.
         '''
 
-        conf = res['world_points_conf'][0].cpu()
+        conf = materialize_tensor(res['world_points_conf'][0], device=self.device)
         prediction = {
-            'pts': res['world_points'][0].cpu(),
+            'pts': materialize_tensor(res['world_points'][0], device=self.device),
             'conf': conf,
-            'pose': res['pose'][0].cpu(),
+            'pose': materialize_tensor(res['pose'][0], device=self.device),
             'conf_sig': (conf - 1) / conf,
             'idx': idx_to_map,
-            'iter': torch.ones(len(idx_to_map)),
+            'iter': torch.ones(len(idx_to_map), device=self.device),
         }
         if 'intrinsic' in res:
-            prediction['intrinsic'] = res['intrinsic'][0].cpu()
+            prediction['intrinsic'] = materialize_tensor(res['intrinsic'][0], device=self.device)
         prediction.update(extra_fields)
         return prediction
 
@@ -266,7 +388,7 @@ class AMB3R_SfM():
             views_to_map = {
                 'images': images[:, idx_to_use].to(self.model.device),
             }
-            res = self.model.run_amb3r_sfm(views_to_map, self.cfg)
+            res = self.local_mapping(views_to_map, self.cfg)
             cluster_pred = self.build_prediction_dict(res, idx_to_use)
 
             cluster_pred_all[member_idx] = {
@@ -350,7 +472,7 @@ class AMB3R_SfM():
                 'kf_idx': global_kf_cluster,
             }
 
-            benchmark_conf_all = torch.cat([10 * torch.ones(len(global_kf_cluster)), benchmark_conf0]) if benchmark_conf0 is not None else None
+            benchmark_conf_all = torch.cat([10 * torch.ones(len(global_kf_cluster), device=self.device), benchmark_conf0]) if benchmark_conf0 is not None else None
 
             res = self.local_mapping(views_to_map, self.cfg, keyframe_memory=self.keyframe_memory, benchmark_conf0=benchmark_conf_all)
 
@@ -382,9 +504,9 @@ class AMB3R_SfM():
                 if 'intrinsic' in aligned_res:
                     candidate_results[candidate_kf_idx]['intrinsic'] = aligned_res['intrinsic'][num_kf:]
                 if 'benchmark_conf0' in res:
-                    benchmark_conf0 = res['benchmark_conf0'][num_kf:].cpu().clone()
+                    benchmark_conf0 = materialize_tensor(res['benchmark_conf0'][num_kf:], device=self.device)
                 else:
-                    benchmark_conf0 = res['world_points_conf'][0].cpu().mean(dim=(1,2))[num_kf:].clone()
+                    benchmark_conf0 = materialize_tensor(res['world_points_conf'][0], device=self.device).mean(dim=(1,2))[num_kf:].clone()
             else:
                 num_kf = len(global_kf_cluster)
                 # For each frame, only keep the best aligned prediction (based on mean confidence)
@@ -401,9 +523,9 @@ class AMB3R_SfM():
                     candidate_results[candidate_kf_idx]['intrinsic'][better_mask] = aligned_res['intrinsic'][num_kf:][better_mask]
 
                 if 'benchmark_conf0' in res:
-                    benchmark_conf0[better_mask] = res['benchmark_conf0'][num_kf:][better_mask].cpu()
+                    benchmark_conf0[better_mask] = materialize_tensor(res['benchmark_conf0'][num_kf:][better_mask], device=self.device)
                 else:
-                    benchmark_conf0[better_mask] = res['world_points_conf'][0].cpu().mean(dim=(1,2))[num_kf:][better_mask]
+                    benchmark_conf0[better_mask] = materialize_tensor(res['world_points_conf'][0], device=self.device).mean(dim=(1,2))[num_kf:][better_mask]
             
 
             del res
@@ -782,7 +904,7 @@ class AMB3R_SfM():
             if dists_to_kfs.numel() > 0:
                 min_dists_to_kfs = dists_to_kfs.min(dim=0).values # Shape: (num_kfs)
             else:
-                min_dists_to_kfs = torch.tensor([float('inf')])
+                min_dists_to_kfs = torch.tensor([float('inf')], device=self.device)
 
 
             mask_kf = (min_dists_to_kfs <= self.cfg.max_kf_search_distance)
@@ -854,29 +976,40 @@ class AMB3R_SfM():
         assert images.min() >= -1 and images.max() <= 1, "Images should be in [-1, 1] range"
 
         Bs, T, _, H, W = images.shape
+        profile = self.configure_speed_profile(T)
 
         self.keyframe_memory = SfMemory(self.cfg, T, H, W)
         if poses_gt is not None:
             self.keyframe_memory.set_gt_poses(poses_gt)
 
+        started = time.monotonic()
+        self.report("fine_amb3r_feature_extraction", 33, f"extracting AMB3R features for {T} images on {self.device} ({profile})")
         feature_descriptors = self.extract_features(images)
-        distance_matrix = get_distance_matrix(feature_descriptors, whitening=True)
+        self.report("fine_amb3r_clustering", 34, f"clustering {T} AMB3R frame descriptors")
+        distance_matrix = get_distance_matrix(feature_descriptors, whitening=True).cpu()
 
         clusters = find_best_image_clustering(distance_matrix=distance_matrix,
                                     min_frames_per_cluster=self.cfg.min_cluster_size,
-                                    max_frames_per_cluster=self.cfg.max_cluster_size
+                                    max_frames_per_cluster=self.cfg.max_cluster_size,
+                                    num_runs=self.cfg.clustering_num_runs,
+                                    refinement_iterations=self.cfg.clustering_refinement_iterations,
+                                    patience=self.cfg.clustering_patience,
                                     )
         
+        self.report("fine_amb3r_cluster_mapping", 35, f"mapping {len(clusters)} AMB3R clusters on {self.device}")
         clusters, best_cluster_kf_idx = self.process_clusters(images, clusters, distance_matrix)
 
         # Stage 1: Initialization
+        self.report("fine_amb3r_initializing_map", 36, f"initializing AMB3R map from keyframe {best_cluster_kf_idx}")
         self.initialize_map(images, best_cluster_kf_idx, clusters[best_cluster_kf_idx])
 
         # Stage 2: Coarse registration
         rest_clusters_kf_indices = [kf for kf in clusters.keys() if kf != best_cluster_kf_idx]
+        self.report("fine_amb3r_coarse_registration", 38, f"registering {len(rest_clusters_kf_indices)} AMB3R clusters")
         self.coarse_registration(images, distance_matrix, rest_clusters_kf_indices, clusters)
 
         # Stage 3: Global mapping
+        self.report("fine_amb3r_global_mapping", 40, f"refining AMB3R keyframes/non-keyframes after {time.monotonic() - started:.1f}s")
         self.global_mapping(images)
 
         return self.keyframe_memory

@@ -132,6 +132,36 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertEqual(summary.rejected_images, 2)
         self.assertEqual(summary.kept_images, 8)
 
+    def test_any_blurry_training_image_triggers_deblur(self) -> None:
+        _, BlurScore, _, summarize_blur_scores, _, deblur_mlp_enabled_by_default, _ = import_fine_runtime()
+        scores = [
+            BlurScore(path=Path(f"sharp_{index}.jpg"), laplacian=180.0, gradient=55.0, fft_high_ratio=0.12)
+            for index in range(9)
+        ]
+        scores.append(BlurScore(path=Path("blur.jpg"), laplacian=50.0, gradient=45.0, fft_high_ratio=0.04))
+
+        summary = summarize_blur_scores(scores, reject_ratio=0.0)
+
+        self.assertEqual(summary.training_blur_frames, 1)
+        self.assertEqual(summary.mode, "mixed")
+        self.assertTrue(deblur_mlp_enabled_by_default(summary.mode, {}))
+        self.assertEqual(summary.deblur_trigger_reason, "training_blur:mixed")
+
+    def test_rejected_blurry_image_does_not_trigger_deblur(self) -> None:
+        _, BlurScore, _, summarize_blur_scores, _, deblur_mlp_enabled_by_default, _ = import_fine_runtime()
+        scores = [
+            BlurScore(path=Path(f"sharp_{index}.jpg"), laplacian=180.0, gradient=55.0, fft_high_ratio=0.12)
+            for index in range(9)
+        ]
+        scores.append(BlurScore(path=Path("blur.jpg"), laplacian=10.0, gradient=10.0, fft_high_ratio=0.01))
+
+        summary = summarize_blur_scores(scores, reject_ratio=0.1)
+
+        self.assertEqual(summary.training_blur_frames, 0)
+        self.assertEqual(summary.rejected_blur_frames, 1)
+        self.assertEqual(summary.mode, "sharp")
+        self.assertFalse(deblur_mlp_enabled_by_default(summary.mode, {}))
+
     def test_sfm_defaults_to_amb3r(self) -> None:
         _, _, SceneBuildResult, _, build_scene, *_ = import_fine_runtime()
         expected = SceneBuildResult(Path("scene"), "amb3r_sfm_colmap_no_exif", 8, 8, 100, {"sfm_backend": "amb3r_sfm_colmap_no_exif"})
@@ -245,6 +275,120 @@ class FineRuntimeTests(unittest.TestCase):
             self.assertTrue((sparse_dir / "points3D.bin").exists())
             self.assertTrue((sparse_dir / "points3D.ply").stat().st_size > 0)
 
+    def test_amb3r_auto_resolution_preserves_aspect_and_patch_multiple(self) -> None:
+        try:
+            from PIL import Image
+            from app.fine.amb3r_sfm import AMB3R_PATCH_SIZE, prepare_amb3r_images, resolve_amb3r_resolution
+        except Exception as exc:
+            raise unittest.SkipTest(f"AMB3R helpers unavailable: {exc}") from exc
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            files = []
+            for index in range(4):
+                path = root / f"{index}.jpg"
+                Image.new("RGB", (1600, 1066), color=(index, index, index)).save(path)
+                files.append(path)
+
+            plan = resolve_amb3r_resolution(files, {"fine_amb3r_token_budget": 4000})
+            images_dir = root / "images"
+            images_dir.mkdir()
+            processed = prepare_amb3r_images(files, images_dir, width=plan.selected_width, height=plan.selected_height, target_aspect=plan.target_aspect)
+
+        self.assertEqual(plan.selected_width % AMB3R_PATCH_SIZE, 0)
+        self.assertEqual(plan.selected_height % AMB3R_PATCH_SIZE, 0)
+        self.assertLess(abs((plan.selected_width / plan.selected_height) - (1600 / 1066)), 0.05)
+        self.assertEqual(processed[0].processed_width, plan.selected_width)
+        self.assertEqual(processed[0].processed_height, plan.selected_height)
+
+    def test_amb3r_pose_alignment_accepts_bfloat16_numpy_boundary(self) -> None:
+        try:
+            import torch
+            from app.fine.amb3r_runtime.amb3r.tools.pose_align import average_transforms_with_weights
+        except Exception as exc:
+            raise unittest.SkipTest(f"AMB3R pose alignment dependencies unavailable: {exc}") from exc
+
+        transforms = torch.eye(4, dtype=torch.bfloat16).repeat(3, 1, 1)
+        transforms[:, 0, 3] = torch.tensor([0.0, 1.0, 2.0], dtype=torch.bfloat16)
+        weights = torch.ones(3, dtype=torch.bfloat16)
+
+        averaged = average_transforms_with_weights(transforms, weights)
+
+        self.assertEqual(averaged.dtype, torch.bfloat16)
+        self.assertTrue(torch.isfinite(averaged.float()).all())
+
+    def test_amb3r_to_numpy_casts_bfloat16_to_float32(self) -> None:
+        try:
+            import numpy as np
+            import torch
+            from app.fine.amb3r_sfm import to_numpy
+        except Exception as exc:
+            raise unittest.SkipTest(f"AMB3R numpy conversion dependencies unavailable: {exc}") from exc
+
+        value = torch.tensor([[1.0, 2.0]], dtype=torch.bfloat16)
+
+        converted = to_numpy(value)
+
+        self.assertEqual(converted.dtype, np.float32)
+        self.assertEqual(converted.shape, (1, 2))
+
+    def test_amb3r_window_planning_uses_overlap_and_tail_window(self) -> None:
+        try:
+            from app.fine.amb3r_sfm import plan_amb3r_windows
+        except Exception as exc:
+            raise unittest.SkipTest(f"AMB3R window helpers unavailable: {exc}") from exc
+
+        windows = plan_amb3r_windows(
+            150,
+            {
+                "fine_amb3r_windowed": "true",
+                "fine_amb3r_window_size": 64,
+                "fine_amb3r_window_overlap": 12,
+            },
+        )
+
+        self.assertEqual([(window.start, window.end) for window in windows], [(0, 64), (52, 116), (104, 150)])
+
+    def test_amb3r_window_planning_keeps_small_sets_full_scene(self) -> None:
+        try:
+            from app.fine.amb3r_sfm import plan_amb3r_windows
+        except Exception as exc:
+            raise unittest.SkipTest(f"AMB3R window helpers unavailable: {exc}") from exc
+
+        windows = plan_amb3r_windows(94, {})
+
+        self.assertEqual([(window.start, window.end) for window in windows], [(0, 94)])
+
+    def test_amb3r_similarity_transform_aligns_window_centers(self) -> None:
+        try:
+            import numpy as np
+            from app.fine.amb3r_sfm import apply_similarity_to_points, estimate_similarity_transform
+        except Exception as exc:
+            raise unittest.SkipTest(f"AMB3R similarity helpers unavailable: {exc}") from exc
+
+        source = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 2.0, 0.0]], dtype=np.float32)
+        target = source * 2.0 + np.array([3.0, -1.0, 0.5], dtype=np.float32)
+
+        transform = estimate_similarity_transform(source, target)
+        aligned = apply_similarity_to_points(source, transform)
+
+        np.testing.assert_allclose(aligned, target, rtol=1e-5, atol=1e-5)
+
+    def test_amb3r_materialize_result_clones_inference_tensors(self) -> None:
+        try:
+            import torch
+            from app.fine.amb3r_runtime.sfm.pipeline import materialize_result
+        except Exception as exc:
+            raise unittest.SkipTest(f"AMB3R materialize helper unavailable: {exc}") from exc
+
+        with torch.inference_mode():
+            result = {"pose": torch.eye(4)}
+
+        materialized = materialize_result(result)
+        materialized["pose"][0, 3] = 1.0
+
+        self.assertEqual(float(materialized["pose"][0, 3]), 1.0)
+
     def test_preview_litevggt_and_fine_amb3r_imports_are_isolated(self) -> None:
         sys.modules.pop("vggt", None)
 
@@ -289,6 +433,8 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("pycolmap==3.12.6", dockerfile)
         self.assertIn("spconv-cu118==2.3.8", dockerfile)
         self.assertIn("torch-scatter==2.1.2", dockerfile)
+        self.assertIn("flashinfer-python==0.6.11", requirements)
+        self.assertIn("flashinfer-cubin==0.6.11", requirements)
         self.assertIn("timm==0.6.7", requirements)
         self.assertIn("addict==2.4.0", requirements)
         self.assertIn("import app.fine.amb3r_sfm", dockerfile)
@@ -303,7 +449,8 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("libcudnn9-dev-cuda-12", dockerfile)
         self.assertIn("cudnn.h", dockerfile)
         self.assertNotIn("nvidia-cudnn-cu12", combined)
-        self.assertNotIn("flashinfer", combined)
+        self.assertNotIn("import flashinfer", dockerfile)
+        self.assertIn('importlib_metadata.version("flashinfer-python")', dockerfile)
         self.assertNotIn("kaolin", combined)
         self.assertNotIn("open3d", combined)
         self.assertNotIn("xformers", combined)

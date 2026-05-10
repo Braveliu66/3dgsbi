@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 import sys
 import tempfile
@@ -300,6 +301,94 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(payload["source"], "final")
             self.assertEqual(payload["format"], "spz")
 
+    def test_chunked_upload_resumes_and_completes_file(self) -> None:
+        content = b"0123456789abcdefghi"
+        with TestClient(app) as client:
+            headers = auth_headers(client)
+            project_id = create_video_project(client, headers, "chunked upload")
+            payload = chunk_check_payload("clip.mp4", content, chunk_size=6)
+
+            check_response = client.post(f"/api/projects/{project_id}/uploads/check", json=payload, headers=headers)
+            check_response.raise_for_status()
+            upload_id = check_response.json()["upload_id"]
+            self.assertEqual(check_response.json()["uploaded_chunks"], [])
+
+            first_chunk = client.put(
+                f"/api/uploads/{upload_id}/chunks/0",
+                files={"file": ("chunk-0", content[:6], "application/octet-stream")},
+                headers=headers,
+            )
+            first_chunk.raise_for_status()
+
+            resume_response = client.post(f"/api/projects/{project_id}/uploads/check", json=payload, headers=headers)
+            resume_response.raise_for_status()
+            self.assertEqual(resume_response.json()["uploaded_chunks"], [0])
+
+            for index, start in enumerate(range(6, len(content), 6), start=1):
+                chunk_response = client.put(
+                    f"/api/uploads/{upload_id}/chunks/{index}",
+                    files={"file": (f"chunk-{index}", content[start : start + 6], "application/octet-stream")},
+                    headers=headers,
+                )
+                chunk_response.raise_for_status()
+
+            complete_response = client.post(f"/api/uploads/{upload_id}/complete", headers=headers)
+            complete_response.raise_for_status()
+            asset = complete_response.json()["media"]
+            self.assertEqual(asset["file_size"], len(content))
+
+            file_response = client.get(f"/api/media/{asset['id']}/file", headers=headers)
+            self.assertEqual(file_response.status_code, 200)
+            self.assertEqual(file_response.content, content)
+
+    def test_chunked_upload_rejects_incomplete_complete(self) -> None:
+        content = b"0123456789"
+        with TestClient(app) as client:
+            headers = auth_headers(client)
+            project_id = create_video_project(client, headers, "incomplete chunked upload")
+            payload = chunk_check_payload("clip.mp4", content, chunk_size=5)
+
+            check_response = client.post(f"/api/projects/{project_id}/uploads/check", json=payload, headers=headers)
+            check_response.raise_for_status()
+            upload_id = check_response.json()["upload_id"]
+            chunk_response = client.put(
+                f"/api/uploads/{upload_id}/chunks/0",
+                files={"file": ("chunk-0", content[:5], "application/octet-stream")},
+                headers=headers,
+            )
+            chunk_response.raise_for_status()
+
+            complete_response = client.post(f"/api/uploads/{upload_id}/complete", headers=headers)
+
+            self.assertEqual(complete_response.status_code, 400)
+
+    def test_chunked_upload_fast_returns_existing_media(self) -> None:
+        content = b"fast upload content"
+        with TestClient(app) as client:
+            headers = auth_headers(client)
+            project_id = create_video_project(client, headers, "fast upload")
+            payload = chunk_check_payload("clip.mp4", content, chunk_size=8)
+
+            check_response = client.post(f"/api/projects/{project_id}/uploads/check", json=payload, headers=headers)
+            check_response.raise_for_status()
+            upload_id = check_response.json()["upload_id"]
+            for index, start in enumerate(range(0, len(content), 8)):
+                chunk_response = client.put(
+                    f"/api/uploads/{upload_id}/chunks/{index}",
+                    files={"file": (f"chunk-{index}", content[start : start + 8], "application/octet-stream")},
+                    headers=headers,
+                )
+                chunk_response.raise_for_status()
+            complete_response = client.post(f"/api/uploads/{upload_id}/complete", headers=headers)
+            complete_response.raise_for_status()
+            media_id = complete_response.json()["media"]["id"]
+
+            second_check = client.post(f"/api/projects/{project_id}/uploads/check", json=payload, headers=headers)
+            second_check.raise_for_status()
+
+            self.assertTrue(second_check.json()["completed"])
+            self.assertEqual(second_check.json()["media"]["id"], media_id)
+
 
 def auth_headers(client: TestClient) -> dict[str, str]:
     response = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
@@ -316,6 +405,27 @@ def create_image_project(client: TestClient, headers: dict[str, str], name: str)
     )
     project_response.raise_for_status()
     return str(project_response.json()["id"])
+
+
+def create_video_project(client: TestClient, headers: dict[str, str], name: str) -> str:
+    project_response = client.post(
+        "/api/projects",
+        json={"name": name, "input_type": "video", "tags": []},
+        headers=headers,
+    )
+    project_response.raise_for_status()
+    return str(project_response.json()["id"])
+
+
+def chunk_check_payload(file_name: str, content: bytes, chunk_size: int) -> dict[str, object]:
+    return {
+        "file_name": file_name,
+        "file_size": len(content),
+        "chunk_size": chunk_size,
+        "total_chunks": (len(content) + chunk_size - 1) // chunk_size,
+        "file_hash": hashlib.sha256(content).hexdigest(),
+        "content_type": "video/mp4",
+    }
 
 
 def upload_image(client: TestClient, headers: dict[str, str]) -> dict[str, object]:

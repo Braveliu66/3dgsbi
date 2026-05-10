@@ -5,6 +5,7 @@ export function TaskProgress({ task }: { task?: Task | null }) {
   if (!task) return <div className="empty-state">暂无运行任务</div>;
 
   const progress = Math.max(0, Math.min(100, task.progress || 0));
+  const lingbotDetail = lingbotProgressLabel(task.metrics);
   return (
     <div className={`task-progress ${task.status}`}>
       <div className="row between">
@@ -20,7 +21,28 @@ export function TaskProgress({ task }: { task?: Task | null }) {
         <span>{progress}%</span>
         <span>{formatEta(task.eta_seconds)}</span>
       </div>
+      {lingbotDetail ? <div className="muted small">{lingbotDetail}</div> : null}
       {task.error_message ? <div className="error-box">{task.error_message}</div> : null}
     </div>
   );
+}
+
+function lingbotProgressLabel(metrics?: Record<string, unknown>): string | null {
+  if (!metrics) return null;
+  const currentWindow = readNumber(metrics.lingbot_current_window);
+  const totalWindows = readNumber(metrics.lingbot_total_windows);
+  if (currentWindow && totalWindows) {
+    return `${currentWindow}/${totalWindows} windows`;
+  }
+  const currentFrame = readNumber(metrics.lingbot_current_frame);
+  const totalFrames = readNumber(metrics.lingbot_total_frames);
+  if (currentFrame && totalFrames) {
+    return `${currentFrame}/${totalFrames} frames`;
+  }
+  return null;
+}
+
+function readNumber(value: unknown): number | null {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : null;
 }

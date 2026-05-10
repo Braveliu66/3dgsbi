@@ -11,9 +11,10 @@ Provides streaming inference functionality:
 
 import logging
 import os
+import time
 import torch
 import torch.nn as nn
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Callable
 from tqdm.auto import tqdm
 
 from lingbot_map.heads.camera_head import CameraCausalHead
@@ -354,6 +355,7 @@ class GCTStream(GCTBase):
         num_scale_frames: Optional[int] = None,
         keyframe_interval: int = 1,
         output_device: Optional[torch.device] = None,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         Streaming inference: process scale frames first, then frame-by-frame.
@@ -393,6 +395,7 @@ class GCTStream(GCTBase):
         if len(images.shape) == 4:
             images = images.unsqueeze(0)
         B, S, C, H, W = images.shape
+        progress_started_at = time.monotonic()
 
         # Determine number of scale frames
         scale_frames = num_scale_frames if num_scale_frames is not None else self.num_frame_for_scale
@@ -432,6 +435,7 @@ class GCTStream(GCTBase):
         all_depth_conf = [_to_out(scale_output["depth_conf"])] if "depth_conf" in scale_output else []
         all_world_points = [_to_out(scale_output["world_points"])] if "world_points" in scale_output else []
         all_world_points_conf = [_to_out(scale_output["world_points_conf"])] if "world_points_conf" in scale_output else []
+        all_frame_type = [0] * scale_frames
         del scale_output
 
         # Phase 2: Process remaining frames one-by-one
@@ -479,7 +483,20 @@ class GCTStream(GCTBase):
                 all_world_points.append(_to_out(frame_output["world_points"]))
             if "world_points_conf" in frame_output:
                 all_world_points_conf.append(_to_out(frame_output["world_points_conf"]))
+            all_frame_type.append(1 if is_keyframe else 2)
             del frame_output
+            if progress_callback is not None:
+                current_frame = i + 1
+                elapsed = max(0.001, time.monotonic() - progress_started_at)
+                progress_callback(
+                    {
+                        "type": "streaming_frame",
+                        "current_frame": current_frame,
+                        "total_frames": S,
+                        "elapsed_seconds": elapsed,
+                        "seconds_per_frame": elapsed / max(current_frame, 1),
+                    }
+                )
 
         # Free GPU memory before concatenation
         if output_device is not None:
@@ -510,6 +527,9 @@ class GCTStream(GCTBase):
         if all_world_points_conf:
             predictions["world_points_conf"] = torch.cat(all_world_points_conf, dim=1)
         del all_world_points_conf
+        frame_type = torch.tensor(all_frame_type, dtype=torch.uint8, device=predictions["pose_enc"].device).unsqueeze(0)
+        predictions["frame_type"] = frame_type
+        predictions["is_keyframe"] = frame_type != 2
 
         # Store images for visualization
         predictions["images"] = images_out

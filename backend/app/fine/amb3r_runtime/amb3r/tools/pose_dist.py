@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 
 def rotation_angle(R1, R2):
     # R1 and R2 are 3x3 rotation matrices
@@ -19,6 +20,19 @@ def extrinsic_distance(extrinsic1, extrinsic2, lambda_t=1.0):
     return rot_diff + lambda_t * center_diff
 
 def rotation_angle_batch(R1, R2):
+    if isinstance(R1, torch.Tensor) or isinstance(R2, torch.Tensor):
+        if not isinstance(R1, torch.Tensor):
+            R1 = torch.as_tensor(R1, dtype=torch.float32, device=R2.device)
+        if not isinstance(R2, torch.Tensor):
+            R2 = torch.as_tensor(R2, dtype=torch.float32, device=R1.device)
+        R1_t = R1.transpose(-1, -2).unsqueeze(1)
+        R2_b = R2.unsqueeze(0)
+        R_mult = torch.matmul(R1_t, R2_b)
+        trace_vals = R_mult[..., 0, 0] + R_mult[..., 1, 1] + R_mult[..., 2, 2]
+        val = torch.clamp((trace_vals - 1) / 2, -1.0, 1.0)
+        angle_rad = torch.acos(val)
+        return angle_rad / torch.pi
+
     # R1, R2: shape (N, 3, 3)
     # We want a matrix of rotation angles for all pairs.
     # We'll get R1^T R2 for each pair.
@@ -36,6 +50,13 @@ def rotation_angle_batch(R1, R2):
     angle_deg = np.degrees(angle_rad)
     return angle_deg / 180.0  # normalized rotation difference
 def extrinsic_distance_batch(extrinsics, lambda_t=1.0):
+    if isinstance(extrinsics, torch.Tensor):
+        R = extrinsics[:, :3, :3]
+        t = extrinsics[:, :3, 3]
+        rot_diff = rotation_angle_batch(R, R)
+        trans_diff = torch.linalg.norm(t[:, None, :] - t[None, :, :], dim=2)
+        return rot_diff + lambda_t * trans_diff
+
     # extrinsics: (N,4,4)
     # Extract rotation and translation
     R = extrinsics[:, :3, :3]  # (N,3,3)
@@ -52,6 +73,19 @@ def extrinsic_distance_batch(extrinsics, lambda_t=1.0):
     return dists
 
 def extrinsic_distance_batch_query(extrinsics1, extrinsics2, lambda_t=1.0):
+    if isinstance(extrinsics1, torch.Tensor) or isinstance(extrinsics2, torch.Tensor):
+        if not isinstance(extrinsics1, torch.Tensor):
+            extrinsics1 = torch.as_tensor(extrinsics1, dtype=torch.float32, device=extrinsics2.device)
+        if not isinstance(extrinsics2, torch.Tensor):
+            extrinsics2 = torch.as_tensor(extrinsics2, dtype=torch.float32, device=extrinsics1.device)
+        R1 = extrinsics1[:, :3, :3]
+        t1 = extrinsics1[:, :3, 3]
+        R2 = extrinsics2[:, :3, :3]
+        t2 = extrinsics2[:, :3, 3]
+        rot_diff = rotation_angle_batch(R1, R2)
+        trans_diff = torch.linalg.norm(t1[:, None, :] - t2[None, :, :], dim=2)
+        return rot_diff + lambda_t * trans_diff
+
     # extrinsics: (N,4,4)
     # Extract rotation and translation
     R1 = extrinsics1[:, :3, :3]  # (N,3,3)

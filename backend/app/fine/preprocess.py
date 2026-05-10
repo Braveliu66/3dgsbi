@@ -5,7 +5,7 @@ import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import cv2
 import numpy as np
@@ -26,6 +26,10 @@ class BlurAnalysis:
     mean_fft_high_ratio: float
     rejected_images: int
     kept_images: int
+    blurred_images: int = 0
+    training_blur_frames: int = 0
+    rejected_blur_frames: int = 0
+    deblur_trigger_reason: str = "none"
 
     def metrics(self) -> dict[str, int | float | str]:
         return {
@@ -35,6 +39,10 @@ class BlurAnalysis:
             "blur_mean_fft_high_ratio": round(self.mean_fft_high_ratio, 6),
             "blur_rejected_images": self.rejected_images,
             "blur_kept_images": self.kept_images,
+            "blurred_images": self.blurred_images,
+            "training_blur_frames": self.training_blur_frames,
+            "rejected_blur_frames": self.rejected_blur_frames,
+            "deblur_trigger_reason": self.deblur_trigger_reason,
         }
 
 
@@ -51,13 +59,19 @@ class BlurScore:
 
 
 @dataclass(slots=True)
+class BlurClassification:
+    blurred: bool
+    kind: str
+
+
+@dataclass(slots=True)
 class SceneBuildResult:
     scene_dir: Path
     backend: str
     image_count: int
     registered_images: int
     point_count: int | None
-    metrics: dict[str, int | float | str | None]
+    metrics: dict[str, Any]
 
 
 def analyze_blur(input_dir: Path, *, reject_ratio: float = 0.15) -> BlurAnalysis:
@@ -73,7 +87,7 @@ def prepare_mobile_images(
     min_images: int = 3,
 ) -> tuple[Path, BlurAnalysis]:
     scores = score_blur_images(input_dir)
-    analysis = summarize_blur_scores(scores, reject_ratio=reject_ratio)
+    analysis = summarize_blur_scores(scores, reject_ratio=reject_ratio, min_images=min_images)
     reject_count = min(analysis.rejected_images, max(0, len(scores) - min_images))
     keep_count = max(min_images, len(scores) - reject_count)
     kept = sorted(sorted(scores, key=lambda item: item.quality, reverse=True)[:keep_count], key=lambda item: item.path.name)
@@ -92,6 +106,10 @@ def prepare_mobile_images(
         mean_fft_high_ratio=analysis.mean_fft_high_ratio,
         rejected_images=len(scores) - len(kept),
         kept_images=len(kept),
+        blurred_images=analysis.blurred_images,
+        training_blur_frames=analysis.training_blur_frames,
+        rejected_blur_frames=analysis.rejected_blur_frames,
+        deblur_trigger_reason=analysis.deblur_trigger_reason,
     )
 
 
@@ -112,31 +130,66 @@ def score_blur_images(input_dir: Path) -> list[BlurScore]:
     return scores
 
 
-def summarize_blur_scores(scores: list[BlurScore], *, reject_ratio: float) -> BlurAnalysis:
+def summarize_blur_scores(scores: list[BlurScore], *, reject_ratio: float, min_images: int = 0) -> BlurAnalysis:
     laps = np.array([item.laplacian for item in scores], dtype=np.float32)
     gradients = np.array([item.gradient for item in scores], dtype=np.float32)
     fft_ratios = np.array([item.fft_high_ratio for item in scores], dtype=np.float32)
     rejected = int(math.floor(len(scores) * max(0.0, min(0.45, reject_ratio))))
+    rejected = min(rejected, max(0, len(scores) - max(0, min_images)))
+    keep_count = max(0, len(scores) - rejected)
+    ranked = sorted(scores, key=lambda item: item.quality, reverse=True)
+    kept_scores = ranked[:keep_count]
+    rejected_scores = ranked[keep_count:]
 
     mean_lap = float(laps.mean())
     mean_gradient = float(gradients.mean())
     mean_fft = float(fft_ratios.mean())
-    if mean_lap >= 120.0 and mean_fft >= 0.08:
-        mode = "sharp"
-    elif mean_gradient >= 40.0 and mean_fft < 0.08:
-        mode = "motion"
-    elif mean_lap < 80.0:
-        mode = "defocus"
-    else:
-        mode = "mixed"
+    median_lap = float(np.median(laps))
+    median_fft = float(np.median(fft_ratios))
+    classifications = {item.path: classify_blur_score(item, median_laplacian=median_lap, median_fft_high_ratio=median_fft) for item in scores}
+    kept_blur = [classifications[item.path] for item in kept_scores if classifications[item.path].blurred]
+    rejected_blur = [classifications[item.path] for item in rejected_scores if classifications[item.path].blurred]
+    mode = blur_mode_from_classifications(kept_blur)
+    training_blur_frames = len(kept_blur)
+    trigger_reason = "none" if training_blur_frames == 0 else f"training_blur:{mode}"
     return BlurAnalysis(
         mode=mode,
         mean_laplacian=mean_lap,
         mean_gradient=mean_gradient,
         mean_fft_high_ratio=mean_fft,
         rejected_images=rejected,
-        kept_images=max(0, len(scores) - rejected),
+        kept_images=keep_count,
+        blurred_images=sum(1 for item in classifications.values() if item.blurred),
+        training_blur_frames=training_blur_frames,
+        rejected_blur_frames=len(rejected_blur),
+        deblur_trigger_reason=trigger_reason,
     )
+
+
+def classify_blur_score(score: BlurScore, *, median_laplacian: float, median_fft_high_ratio: float) -> BlurClassification:
+    defocus = score.laplacian < 80.0
+    motion = score.gradient >= 40.0 and score.fft_high_ratio < 0.08
+    relative_lap_blur = median_laplacian > 1e-6 and score.laplacian < median_laplacian * 0.55
+    relative_fft_blur = median_fft_high_ratio > 1e-6 and score.fft_high_ratio < median_fft_high_ratio * 0.75
+    relative = relative_lap_blur and relative_fft_blur and score.gradient >= 20.0
+    if motion and defocus:
+        return BlurClassification(True, "mixed")
+    if motion:
+        return BlurClassification(True, "motion")
+    if defocus:
+        return BlurClassification(True, "defocus")
+    if relative:
+        return BlurClassification(True, "mixed")
+    return BlurClassification(False, "sharp")
+
+
+def blur_mode_from_classifications(classifications: list[BlurClassification]) -> str:
+    kinds = {item.kind for item in classifications if item.blurred}
+    if not kinds:
+        return "sharp"
+    if len(kinds) > 1 or "mixed" in kinds:
+        return "mixed"
+    return next(iter(kinds))
 
 
 def high_frequency_ratio(gray: np.ndarray) -> float:

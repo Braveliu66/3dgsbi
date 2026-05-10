@@ -47,8 +47,8 @@ class Settings(BaseSettings):
 
     fine_queue_name: str = "fine_tasks"
     fine_expected_seconds_images: int = 7200
-    fine_image_max_side: int = 1600
-    fine_iterations: int = 10000
+    fine_image_max_side: int = 2400
+    fine_iterations: int = 30000
 
     litevggt_repo_commit: str = "4767c17f8b6f176bb751566e92f60eb885040033"
     amb3r_repo_commit: str = "7aae7fbb77a750651ffa236bb9c3212290c6fc78"

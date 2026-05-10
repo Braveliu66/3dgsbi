@@ -10,7 +10,7 @@ from typing import Callable, Any
 import torch
 
 from app.fine.deblur_mlp import attach_deblur_mlp_optimizer, build_deblur_mlp_state, render_with_deblur_mlp
-from app.fine.fastgs_policy import FastGSPolicy, vcp_min_opacity
+from app.fine.fastgs_policy import FastGSPolicy
 from app.fine.local_3dgs.cg_optimizer import LocalCGOptimizer
 from app.fine.local_3dgs.cg_state import BatchState, CGSolverState
 from app.fine.local_3dgs.lmrs_step import RandomCameraSampler, UniformPixelSampler, lmrs_step
@@ -47,7 +47,6 @@ def train_mobile_3dgs(
     output_dir.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     with local_3dgs_runtime() as runtime:
-        render = runtime.render
         GaussianModel = runtime.GaussianModel
         Scene = runtime.Scene
         l1_loss = runtime.l1_loss
@@ -97,13 +96,13 @@ def train_mobile_3dgs(
         last_ssim = 0.0
         train_stack = cameras.copy()
 
-        def standard_render(viewpoint, model, pipeline, bg):
-            return normalize_render_pkg(render(viewpoint, model, pipeline, bg, scaling_modifier=1.0), int(model.get_xyz.shape[0]))
+        def standard_render(viewpoint, model, pipeline, bg, **render_options):
+            return normalize_render_pkg(render_gaussians(viewpoint, model, pipeline, bg, **render_options), int(model.get_xyz.shape[0]))
 
-        def training_render(viewpoint, model, pipeline, bg):
+        def training_render(viewpoint, model, pipeline, bg, **render_options):
             if deblur_state.enabled:
                 return normalize_render_pkg(render_with_deblur_mlp(viewpoint, model, pipeline, bg, deblur_state), int(model.get_xyz.shape[0]))
-            return standard_render(viewpoint, model, pipeline, bg)
+            return standard_render(viewpoint, model, pipeline, bg, **render_options)
 
         def lmrs_render(viewpoint, model, pipeline, bg, cg_state, batch_index):
             return normalize_render_pkg(
@@ -184,12 +183,15 @@ def train_mobile_3dgs(
                             render_fn=training_render if deblur_state.enabled else standard_render,
                             ssim_fn=ssim,
                         )
-                        original_accum = policy.apply_densification_gate(gaussians)
-                        min_opacity = vcp_min_opacity(policy)
-                        before = int(gaussians.get_xyz.shape[0])
-                        gaussians.densify_and_prune(opt.densify_grad_threshold, min_opacity, scene.cameras_extent, size_threshold, render_pkg["radii"])
+                        changed = policy.apply_fastgs_densify_and_prune(
+                            gaussians,
+                            opt=opt,
+                            scene_extent=scene.cameras_extent,
+                            size_threshold=size_threshold,
+                            radii=render_pkg["radii"],
+                        )
                         policy.observe_gaussian_count(gaussians)
-                        if original_accum is not None or int(gaussians.get_xyz.shape[0]) != before:
+                        if changed:
                             policy.reset_after_topology_change()
                     if iteration % opt.opacity_reset_interval == 0:
                         gaussians.reset_opacity()
@@ -208,6 +210,18 @@ def train_mobile_3dgs(
             if iteration % max(50, min(500, iterations // 20 or 50)) == 0 or iteration == iterations:
                 mapped_progress = 42 + int(iteration / max(1, iterations) * 42)
                 progress("fine_mobilegs_train", min(84, mapped_progress), f"trained {iteration}/{iterations} iterations, loss={ema_loss:.5f}")
+
+        with torch.no_grad():
+            policy.update_multiview_scores(
+                cameras=cameras,
+                gaussians=gaussians,
+                pipe=pipe,
+                background=background,
+                render_fn=training_render if deblur_state.enabled else standard_render,
+                ssim_fn=ssim,
+            )
+            policy.apply_final_prune(gaussians)
+            policy.observe_gaussian_count(gaussians)
 
         scene.save(iterations)
         ply_path = output_dir / "point_cloud" / f"iteration_{iterations}" / "point_cloud.ply"
@@ -233,7 +247,7 @@ def train_mobile_3dgs(
                 "lmrs_phase_elapsed_seconds": round(lm_elapsed, 3),
                 "lmrs_last_loss": lm_last_loss,
                 "lmrs_cg_iter": read_int(options.get("fine_lmrs_cg_iter"), 8, minimum=1, maximum=64) if lm_iterations else None,
-                "fastergs_backend": "local_algorithm_equivalent_no_cuda_kernel_fusion",
+                "fastergs_backend": "compact_box_cuda_if_available",
                 "requested_algorithms": ["AMB3R", "Deblurring-3DGS", "FastGS", "FasterGS", "LM-RS"],
                 "effective_algorithms": effective_algorithms(deblur_state.enabled, lm_iterations, policy),
                 **policy.metrics(),
@@ -248,7 +262,9 @@ def build_optimization_options(iterations: int, options: dict[str, Any]) -> Simp
         position_lr_final=read_float(options.get("fine_position_lr_final"), 0.0000016, minimum=1e-8, maximum=0.001),
         position_lr_delay_mult=0.01,
         position_lr_max_steps=iterations,
-        feature_lr=0.0025,
+        feature_lr=read_float(options.get("fine_lowfeature_lr"), 0.0025, minimum=1e-6, maximum=0.1),
+        highfeature_lr=read_float(options.get("fine_highfeature_lr"), 0.005, minimum=1e-6, maximum=0.1),
+        lowfeature_lr=read_float(options.get("fine_lowfeature_lr"), 0.0025, minimum=1e-6, maximum=0.1),
         opacity_lr=0.025,
         scaling_lr=0.005,
         rotation_lr=0.001,
@@ -256,13 +272,16 @@ def build_optimization_options(iterations: int, options: dict[str, Any]) -> Simp
         exposure_lr_final=0.001,
         exposure_lr_delay_steps=0,
         exposure_lr_delay_mult=0.0,
-        percent_dense=0.01,
+        percent_dense=read_float(options.get("fine_percent_dense", options.get("fine_dense")), 0.001, minimum=1e-5, maximum=0.1),
+        dense=read_float(options.get("fine_dense", options.get("fine_percent_dense")), 0.001, minimum=1e-5, maximum=0.1),
         lambda_dssim=read_float(options.get("fine_lambda_dssim"), 0.2, minimum=0.0, maximum=1.0),
         densification_interval=read_int(options.get("fine_densification_interval"), 100, minimum=20, maximum=1000),
         opacity_reset_interval=read_int(options.get("fine_opacity_reset_interval"), 3000, minimum=500, maximum=10000),
         densify_from_iter=read_int(options.get("fine_densify_from_iter"), 500, minimum=0, maximum=max(1, iterations)),
         densify_until_iter=read_int(options.get("fine_densify_until_iter"), min(15000, iterations), minimum=1, maximum=iterations),
         densify_grad_threshold=read_float(options.get("fine_densify_grad_threshold"), 0.0002, minimum=1e-6, maximum=0.01),
+        grad_thresh=read_float(options.get("fine_fastgs_grad_thresh"), 0.0002, minimum=1e-6, maximum=0.01),
+        grad_abs_thresh=read_float(options.get("fine_fastgs_grad_abs_thresh"), 0.0012, minimum=1e-6, maximum=0.1),
         lambda_scale=0.0,
         scale_cutoff=read_float(options.get("fine_scale_cutoff"), 154.3, minimum=1.0, maximum=10000.0),
         random_background=False,
@@ -329,7 +348,7 @@ def effective_algorithms(deblur_enabled: bool, lm_iterations: int, policy: FastG
     algorithms = [
         "AMB3R",
         "Deblurring-3DGS_GTnet" if deblur_enabled else "Deblurring-3DGS_disabled",
-        "FastGS_local_multiview_score",
+        "FastGS_official_metric_map" if policy.official_metric_calls > 0 else "FastGS_local_multiview_score",
     ]
     if lm_iterations > 0:
         algorithms.append("LM-RS_local_matrix_free")
