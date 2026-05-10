@@ -748,6 +748,15 @@ p { line-height: 1.55; }
   gap: 10px;
 }
 
+.transfer-progress {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid rgba(31, 111, 88, 0.2);
+  border-radius: var(--radius);
+  background: rgba(220, 236, 227, 0.5);
+}
+
 .empty-state,
 .error-box,
 .notice-box {

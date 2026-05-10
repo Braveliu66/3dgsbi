@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     litevggt_repo_commit: str = "4767c17f8b6f176bb751566e92f60eb885040033"
     amb3r_repo_commit: str = "7aae7fbb77a750651ffa236bb9c3212290c6fc78"
     edgs_repo_commit: str = "9a897645eb47c1b24d4f9e4428cd745927bf1ee1"
-    lingbot_repo_commit: str = "f720b421c6c50af3adc63272033226aa4811ef42"
+    lingbot_repo_commit: str = "4cd986009b9adeded8a4e740919221940dedeffe"
     spark_repo_commit: str = "3cf9fa15adb7ac7c47a1e962740db97b9e8a9fdf"
     fastgs_repo_commit: str = "44e02a5c1d5e9ed64d2ecd4af1cbba14ac92150f"
     fast_dropgaussian_repo_commit: str = "aba6c08e567bc0b99dfe63f159df3a241562efc4"

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { AlertTriangle, CheckCircle2, Eye, FileUp, Film, FolderOpen, Images, Loader2, Play, RefreshCw, Trash2, Wand2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, formatBytes, mediaFileUrl, mediaThumbnailUrl } from "@/lib/api";
+import type { TransferProgress } from "@/lib/api";
 import { formatDateTime, inputTypeLabel, isActiveTask, projectStatusLabel } from "@/lib/labels";
 import { rememberTaskId } from "@/lib/taskTracking";
 import type { MediaAsset, Project, Task, ViewerConfig } from "@/lib/types";
@@ -28,6 +29,7 @@ export default function UploadPage() {
   const [selectedMedia, setSelectedMedia] = useState<MediaAsset | null>(null);
   const [busy, setBusy] = useState(false);
   const [dragging, setDragging] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<(TransferProgress & { fileIndex: number; totalFiles: number }) | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const totalBytes = useMemo(() => media.reduce((sum, item) => sum + item.file_size, 0), [media]);
@@ -83,11 +85,14 @@ export default function UploadPage() {
     if (!files?.length) return;
     setBusy(true);
     setError(null);
+    const fileList = Array.from(files);
     try {
       const active = await ensureProject();
       const uploaded: MediaAsset[] = [];
-      for (const file of Array.from(files)) {
-        const asset = await api.uploadMedia(active.id, file);
+      for (const [index, file] of fileList.entries()) {
+        const asset = await api.uploadMedia(active.id, file, (progress) => {
+          setUploadProgress({ ...progress, fileIndex: index + 1, totalFiles: fileList.length });
+        });
         uploaded.push(asset);
         if (asset.kind === "image" && file.type.startsWith("image/")) {
           const url = URL.createObjectURL(file);
@@ -101,6 +106,7 @@ export default function UploadPage() {
       setError(err instanceof Error ? err.message : "上传失败");
     } finally {
       setBusy(false);
+      setUploadProgress(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
   }
@@ -253,6 +259,8 @@ export default function UploadPage() {
               />
             </label>
 
+            <TransferProgressBar progress={uploadProgress} />
+
             <div className="grid three">
               <div className="panel stat flat"><span className="muted small">文件</span><strong>{media.length}</strong></div>
               <div className="panel stat flat"><span className="muted small">图片</span><strong>{imageCount}</strong></div>
@@ -368,4 +376,32 @@ export default function UploadPage() {
       ) : null}
     </div>
   );
+}
+
+function TransferProgressBar({ progress }: { progress: (TransferProgress & { fileIndex: number; totalFiles: number }) | null }) {
+  if (!progress) return null;
+  return (
+    <div className="transfer-progress">
+      <div className="row between">
+        <span className="truncate" title={progress.fileName}>
+          {uploadPhaseLabel(progress.phase)} {progress.fileIndex}/{progress.totalFiles} · {progress.fileName}
+        </span>
+        <span className="muted small">{progress.percent}%</span>
+      </div>
+      <div className="progress-track" aria-label="上传进度">
+        <span style={{ width: `${progress.percent}%` }} />
+      </div>
+      <div className="muted small">
+        {formatBytes(progress.loadedBytes)} / {formatBytes(progress.totalBytes)}
+      </div>
+    </div>
+  );
+}
+
+function uploadPhaseLabel(phase: TransferProgress["phase"]): string {
+  if (phase === "hashing") return "校验";
+  if (phase === "checking") return "续传检查";
+  if (phase === "uploading") return "上传";
+  if (phase === "completing") return "合并";
+  return "完成";
 }

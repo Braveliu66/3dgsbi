@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-ARG WORKER_BASE_IMAGE=docker.m.daocloud.io/pytorch/pytorch:2.7.1-cuda12.8-cudnn9-devel
+ARG WORKER_BASE_IMAGE=docker.m.daocloud.io/pytorch/pytorch:2.8.0-cuda12.8-cudnn9-devel
 FROM ${WORKER_BASE_IMAGE} AS worker-common
 
 WORKDIR /app
@@ -126,8 +126,8 @@ from pathlib import Path
 import torch
 import torchvision
 
-assert torch.__version__.startswith("2.7.1"), torch.__version__
-assert torchvision.__version__.startswith("0.22.1"), torchvision.__version__
+assert torch.__version__.startswith("2.8.0"), torch.__version__
+assert torchvision.__version__.startswith("0.23.0"), torchvision.__version__
 headers = [
     Path("/usr/local/cuda/include/cudnn.h"),
     Path("/usr/include/cudnn.h"),
@@ -201,6 +201,22 @@ while [ "$attempt" -le 5 ]; do
 done
 EOF
 
+RUN --mount=type=cache,id=three-dgs-worker-flashinfer-pip-cache,target=/root/.cache/pip,sharing=locked <<'EOF'
+set -eu
+attempt=1
+while [ "$attempt" -le 5 ]; do
+  if python -m pip install --index-url https://pypi.org/simple flashinfer-python; then
+    exit 0
+  fi
+  if [ "$attempt" -eq 5 ]; then
+    exit 1
+  fi
+  echo "FlashInfer install failed, retrying in $((attempt * 20)) seconds ($attempt/5)"
+  sleep $((attempt * 20))
+  attempt=$((attempt + 1))
+done
+EOF
+
 RUN --mount=type=cache,id=three-dgs-worker-amb3r-pip-cache,target=/root/.cache/pip,sharing=locked <<'EOF'
 set -eu
 attempt=1
@@ -208,7 +224,7 @@ while [ "$attempt" -le 5 ]; do
   if python -m pip install --no-build-isolation --constraint /tmp/worker/constraints.txt \
       'spconv-cu118==2.3.8' \
       'torch-scatter==2.1.2' \
-      -f https://data.pyg.org/whl/torch-2.7.0+cu128.html; then
+      -f https://data.pyg.org/whl/torch-2.8.0+cu128.html; then
     python - <<'PY'
 import spconv.pytorch as spconv
 import torch_scatter
@@ -330,10 +346,9 @@ from romatch.utils.local_correlation import local_correlation
 from vggt.models.vggt import VGGT
 from scene import GaussianModel
 
-assert torch.__version__.startswith("2.7.1"), torch.__version__
-assert torchvision.__version__.startswith("0.22.1"), torchvision.__version__
-assert importlib_metadata.version("flashinfer-python") == "0.6.11"
-assert importlib_metadata.version("flashinfer-cubin") == "0.6.11"
+assert torch.__version__.startswith("2.8.0"), torch.__version__
+assert torchvision.__version__.startswith("0.23.0"), torchvision.__version__
+assert importlib_metadata.version("flashinfer-python")
 ext = diff_gaussian_rasterization._C
 for name in ("get_JTv", "get_Diag", "get_JTJv", "fastgs_accumulate_metrics"):
     assert hasattr(ext, name), name

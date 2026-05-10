@@ -50,7 +50,6 @@ class PreviewResult:
 SOURCE_COMMITS: dict[str, str] = {
     "LiteVGGT": "4767c17f8b6f176bb751566e92f60eb885040033",
     "EDGS": "9a897645eb47c1b24d4f9e4428cd745927bf1ee1",
-    "LingBot-Map": "f720b421c6c50af3adc63272033226aa4811ef42",
+    "LingBot-Map": "4cd986009b9adeded8a4e740919221940dedeffe",
     "Spark": "3cf9fa15adb7ac7c47a1e962740db97b9e8a9fdf",
 }
-

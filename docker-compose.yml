@@ -73,7 +73,7 @@ services:
       dockerfile: worker/Dockerfile
       target: worker
       args:
-        WORKER_BASE_IMAGE: ${WORKER_BASE_IMAGE:-docker.m.daocloud.io/pytorch/pytorch:2.7.1-cuda12.8-cudnn9-devel}
+        WORKER_BASE_IMAGE: ${WORKER_BASE_IMAGE:-docker.m.daocloud.io/pytorch/pytorch:2.8.0-cuda12.8-cudnn9-devel}
       cache_from:
         - type=local,src=.docker-build-cache/worker
       cache_to:

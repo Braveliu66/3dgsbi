@@ -12,7 +12,7 @@ from typing import Any, Callable
 import cv2
 import numpy as np
 
-from app.preview.io.ply import write_point_cloud_ply
+from app.preview.io.ply import write_gaussian_splat_ply
 from app.preview.types import PreviewFailure
 from app.preview.utils import VENDOR_ROOT, image_files, prepend_sys_path
 
@@ -275,7 +275,7 @@ def run_lingbot_pointcloud(
             message = str(last_oom) if last_oom else "LingBot inference did not produce predictions"
             raise PreviewFailure("CUDA_OUT_OF_MEMORY", message)
 
-        progress("lingbot_export_ply", 72, "filtering world points and writing PLY")
+        progress("lingbot_export_ply", 72, "filtering world points and writing 3DGS PLY")
         export = prepare_lingbot_point_export(predictions, images)
         export = filter_keyframe_point_export(export, enabled=used_plan.keyframes_only_points)
         progress(
@@ -296,15 +296,17 @@ def run_lingbot_pointcloud(
         progress(
             "lingbot_export_ply",
             74,
-            f"writing LingBot PLY from {selected_points} confidence-filtered points",
+            f"writing LingBot 3DGS PLY from {selected_points} confidence-filtered points",
             {"lingbot_export_filtered_points": selected_points, "preview_max_points": max_points},
         )
-        point_count = write_point_cloud_ply(
+        point_count = write_gaussian_splat_ply(
             export.world_points[mask],
             export.colors[mask],
             output_ply,
             confidence=export.confidence[mask],
             max_points=max_points,
+            scale=0.002,
+            opacity_logit=-2.0,
         )
         peak_mb = int(torch.cuda.max_memory_allocated() / 1024 / 1024)
         plan_metrics = asdict(used_plan)
@@ -332,6 +334,7 @@ def run_lingbot_pointcloud(
             "lingbot_plan": plan_metrics,
             "lingbot_point_cloud_ply": str(output_ply),
             "lingbot_point_cloud_ply_size": output_ply.stat().st_size if output_ply.exists() else None,
+            "lingbot_point_cloud_ply_format": "3dgs_gaussian_splat",
             **selection_metrics,
             **inference_metrics,
             **export.metrics,

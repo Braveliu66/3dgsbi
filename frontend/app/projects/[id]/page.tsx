@@ -4,7 +4,8 @@ import Link from "next/link";
 import { Download, FileArchive, Film, Images, PauseCircle, PlayCircle, ScrollText, Trash2, X } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, artifactUrl, formatBytes, mediaFileUrl, mediaThumbnailUrl, projectEventsUrl } from "@/lib/api";
+import { api, artifactUrl, downloadFileWithProgress, formatBytes, mediaFileUrl, mediaThumbnailUrl, projectEventsUrl } from "@/lib/api";
+import type { TransferProgress } from "@/lib/api";
 import { formatDateTime, inputTypeLabel, isActiveTask, projectStatusLabel, taskStatusLabel, taskTypeLabel } from "@/lib/labels";
 import type { Artifact, Project, Task, ViewerConfig } from "@/lib/types";
 import { SplatViewer } from "@/components/SplatViewer";
@@ -23,6 +24,7 @@ export default function ProjectDetailPage() {
   const [showMedia, setShowMedia] = useState(false);
   const [brokenThumbIds, setBrokenThumbIds] = useState<Set<string>>(() => new Set());
   const [busy, setBusy] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState<TransferProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
 
@@ -138,16 +140,20 @@ export default function ProjectDetailPage() {
 
   async function downloadArtifact(artifact: Artifact) {
     setError(null);
+    setDownloadProgress(null);
     try {
       const result = await api.artifactDownloadUrl(artifact.id);
-      window.open(artifactUrl(result.url), "_blank", "noopener,noreferrer");
+      await downloadFileWithProgress(artifactUrl(result.url), artifact.file_name, artifact.file_size, setDownloadProgress);
     } catch (err) {
       setError(err instanceof Error ? err.message : "获取下载链接失败");
+    } finally {
+      window.setTimeout(() => setDownloadProgress(null), 800);
     }
   }
 
   async function downloadOriginalPly() {
     setError(null);
+    setDownloadProgress(null);
     try {
       if (originalPlyArtifact) {
         await downloadArtifact(originalPlyArtifact);
@@ -155,9 +161,16 @@ export default function ProjectDetailPage() {
       }
       if (!previewArtifactWithOriginalPly) return;
       const result = await api.artifactOriginalPlyDownloadUrl(previewArtifactWithOriginalPly.id);
-      window.open(artifactUrl(result.url), "_blank", "noopener,noreferrer");
+      await downloadFileWithProgress(
+        artifactUrl(result.url),
+        "original.ply",
+        readNumber(previewArtifactWithOriginalPly.metadata?.intermediate_ply_size),
+        setDownloadProgress
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "获取原始 PLY 下载链接失败");
+    } finally {
+      window.setTimeout(() => setDownloadProgress(null), 800);
     }
   }
 
@@ -277,6 +290,7 @@ export default function ProjectDetailPage() {
               {error ? <div className="error-box">{error}</div> : null}
               {project?.error_message ? <div className="error-box">{project.error_message}</div> : null}
               {viewer?.status === "unavailable" ? <div className="notice-box">{viewer.message}</div> : null}
+              <DownloadProgressBar progress={downloadProgress} />
 
               <section className="stack">
                 <h3>最新任务</h3>
@@ -481,4 +495,27 @@ function hasIntermediatePly(artifact: Artifact): boolean {
 
 function compareArtifactCreatedAtDesc(a: Artifact, b: Artifact): number {
   return Date.parse(b.created_at) - Date.parse(a.created_at);
+}
+
+function DownloadProgressBar({ progress }: { progress: TransferProgress | null }) {
+  if (!progress) return null;
+  return (
+    <div className="transfer-progress">
+      <div className="row between">
+        <span className="truncate" title={progress.fileName}>下载 {progress.fileName}</span>
+        <span className="muted small">{progress.percent}%</span>
+      </div>
+      <div className="progress-track" aria-label="下载进度">
+        <span style={{ width: `${progress.percent}%` }} />
+      </div>
+      <div className="muted small">
+        {formatBytes(progress.loadedBytes)} / {formatBytes(progress.totalBytes)}
+      </div>
+    </div>
+  );
+}
+
+function readNumber(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }

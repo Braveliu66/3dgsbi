@@ -20,5 +20,3 @@ plyfile==1.1
 rich==13.9.4
 kornia==0.8.0
 loguru==0.7.3
-flashinfer-python==0.6.11
-flashinfer-cubin==0.6.11

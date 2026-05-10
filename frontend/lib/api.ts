@@ -8,6 +8,18 @@ const UPLOAD_CONCURRENCY = 4;
 const CHUNK_RETRIES = 3;
 const HASH_READ_SIZE = 4 * 1024 * 1024;
 
+export type TransferPhase = "hashing" | "checking" | "uploading" | "completing" | "downloading" | "complete";
+
+export interface TransferProgress {
+  fileName: string;
+  phase: TransferPhase;
+  loadedBytes: number;
+  totalBytes: number;
+  percent: number;
+}
+
+export type TransferProgressCallback = (progress: TransferProgress) => void;
+
 export function getToken(): string | null {
   if (typeof window === "undefined") return null;
   return window.localStorage.getItem(TOKEN_KEY);
@@ -79,10 +91,12 @@ interface UploadCompleteResponse {
   media: MediaAsset;
 }
 
-async function uploadMediaInChunks(projectId: string, file: File): Promise<MediaAsset> {
+async function uploadMediaInChunks(projectId: string, file: File, onProgress?: TransferProgressCallback): Promise<MediaAsset> {
   const uploadBase = getUploadApiBase();
-  const fileHash = await hashFile(file);
+  emitTransferProgress(onProgress, file.name, "hashing", 0, file.size);
+  const fileHash = await hashFile(file, (loaded, total) => emitTransferProgress(onProgress, file.name, "hashing", loaded, total));
   const totalChunks = Math.ceil(file.size / UPLOAD_CHUNK_SIZE);
+  emitTransferProgress(onProgress, file.name, "checking", 0, file.size);
   const check = await request<UploadCheckResponse>(
     `/api/projects/${projectId}/uploads/check`,
     {
@@ -98,37 +112,131 @@ async function uploadMediaInChunks(projectId: string, file: File): Promise<Media
     },
     uploadBase
   );
-  if (check.completed && check.media) return check.media;
+  if (check.completed && check.media) {
+    emitTransferProgress(onProgress, file.name, "complete", file.size, file.size);
+    return check.media;
+  }
 
   const uploaded = new Set(check.uploaded_chunks);
   const missing = Array.from({ length: totalChunks }, (_, index) => index).filter((index) => !uploaded.has(index));
-  await runPool(missing, UPLOAD_CONCURRENCY, (chunkIndex) => uploadChunk(check.upload_id, file, chunkIndex));
+  let uploadedBytes = check.uploaded_chunks.reduce((sum, chunkIndex) => sum + chunkByteSize(file, chunkIndex), 0);
+  const activeChunks = new Map<number, number>();
+  const reportUpload = () => {
+    const activeBytes = Array.from(activeChunks.values()).reduce((sum, value) => sum + value, 0);
+    emitTransferProgress(onProgress, file.name, "uploading", Math.min(file.size, uploadedBytes + activeBytes), file.size);
+  };
+  reportUpload();
+  await runPool(missing, UPLOAD_CONCURRENCY, async (chunkIndex) => {
+    await uploadChunk(check.upload_id, file, chunkIndex, (loaded) => {
+      activeChunks.set(chunkIndex, loaded);
+      reportUpload();
+    });
+    uploadedBytes += chunkByteSize(file, chunkIndex);
+    activeChunks.delete(chunkIndex);
+    reportUpload();
+  });
 
+  emitTransferProgress(onProgress, file.name, "completing", file.size, file.size);
   const complete = await request<UploadCompleteResponse>(
     `/api/uploads/${check.upload_id}/complete`,
     { method: "POST" },
     uploadBase
   );
+  emitTransferProgress(onProgress, file.name, "complete", file.size, file.size);
   return complete.media;
 }
 
-async function uploadChunk(uploadId: string, file: File, chunkIndex: number): Promise<ChunkUploadResponse> {
+async function uploadChunk(
+  uploadId: string,
+  file: File,
+  chunkIndex: number,
+  onProgress?: (loadedBytes: number, totalBytes: number) => void
+): Promise<ChunkUploadResponse> {
   const uploadBase = getUploadApiBase();
   const start = chunkIndex * UPLOAD_CHUNK_SIZE;
   const end = Math.min(file.size, start + UPLOAD_CHUNK_SIZE);
   const body = new FormData();
   body.append("file", file.slice(start, end), `${file.name}.part-${chunkIndex}`);
   return withRetries(
-    () => request<ChunkUploadResponse>(`/api/uploads/${uploadId}/chunks/${chunkIndex}`, { method: "PUT", body }, uploadBase),
+    () =>
+      xhrRequest<ChunkUploadResponse>(
+        `/api/uploads/${uploadId}/chunks/${chunkIndex}`,
+        { method: "PUT", body },
+        uploadBase,
+        onProgress
+      ),
     CHUNK_RETRIES
   );
 }
 
 function getUploadApiBase(): string {
   if (!UPLOAD_API_BASE) {
-    throw new Error("NEXT_PUBLIC_UPLOAD_API_BASE_URL 未配置，已阻止大文件通过 Next proxy 上传。请重建前端并配置后端直连地址。");
+    throw new Error("NEXT_PUBLIC_UPLOAD_API_BASE_URL is not configured; direct upload API is required for large files.");
   }
   return UPLOAD_API_BASE.replace(/\/$/, "");
+}
+
+function chunkByteSize(file: File, chunkIndex: number): number {
+  const start = chunkIndex * UPLOAD_CHUNK_SIZE;
+  return Math.max(0, Math.min(file.size, start + UPLOAD_CHUNK_SIZE) - start);
+}
+
+function emitTransferProgress(
+  onProgress: TransferProgressCallback | undefined,
+  fileName: string,
+  phase: TransferPhase,
+  loadedBytes: number,
+  totalBytes: number
+): void {
+  const total = Math.max(0, totalBytes);
+  const loaded = Math.max(0, Math.min(loadedBytes, total || loadedBytes));
+  onProgress?.({
+    fileName,
+    phase,
+    loadedBytes: loaded,
+    totalBytes: total,
+    percent: total > 0 ? Math.max(0, Math.min(100, Math.round((loaded / total) * 100))) : 0
+  });
+}
+
+function xhrRequest<T>(
+  path: string,
+  init: { method: string; body?: XMLHttpRequestBodyInit; auth?: boolean; headers?: Record<string, string> },
+  base = API_BASE,
+  onUploadProgress?: (loadedBytes: number, totalBytes: number) => void
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open(init.method, `${base}${path}`);
+    const token = (init.auth ?? true) ? getToken() : null;
+    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    if (!(init.body instanceof FormData)) xhr.setRequestHeader("Content-Type", "application/json");
+    for (const [key, value] of Object.entries(init.headers ?? {})) {
+      xhr.setRequestHeader(key, value);
+    }
+    xhr.upload.onprogress = (event) => {
+      onUploadProgress?.(event.loaded, event.lengthComputable ? event.total : 0);
+    };
+    xhr.onload = () => {
+      if (xhr.status === 401) {
+        clearToken();
+        if (typeof window !== "undefined" && !isPublicPath(window.location.pathname)) {
+          window.location.assign("/login");
+        }
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new Error(readErrorMessage(xhr.responseText, `${xhr.status} ${xhr.statusText}`)));
+        return;
+      }
+      try {
+        resolve(JSON.parse(xhr.responseText || "{}") as T);
+      } catch (err) {
+        reject(err);
+      }
+    };
+    xhr.onerror = () => reject(new Error("Network request failed"));
+    xhr.send(init.body ?? null);
+  });
 }
 
 async function runPool<T>(items: T[], concurrency: number, worker: (item: T) => Promise<unknown>): Promise<void> {
@@ -156,7 +264,7 @@ async function withRetries<T>(fn: () => Promise<T>, retries: number): Promise<T>
   throw lastError;
 }
 
-function hashFile(file: File): Promise<string> {
+function hashFile(file: File, onProgress?: (loadedBytes: number, totalBytes: number) => void): Promise<string> {
   return new Promise((resolve, reject) => {
     const workerUrl = URL.createObjectURL(
       new Blob(
@@ -167,9 +275,12 @@ function hashFile(file: File): Promise<string> {
                 const file = event.data.file;
                 const readSize = event.data.readSize;
                 const hasher = createSha256();
+                let loaded = 0;
                 for (let offset = 0; offset < file.size; offset += readSize) {
                   const buffer = await file.slice(offset, offset + readSize).arrayBuffer();
                   hasher.update(new Uint8Array(buffer));
+                  loaded += buffer.byteLength;
+                  self.postMessage({ loaded, total: file.size });
                 }
                 self.postMessage({ hash: hasher.digest() });
               } catch (error) {
@@ -288,7 +399,11 @@ function hashFile(file: File): Promise<string> {
       worker.terminate();
       URL.revokeObjectURL(workerUrl);
     };
-    worker.onmessage = (event: MessageEvent<{ hash?: string; error?: string }>) => {
+    worker.onmessage = (event: MessageEvent<{ hash?: string; error?: string; loaded?: number; total?: number }>) => {
+      if (typeof event.data.loaded === "number") {
+        onProgress?.(event.data.loaded, event.data.total || file.size);
+        return;
+      }
       cleanup();
       if (event.data.hash) resolve(event.data.hash);
       else reject(new Error(event.data.error || "Failed to hash file"));
@@ -299,6 +414,57 @@ function hashFile(file: File): Promise<string> {
     };
     worker.postMessage({ file, readSize: HASH_READ_SIZE });
   });
+}
+
+export async function downloadFileWithProgress(
+  url: string,
+  fileName: string,
+  expectedBytes = 0,
+  onProgress?: TransferProgressCallback
+): Promise<void> {
+  emitTransferProgress(onProgress, fileName, "downloading", 0, expectedBytes);
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(readErrorMessage(text, `${response.status} ${response.statusText}`));
+  }
+
+  const contentLength = Number(response.headers.get("Content-Length") || 0);
+  const totalBytes = contentLength > 0 ? contentLength : expectedBytes;
+  if (!response.body) {
+    const blob = await response.blob();
+    saveBlob(blob, fileName);
+    emitTransferProgress(onProgress, fileName, "complete", totalBytes || blob.size, totalBytes || blob.size);
+    return;
+  }
+
+  const reader = response.body.getReader();
+  const chunks: BlobPart[] = [];
+  let loadedBytes = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    const chunk = new Uint8Array(value.byteLength);
+    chunk.set(value);
+    chunks.push(chunk.buffer);
+    loadedBytes += value.byteLength;
+    emitTransferProgress(onProgress, fileName, "downloading", loadedBytes, totalBytes);
+  }
+  const blob = new Blob(chunks, { type: response.headers.get("Content-Type") || "application/octet-stream" });
+  saveBlob(blob, fileName);
+  emitTransferProgress(onProgress, fileName, "complete", totalBytes || loadedBytes, totalBytes || loadedBytes);
+}
+
+function saveBlob(blob: Blob, fileName: string): void {
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
 }
 
 export const api = {
@@ -340,7 +506,7 @@ export const api = {
   },
   finishCameraSession: (projectId: string) =>
     request<Project>(`/api/projects/${projectId}/camera/finish`, { method: "POST" }),
-  uploadMedia: (projectId: string, file: File) => uploadMediaInChunks(projectId, file),
+  uploadMedia: (projectId: string, file: File, onProgress?: TransferProgressCallback) => uploadMediaInChunks(projectId, file, onProgress),
   deleteMedia: (projectId: string, mediaId: string) =>
     request<{ deleted: boolean; source_version?: number }>(`/api/projects/${projectId}/media/${mediaId}`, { method: "DELETE" }),
   media: (projectId: string) => request<{ media: MediaAsset[] }>(`/api/projects/${projectId}/media`),

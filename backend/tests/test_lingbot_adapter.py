@@ -262,6 +262,27 @@ class LingBotAdapterTests(unittest.TestCase):
             self.assertEqual(os.environ["TORCHINDUCTOR_FX_GRAPH_CACHE"], "1")
             self.assertEqual(os.environ["TORCHINDUCTOR_AUTOGRAD_CACHE"], "1")
 
+    def test_gaussian_splat_ply_has_supersplat_properties(self) -> None:
+        from app.preview.io.ply import write_gaussian_splat_ply
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "recon.ply"
+            points = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32)
+            colors = np.array([[255, 0, 0], [0, 255, 128]], dtype=np.uint8)
+
+            count = write_gaussian_splat_ply(path, points, colors)
+
+            self.assertEqual(count, 2)
+            data = path.read_bytes()
+            header = data.split(b"end_header\n", 1)[0].decode("ascii")
+            self.assertIn("property float f_dc_0", header)
+            self.assertIn("property float f_rest_44", header)
+            self.assertIn("property float opacity", header)
+            self.assertIn("property float scale_0", header)
+            self.assertIn("property float rot_3", header)
+            self.assertNotIn("property uchar red", header)
+            self.assertEqual(path.stat().st_size, len(header.encode("ascii")) + len(b"end_header\n") + 2 * 62 * 4)
+
     def test_point_export_removes_image_batch_dimension(self) -> None:
         from app.preview.vendor.lingbot_runtime import prepare_lingbot_point_export
 

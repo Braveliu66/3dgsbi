@@ -61,6 +61,79 @@ def write_point_cloud_ply(
     return int(pts.shape[0])
 
 
+def write_gaussian_splat_ply(
+    points: Any,
+    colors: Any,
+    output_path: Path,
+    *,
+    confidence: Any | None = None,
+    max_points: int = 15_000_000,
+    scale: float = 0.002,
+    opacity_logit: float = -2.0,
+) -> int:
+    """Write a SuperSplat / 3DGS-compatible Gaussian Splat PLY."""
+
+    pts, rgb, _conf = prepare_point_data(points, colors, confidence=confidence, max_points=max_points)
+    count = int(pts.shape[0])
+    if scale <= 0:
+        raise PreviewFailure("PLY_INVALID_SCALE", "Gaussian splat scale must be positive")
+
+    sh_c0 = np.float32(0.28209479177387814)
+    sh_dc = (rgb.astype(np.float32) / 255.0 - 0.5) / sh_c0
+    normals = np.zeros((count, 3), dtype=np.float32)
+    f_rest = np.zeros((count, 45), dtype=np.float32)
+    opacity = np.full((count, 1), float(opacity_logit), dtype=np.float32)
+    log_scale = np.full((count, 3), float(np.log(scale)), dtype=np.float32)
+    rotation = np.zeros((count, 4), dtype=np.float32)
+    rotation[:, 0] = 1.0
+
+    data = np.concatenate(
+        [
+            pts.astype(np.float32, copy=False),
+            normals,
+            sh_dc,
+            f_rest,
+            opacity,
+            log_scale,
+            rotation,
+        ],
+        axis=1,
+    ).astype(np.float32, copy=False)
+
+    header = (
+        "ply\n"
+        "format binary_little_endian 1.0\n"
+        f"element vertex {count}\n"
+        "property float x\n"
+        "property float y\n"
+        "property float z\n"
+        "property float nx\n"
+        "property float ny\n"
+        "property float nz\n"
+        "property float f_dc_0\n"
+        "property float f_dc_1\n"
+        "property float f_dc_2\n"
+    )
+    header += "".join(f"property float f_rest_{index}\n" for index in range(45))
+    header += (
+        "property float opacity\n"
+        "property float scale_0\n"
+        "property float scale_1\n"
+        "property float scale_2\n"
+        "property float rot_0\n"
+        "property float rot_1\n"
+        "property float rot_2\n"
+        "property float rot_3\n"
+        "end_header\n"
+    )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("wb") as handle:
+        handle.write(header.encode("ascii"))
+        handle.write(data.tobytes())
+    return count
+
+
 def prepare_point_data(
     points: Any,
     colors: Any,
