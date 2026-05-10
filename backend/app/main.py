@@ -1330,7 +1330,14 @@ async def camera_chunk(
         status="queued",
         priority=95,
         current_stage="camera_segment_queued",
-        options={"preview_pipeline": "lingbot_spz", "segment_index": segment_index, "source_version": project.source_version},
+        options={
+            "preview_pipeline": "lingbot_spz",
+            "segment_index": segment_index,
+            "source_version": project.source_version,
+            "fps": 5,
+            "lingbot_fps": 5,
+            "lingbot_max_frames": 10,
+        },
     )
     db.add(media)
     db.add(task)

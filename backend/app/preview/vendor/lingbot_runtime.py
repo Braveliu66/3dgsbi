@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import math
+import os
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field, replace
@@ -74,6 +75,7 @@ class LingBotInferenceReporter:
             "lingbot_current_frame": current,
             "lingbot_total_frames": total,
             "lingbot_seconds_per_frame": round(seconds_per_frame, 3),
+            "lingbot_current_inference_fps": round(current / max(elapsed, 1e-6), 3),
             "lingbot_inference_eta_seconds": eta,
         }
         self.metrics = {**self.metrics, **metrics}
@@ -185,13 +187,15 @@ def run_lingbot_pointcloud(
     progress: Progress,
     runtime_options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    runtime_options = runtime_options or {}
+    configure_torch_compile_cache(runtime_options)
+
     import torch
 
     if not torch.cuda.is_available():
         raise PreviewFailure("GPU_RESOURCE_UNAVAILABLE", "LingBot-Map preview requires CUDA")
     torch.cuda.reset_peak_memory_stats()
 
-    runtime_options = runtime_options or {}
     input_mode = str(runtime_options.get("lingbot_input_mode") or ("offline_video" if input_video else "image_sequence"))
 
     with prepend_sys_path(VENDOR_ROOT / "lingbot"):
@@ -369,18 +373,31 @@ def run_inference_once(
     compile_metrics: dict[str, Any] = {
         "lingbot_compile_requested": plan.compile,
         "lingbot_compile_effective": False,
+        "compile_warm_seconds": 0.0,
+        "compile_cache_dir": os.environ.get("TORCHINDUCTOR_CACHE_DIR"),
     }
     should_compile = should_compile_lingbot_plan(plan)
     if should_compile:
+        compile_started = time.monotonic()
         try:
             warmup_streaming_compile(torch, model, images, plan, dtype, device, progress)
-            compile_metrics = {**compile_metrics, "lingbot_compile_effective": True, "lingbot_compile_fallback": False}
+            compile_warm_seconds = round(time.monotonic() - compile_started, 3)
+            compile_metrics = {
+                **compile_metrics,
+                "lingbot_compile_effective": True,
+                "lingbot_compile_fallback": False,
+                "compile_warm_seconds": compile_warm_seconds,
+                "lingbot_compile_warm_seconds": compile_warm_seconds,
+            }
         except Exception as exc:
             cleanup_cuda(torch)
+            compile_warm_seconds = round(time.monotonic() - compile_started, 3)
             compile_metrics = {
                 **compile_metrics,
                 "lingbot_compile_fallback": True,
                 "lingbot_compile_error": str(exc),
+                "compile_warm_seconds": compile_warm_seconds,
+                "lingbot_compile_warm_seconds": compile_warm_seconds,
             }
             progress(
                 "lingbot_compile_fallback",
@@ -414,6 +431,8 @@ def run_inference_once(
     )
     output_device = torch.device("cpu") if plan.offload_to_cpu else None
     reporter = LingBotInferenceReporter(progress)
+    synchronize_cuda(torch)
+    inference_started = time.monotonic()
     with torch.no_grad(), torch.amp.autocast("cuda", dtype=dtype):
         if plan.mode == "windowed":
             predictions = model.inference_windowed(
@@ -434,9 +453,17 @@ def run_inference_once(
                 output_device=output_device,
                 progress_callback=reporter,
             )
+    synchronize_cuda(torch)
+    throughput_metrics = inference_throughput_metrics(int(images.shape[0]), time.monotonic() - inference_started)
+    progress(
+        "lingbot_inference",
+        72,
+        f"LingBot inference completed at {throughput_metrics['inference_fps']:.2f} fps",
+        throughput_metrics,
+    )
     del model
     cleanup_cuda(torch)
-    return predictions, {**compile_metrics, **reporter.metrics}
+    return predictions, {**compile_metrics, **reporter.metrics, **throughput_metrics}
 
 
 def resolve_lingbot_plan(
@@ -809,6 +836,32 @@ def flashinfer_available() -> bool:
         return True
     except Exception:
         return False
+
+
+def configure_torch_compile_cache(runtime_options: dict[str, Any]) -> None:
+    cache_dir = option_value(runtime_options, "lingbot_compile_cache_dir", "compile_cache_dir")
+    if cache_dir:
+        os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", str(cache_dir))
+        os.environ.setdefault("TORCHINDUCTOR_FX_GRAPH_CACHE", "1")
+        os.environ.setdefault("TORCHINDUCTOR_AUTOGRAD_CACHE", "1")
+
+
+def synchronize_cuda(torch) -> None:
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+def inference_throughput_metrics(processed_frames: int, seconds: float) -> dict[str, Any]:
+    elapsed = max(0.0, float(seconds))
+    fps = processed_frames / max(elapsed, 1e-6) if processed_frames > 0 else 0.0
+    return {
+        "processed_frames": int(processed_frames),
+        "inference_seconds": round(elapsed, 3),
+        "inference_fps": round(fps, 3),
+        "lingbot_processed_frames": int(processed_frames),
+        "lingbot_inference_seconds": round(elapsed, 3),
+        "lingbot_inference_fps": round(fps, 3),
+    }
 
 
 def cleanup_cuda(torch) -> None:

@@ -210,6 +210,30 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(payload["options"]["source_version"], 3)
             self.assertEqual(payload["options"]["fine_iterations"], 2000)
 
+    def test_camera_chunk_queues_speed_profile_preview_task(self) -> None:
+        fake_redis = FakeRedis()
+        with TestClient(app) as client, patch("app.main.get_redis", return_value=fake_redis):
+            headers = auth_headers(client)
+            session_response = client.post("/api/camera/sessions", json={"name": "fast camera"}, headers=headers)
+            session_response.raise_for_status()
+            project_id = session_response.json()["id"]
+
+            response = client.post(
+                f"/api/projects/{project_id}/camera/chunks?segment_index=0&segment_start_seconds=0&segment_end_seconds=2",
+                files={"file": ("segment.webm", b"webm", "video/webm")},
+                headers=headers,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            options = payload["task"]["options"]
+
+            self.assertEqual(options["preview_pipeline"], "lingbot_spz")
+            self.assertEqual(options["segment_index"], 0)
+            self.assertEqual(options["fps"], 5)
+            self.assertEqual(options["lingbot_fps"], 5)
+            self.assertEqual(options["lingbot_max_frames"], 10)
+            self.assertIn(payload["task"]["id"], fake_redis.lists["preview_tasks"])
+
     def test_cancel_queued_task_removes_it_from_redis_queue(self) -> None:
         fake_redis = FakeRedis()
         with TestClient(app) as client, patch("app.main.get_redis", return_value=fake_redis):

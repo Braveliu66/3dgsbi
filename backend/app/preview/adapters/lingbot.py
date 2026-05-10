@@ -23,7 +23,7 @@ def run(ctx: PreviewContext) -> PreviewResult:
     ply_path.parent.mkdir(parents=True, exist_ok=True)
     realtime = "segment_index" in ctx.options
     offline_video = bool(ctx.input_video and not realtime)
-    fps = read_int_option(first_option(ctx.options, "lingbot_fps", "fps"), 6 if realtime else 2 if offline_video else 10)
+    fps = read_int_option(first_option(ctx.options, "lingbot_fps", "fps"), 5 if realtime or offline_video else 10)
     max_frames = read_int_option(ctx.options.get("lingbot_max_frames"), 96 if realtime else 0)
     confidence_quantile = read_float_option(ctx.options.get("lingbot_confidence_quantile"), 0.8 if offline_video else 0.65)
     max_points = read_int_option(ctx.options.get("preview_max_points"), 0 if offline_video else 15_000_000)
@@ -43,6 +43,7 @@ def run(ctx: PreviewContext) -> PreviewResult:
         progress=report,
         runtime_options={
             **ctx.options,
+            "lingbot_compile_cache_dir": str(ctx.model_cache_dir / "torchinductor"),
             "lingbot_input_mode": "realtime_camera" if realtime else "offline_video" if ctx.input_video else "image_sequence",
         },
     )
@@ -59,6 +60,8 @@ def run(ctx: PreviewContext) -> PreviewResult:
             **metrics,
             **timer.metrics(),
             "adapter": "lingbot_spz",
+            "output_spz": str(ctx.output_spz),
+            "output_spz_size": ctx.output_spz.stat().st_size if ctx.output_spz.exists() else None,
             "intermediate_ply_size": ply_path.stat().st_size,
         },
         source_commits={"LingBot-Map": SOURCE_COMMITS["LingBot-Map"], "Spark": SOURCE_COMMITS["Spark"]},

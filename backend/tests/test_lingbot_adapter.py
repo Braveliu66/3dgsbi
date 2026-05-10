@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
@@ -42,11 +43,12 @@ class LingBotAdapterTests(unittest.TestCase):
             def fake_runtime(**kwargs):
                 output_ply = kwargs["output_ply"]
                 self.assertTrue(output_ply.parent.is_dir())
-                self.assertEqual(kwargs["fps"], 2)
+                self.assertEqual(kwargs["fps"], 5)
                 self.assertEqual(kwargs["max_frames"], 0)
                 self.assertEqual(kwargs["confidence_quantile"], 0.8)
                 self.assertEqual(kwargs["max_points"], 0)
                 self.assertEqual(kwargs["runtime_options"]["lingbot_input_mode"], "offline_video")
+                self.assertEqual(kwargs["runtime_options"]["lingbot_compile_cache_dir"], str(root / "models" / "torchinductor"))
                 output_ply.write_bytes(b"ply")
                 return {"input_frame_count": 2, "point_count": 1}
 
@@ -79,6 +81,8 @@ class LingBotAdapterTests(unittest.TestCase):
             self.assertEqual(result.output_spz, output_spz)
             self.assertEqual(result.intermediate_ply.name, "recon.ply")
             self.assertEqual(result.splat_count, 1)
+            self.assertTrue(output_spz.exists())
+            self.assertEqual(result.metrics["output_spz_size"], 3)
 
     def test_video_plan_defaults_for_fast_preview(self) -> None:
         from app.preview.vendor import lingbot_runtime
@@ -234,8 +238,29 @@ class LingBotAdapterTests(unittest.TestCase):
         self.assertEqual(calls[0][0], "lingbot_inference")
         self.assertEqual(calls[0][3]["lingbot_current_frame"], 12)
         self.assertEqual(calls[0][3]["lingbot_total_frames"], 24)
+        self.assertEqual(calls[0][3]["lingbot_current_inference_fps"], 2.0)
         self.assertEqual(calls[1][3]["lingbot_current_window"], 2)
         self.assertEqual(calls[1][3]["lingbot_total_windows"], 4)
+
+    def test_lingbot_inference_throughput_metrics(self) -> None:
+        from app.preview.vendor.lingbot_runtime import inference_throughput_metrics
+
+        metrics = inference_throughput_metrics(20, 4.0)
+
+        self.assertEqual(metrics["processed_frames"], 20)
+        self.assertEqual(metrics["inference_seconds"], 4.0)
+        self.assertEqual(metrics["inference_fps"], 5.0)
+        self.assertEqual(metrics["lingbot_inference_fps"], 5.0)
+
+    def test_lingbot_configures_persistent_compile_cache(self) -> None:
+        from app.preview.vendor.lingbot_runtime import configure_torch_compile_cache
+
+        with patch.dict(os.environ, {}, clear=True):
+            configure_torch_compile_cache({"lingbot_compile_cache_dir": "/model-cache/torchinductor"})
+
+            self.assertEqual(os.environ["TORCHINDUCTOR_CACHE_DIR"], "/model-cache/torchinductor")
+            self.assertEqual(os.environ["TORCHINDUCTOR_FX_GRAPH_CACHE"], "1")
+            self.assertEqual(os.environ["TORCHINDUCTOR_AUTOGRAD_CACHE"], "1")
 
     def test_point_export_removes_image_batch_dimension(self) -> None:
         from app.preview.vendor.lingbot_runtime import prepare_lingbot_point_export

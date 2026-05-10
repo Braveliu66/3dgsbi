@@ -9,7 +9,7 @@ import { api, projectEventsUrl } from "@/lib/api";
 import { rememberTaskId } from "@/lib/taskTracking";
 import type { Project, Task, ViewerConfig } from "@/lib/types";
 
-const SEGMENT_MS = 5000;
+const SEGMENT_MS = 2000;
 
 export default function CameraPage() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -40,7 +40,7 @@ export default function CameraPage() {
     setBusy(true);
     setError(null);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 }, audio: false });
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
       streamRef.current = stream;
       if (videoRef.current) videoRef.current.srcObject = stream;
 
@@ -51,8 +51,8 @@ export default function CameraPage() {
       segmentIndexRef.current = 0;
       startedAtRef.current = performance.now();
       segmentStartRef.current = 0;
-      const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
-        ? "video/webm;codecs=vp9"
+      const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp8")
+        ? "video/webm;codecs=vp8"
         : "video/webm";
       const recorder = new MediaRecorder(stream, { mimeType });
       recorder.ondataavailable = (event) => {
@@ -191,7 +191,7 @@ export default function CameraPage() {
           <div className="panel-head">
             <div>
               <h2>LingBot-Map 增量预览</h2>
-              <p className="muted small">{segments ? `已提交 ${segments} 个时间窗口` : "每 5 秒提交一个窗口，Worker 完成后增量加载"}</p>
+              <p className="muted small">{segments ? `已提交 ${segments} 个时间窗口` : "每 2 秒提交一个窗口，Worker 完成后增量加载"}</p>
             </div>
             <span className="status-pill">{viewer?.mode ?? "progressive"}</span>
           </div>
