@@ -402,6 +402,7 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
                         "splat_count": result.splat_count,
                         "intermediate_ply": str(result.intermediate_ply) if result.intermediate_ply else None,
                         "intermediate_ply_size": result.metrics.get("intermediate_ply_size"),
+                        **preview_artifact_metrics(result.metrics),
                     },
                 )
                 upload_db.add(artifact)
@@ -592,6 +593,24 @@ def read_optional_int(value: Any) -> int | None:
         return None
 
 
+def preview_artifact_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "lingbot_commit",
+        "lingbot_model",
+        "lingbot_sampled_frames",
+        "lingbot_inference_mode",
+        "lingbot_keyframe_interval",
+        "lingbot_camera_iterations",
+        "lingbot_num_scale_frames",
+        "lingbot_window_size",
+        "lingbot_overlap_keyframes",
+        "lingbot_use_sdpa",
+        "point_count",
+        "cuda_memory_peak_mb",
+    )
+    return {key: metrics.get(key) for key in keys if key in metrics}
+
+
 def update_task(db, task: Task, project: Project, stage: str, progress: int, started: float, *logs: str) -> None:
     task.current_stage = stage
     task.progress = max(task.progress or 0, progress)
@@ -692,12 +711,16 @@ def expected_seconds_for_task(task: Task, project: Project) -> int:
 def expected_seconds_for_pipeline(pipeline: str | None) -> int:
     if pipeline == "litevggt_spz":
         return settings.preview_expected_seconds_litevggt_spz
+    if pipeline == "lingbot_map_spz":
+        return settings.preview_expected_seconds_lingbot_map_spz
     return settings.preview_expected_seconds_litevggt_spz
 
 
 def stage_for_pipeline(pipeline: str) -> str:
     if pipeline == "litevggt_spz":
         return "litevggt_direct_spz"
+    if pipeline == "lingbot_map_spz":
+        return "lingbot_map_spz"
     return "unknown_preview_pipeline"
 
 

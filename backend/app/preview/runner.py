@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.preview.adapters import litevggt
+from app.preview.adapters import lingbot, litevggt
 from app.preview.types import PreviewContext, PreviewFailure, PreviewResult
 
 
@@ -9,4 +9,6 @@ def run_preview_pipeline(ctx: PreviewContext) -> PreviewResult:
 
     if ctx.pipeline == "litevggt_spz":
         return litevggt.run(ctx)
+    if ctx.pipeline == "lingbot_map_spz":
+        return lingbot.run(ctx)
     raise PreviewFailure("UNKNOWN_PREVIEW_PIPELINE", f"unsupported preview pipeline: {ctx.pipeline}")

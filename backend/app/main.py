@@ -867,11 +867,18 @@ def create_preview_task(
         raise HTTPException(status_code=400, detail="请先上传真实素材")
     if project.input_type == "images" and not any(item.kind == "image" for item in project.media):
         raise HTTPException(status_code=400, detail="图片预览至少需要 1 张图片")
-    if project.input_type != "images":
-        raise HTTPException(status_code=400, detail="Video preview pipeline is unavailable")
     pipeline = normalize_preview_pipeline(str((payload.options or {}).get("preview_pipeline") or ""), project.input_type)
-    if pipeline != "litevggt_spz":
-        raise HTTPException(status_code=400, detail=f"Unsupported preview pipeline: {pipeline}")
+    if project.input_type == "images":
+        if pipeline != "litevggt_spz":
+            raise HTTPException(status_code=400, detail=f"Unsupported preview pipeline for image input: {pipeline}")
+    elif project.input_type == "video":
+        video_count = sum(1 for item in project.media if item.kind == "video")
+        if video_count != 1 or len(project.media) != 1:
+            raise HTTPException(status_code=400, detail="Video preview requires exactly one video file")
+        if pipeline != "lingbot_map_spz":
+            raise HTTPException(status_code=400, detail=f"Unsupported preview pipeline for video input: {pipeline}")
+    else:
+        raise HTTPException(status_code=400, detail="Preview input type is unsupported")
     task = Task(
         project_id=project.id,
         type="preview",

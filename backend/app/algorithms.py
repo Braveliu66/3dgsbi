@@ -35,6 +35,19 @@ ALGORITHMS: list[dict[str, Any]] = [
         "notes": "Bundled LiteVGGT direct point cloud preview.",
     },
     {
+        "name": "LingBot-Map Video Preview",
+        "repo_url": "https://github.com/Robbyant/lingbot-map",
+        "license": "Apache-2.0",
+        "commit_hash_setting": "lingbot_map_repo_commit",
+        "local_path": Path(__file__).resolve().parent / "preview" / "adapters" / "lingbot.py",
+        "enabled": True,
+        "weight_paths": ["lingbot/lingbot-map-long.pt"],
+        "commands": {},
+        "source_type": "pinned_runtime_package",
+        "license_notice": "Apache-2.0; worker installs the LingBot-Map core package at a pinned commit and excludes optional rendering/visualization dependencies.",
+        "notes": "Video fast preview pipeline: sampled video frames -> LingBot-Map streaming/windowed RGB-D reconstruction -> lightweight Gaussian PLY -> Spark SPZ. It does not use LingBot offline rendering, Kaolin, Open3D, viser, sky segmentation, or custom render CUDA extensions.",
+    },
+    {
         "name": "Spark SPZ",
         "repo_url": "https://github.com/sparkjsdev/spark",
         "license": "MIT",
@@ -148,12 +161,17 @@ def seed_algorithm_registry(db: Session, settings: Settings | None = None) -> No
     db.commit()
 
 
-def normalize_preview_pipeline(value: str | None, _input_type: str) -> str:
-    normalized = (value or "litevggt_spz").strip().lower()
+def normalize_preview_pipeline(value: str | None, input_type: str) -> str:
+    default = "lingbot_map_spz" if input_type == "video" else "litevggt_spz"
+    normalized = (value or default).strip().lower()
     aliases = {
         "litevggt_spark": "litevggt_spz",
         "litevggt_spz": "litevggt_spz",
         "direct": "litevggt_spz",
+        "lingbot": "lingbot_map_spz",
+        "lingbot_map": "lingbot_map_spz",
+        "lingbot_map_spz": "lingbot_map_spz",
+        "video_lingbot": "lingbot_map_spz",
     }
     return aliases.get(normalized, normalized)
 
@@ -187,6 +205,11 @@ def runtime_preflight(db: Session, settings: Settings | None = None) -> dict[str
                 extensions_ready = bool(fine_runtime["available"] or fine_workers["available"])
                 if not extensions_ready:
                     issues.append("worker-fine heartbeat missing and backend fine CUDA runtime unavailable")
+            if item.name == "LingBot-Map Video Preview":
+                lingbot_runtime = lingbot_preview_runtime_status()
+                extensions_ready = bool(lingbot_runtime["available"] or preview_worker_status(db)["available"])
+                if not extensions_ready:
+                    issues.append("worker-preview heartbeat missing and backend LingBot-Map runtime unavailable")
             if item.name == "Video Fine ARTDECO + Speed3R-Pi3":
                 video_runtime = artdeco_video_runtime_status()
                 extensions_ready = bool(video_runtime["available"] or fine_workers["available"])
@@ -231,6 +254,7 @@ def runtime_preflight(db: Session, settings: Settings | None = None) -> dict[str
         "gpu": gpu,
         "torch": torch,
         "transformer_engine": import_check("transformer_engine"),
+        "preview_runtime": {"lingbot_map": lingbot_preview_runtime_status(), "worker_preview": preview_worker_status(db)},
         "fine_runtime": {**fine_runtime_status(), "worker_fine": fine_workers},
         "video_fine_runtime": {**artdeco_video_runtime_status(), "worker_fine": fine_workers},
         "spz_converter": spark_converter_status(),
@@ -311,6 +335,7 @@ def import_check(module_name: str) -> dict[str, Any]:
 def bundled_module_status(name: str) -> dict[str, Any]:
     modules = {
         "LiteVGGT": "app.preview.vendor.litevggt_runtime",
+        "LingBot-Map Video Preview": "app.preview.adapters.lingbot",
         "MobileGS Fine (AMB3R-SfM + DeblurMLP + LM-RS)": "app.fine.runner",
         "Video Fine ARTDECO + Speed3R-Pi3": "app.fine.video.pipeline",
         "Deblurring-3DGS GTnet": "app.fine.deblur_mlp",
@@ -366,6 +391,38 @@ def fine_runtime_status() -> dict[str, Any]:
         **modules,
         **optional_modules,
         "error": None if available else "CUDA torch/Spark SPZ/AMB3R-SfM/DeblurMLP/LM-RS rasterizer/Compact Box/simple_knn/fused_ssim check failed",
+    }
+
+
+def lingbot_preview_runtime_status() -> dict[str, Any]:
+    torch_status = torch_info()
+    spark_status = spark_converter_status()
+    modules = {
+        "lingbot_adapter": import_check("app.preview.adapters.lingbot"),
+        "lingbot_map": import_check("lingbot_map.models.gct_stream"),
+        "opencv": import_check("cv2"),
+        "einops": import_check("einops"),
+        "safetensors": import_check("safetensors"),
+        "flashinfer": import_check("flashinfer"),
+    }
+    unavailable_required = [
+        name
+        for name, status in modules.items()
+        if name != "flashinfer" and not status.get("available")
+    ]
+    available = bool(
+        torch_status.get("available")
+        and torch_status.get("cuda_available")
+        and spark_status.get("available")
+        and not unavailable_required
+    )
+    return {
+        "available": available,
+        "torch_cuda": torch_status,
+        "spark_spz": spark_status,
+        **modules,
+        "sdpa_fallback": not modules["flashinfer"].get("available"),
+        "error": None if available else "CUDA torch/Spark SPZ/LingBot-Map core runtime check failed",
     }
 
 

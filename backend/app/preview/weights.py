@@ -29,6 +29,10 @@ LITEVGGT_WEIGHT = ModelWeight(
     "litevggt/te_dict.pt",
     "https://huggingface.co/ZhijianShu/LiteVGGT/resolve/main/te_dict.pt",
 )
+LINGBOT_MAP_LONG_WEIGHT = ModelWeight(
+    "lingbot/lingbot-map-long.pt",
+    "https://huggingface.co/robbyant/lingbot-map/resolve/main/lingbot-map-long.pt",
+)
 AMB3R_WEIGHT = ModelWeight(
     "amb3r/amb3r.pt",
     "https://drive.google.com/file/d/14x0WW2rUE_he2hUEouP6ywSRnlJDeLel/view?usp=sharing",
@@ -56,6 +60,7 @@ MAST3R_RETRIEVAL_CODEBOOK = ModelWeight(
 
 MODEL_WEIGHTS: tuple[ModelWeight, ...] = (
     LITEVGGT_WEIGHT,
+    LINGBOT_MAP_LONG_WEIGHT,
     AMB3R_WEIGHT,
     SPEED3R_PI3_CONFIG,
     SPEED3R_PI3_WEIGHT,
@@ -67,6 +72,7 @@ WEIGHT_BY_RELATIVE_PATH = {item.relative_path: item for item in MODEL_WEIGHTS}
 
 PIPELINE_WEIGHT_PATHS: dict[str, tuple[str, ...]] = {
     "litevggt_spz": ("litevggt/te_dict.pt",),
+    "lingbot_map_spz": ("lingbot/lingbot-map-long.pt",),
     "mobilegs_lmrs": ("amb3r/amb3r.pt",),
     "video_artdeco_speed3r": (
         "speed3r_pi3/config.json",

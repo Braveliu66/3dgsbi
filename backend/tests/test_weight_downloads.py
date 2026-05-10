@@ -139,6 +139,7 @@ class WeightDownloadTests(unittest.TestCase):
     def test_pipeline_weights_are_task_specific(self) -> None:
         self.assertEqual([item.relative_path for item in weights_for_pipeline("litevggt_spz")], ["litevggt/te_dict.pt"])
         self.assertEqual([item.relative_path for item in weights_for_pipeline("litevggt_edgs")], [])
+        self.assertEqual([item.relative_path for item in weights_for_pipeline("lingbot_map_spz")], ["lingbot/lingbot-map-long.pt"])
         self.assertEqual([item.relative_path for item in weights_for_pipeline("mobilegs_lmrs")], ["amb3r/amb3r.pt"])
         self.assertEqual(
             [item.relative_path for item in weights_for_pipeline("video_artdeco_speed3r")],

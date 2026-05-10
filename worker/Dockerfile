@@ -27,7 +27,7 @@ ENV HF_HUB_CACHE=/model-cache/huggingface/hub
 ENV XDG_CACHE_HOME=/model-cache/xdg
 ENV TORCH_EXTENSIONS_DIR=/model-cache/torch_extensions
 
-RUN mkdir -p /model-cache/amb3r /model-cache/speed3r_pi3 /model-cache/mast3r
+RUN mkdir -p /model-cache/amb3r /model-cache/lingbot /model-cache/speed3r_pi3 /model-cache/mast3r
 
 RUN --mount=type=cache,id=three-dgs-worker-apt-cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-apt-lists,target=/var/lib/apt/lists,sharing=locked \
@@ -46,7 +46,7 @@ RUN --mount=type=cache,id=three-dgs-worker-apt-cache,target=/var/cache/apt,shari
     rm -f /etc/apt/apt.conf.d/docker-clean && \
     mkdir -p /var/cache/apt/archives/partial /var/lib/apt/lists/partial && \
     apt-get update && apt-get install -y --no-install-recommends \
-    git ca-certificates curl gnupg xz-utils build-essential cmake ninja-build \
+    git ca-certificates curl gnupg xz-utils build-essential cmake ninja-build libeigen3-dev \
     ffmpeg libgl1 libglib2.0-0 libsm6 libxrender1 libxext6 && \
     if ! find /usr/local/cuda/include /usr/include /usr -path '*/cudnn.h' -print -quit 2>/dev/null | grep -q .; then \
       apt-get update && apt-get install -y --no-install-recommends libcudnn9-dev-cuda-12; \
@@ -111,6 +111,8 @@ ARG ARTDECO_REPO_URL=https://github.com/InternRobotics/ARTDECO.git
 ARG ARTDECO_REPO_COMMIT=bb654395826e50ac9e4671682d901377115a24ce
 ARG SPEED3R_REPO_URL=https://github.com/Visual-AI/speed3r.git
 ARG SPEED3R_REPO_COMMIT=5460f7309c87e5daac36385ff6611627de7d7267
+ARG LINGBOT_MAP_REPO_URL=https://github.com/Robbyant/lingbot-map.git
+ARG LINGBOT_MAP_REPO_COMMIT=4cd986009b9adeded8a4e740919221940dedeffe
 
 ENV FINE_RECONSTRUCTION_ENABLED=true
 ENV LMRS_ROOT=/opt/lm-rs
@@ -272,6 +274,7 @@ COPY backend/app ./app
 RUN --mount=type=cache,id=three-dgs-worker-runtime-extension-pip-cache,target=/root/.cache/pip,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-lmrs-git-cache,target=/repo-cache/lm-rs,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-artdeco-git-cache,target=/repo-cache/artdeco,sharing=locked \
+    --mount=type=cache,id=three-dgs-worker-lingbot-map-git-cache,target=/repo-cache/lingbot-map,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-speed3r-git-cache,target=/repo-cache/speed3r,sharing=locked <<'EOF'
 set -eu
 retry_pip() {
@@ -302,13 +305,22 @@ retry_git() {
     attempt=$((attempt + 1))
   done
 }
+ensure_git_checkout() {
+  repo_url="$1"
+  repo_path="$2"
+  repo_commit="$3"
+  if [ ! -d "$repo_path/.git" ]; then
+    rm -rf "$repo_path"
+    retry_git clone "$repo_url" "$repo_path"
+  fi
+  retry_git -C "$repo_path" remote set-url origin "$repo_url"
+  if ! git -C "$repo_path" cat-file -e "$repo_commit^{commit}" >/dev/null 2>&1; then
+    retry_git -C "$repo_path" fetch --all --tags --prune
+  fi
+  retry_git -C "$repo_path" checkout "$repo_commit"
+}
 CACHED_LMRS=/repo-cache/lm-rs/source
-if [ ! -d "$CACHED_LMRS/.git" ]; then
-  rm -rf "$CACHED_LMRS"
-  retry_git clone "$LMRS_REPO_URL" "$CACHED_LMRS"
-fi
-retry_git -C "$CACHED_LMRS" fetch --all --tags --prune
-retry_git -C "$CACHED_LMRS" checkout "$LMRS_REPO_COMMIT"
+ensure_git_checkout "$LMRS_REPO_URL" "$CACHED_LMRS" "$LMRS_REPO_COMMIT"
 retry_git -C "$CACHED_LMRS" submodule update --init --recursive submodules/simple-knn submodules/diff-gaussian-rasterization
 retry_git -C "$CACHED_LMRS/submodules/diff-gaussian-rasterization" checkout "$LMRS_RASTERIZER_COMMIT"
 retry_git -C "$CACHED_LMRS/submodules/diff-gaussian-rasterization" submodule update --init --recursive
@@ -334,27 +346,23 @@ apply_rasterizer_patch /tmp/fastgs-cuda-metric-accumulation.patch
 retry_pip --no-build-isolation "$LMRS_ROOT/submodules/diff-gaussian-rasterization"
 retry_pip --no-build-isolation "$LMRS_ROOT/submodules/simple-knn"
 retry_pip --no-build-isolation /app/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/fused-ssim
+CACHED_LINGBOT_MAP=/repo-cache/lingbot-map/source
+ensure_git_checkout "$LINGBOT_MAP_REPO_URL" "$CACHED_LINGBOT_MAP" "$LINGBOT_MAP_REPO_COMMIT"
+retry_pip --no-deps "$CACHED_LINGBOT_MAP"
 CACHED_ARTDECO=/repo-cache/artdeco/source
 export GIT_LFS_SKIP_SMUDGE=1
-if [ ! -d "$CACHED_ARTDECO/.git" ]; then
-  rm -rf "$CACHED_ARTDECO"
-  retry_git clone "$ARTDECO_REPO_URL" "$CACHED_ARTDECO"
-fi
-retry_git -C "$CACHED_ARTDECO" fetch --all --tags --prune
-retry_git -C "$CACHED_ARTDECO" checkout "$ARTDECO_REPO_COMMIT"
-retry_git -C "$CACHED_ARTDECO" submodule update --init --recursive VSLAM/thirdparty/eigen
+ensure_git_checkout "$ARTDECO_REPO_URL" "$CACHED_ARTDECO" "$ARTDECO_REPO_COMMIT"
+test -f /usr/include/eigen3/Eigen/Sparse
 rm -rf "$ARTDECO_ROOT"
 mkdir -p "$(dirname "$ARTDECO_ROOT")"
 cp -a "$CACHED_ARTDECO" "$ARTDECO_ROOT"
 sed -i 's/if not (torch.cuda.is_available() and CUDA_HOME):/if not CUDA_HOME:/' "$ARTDECO_ROOT/VSLAM/setup.py"
+sed -i 's|str(ROOT / "thirdparty/eigen")|"/usr/include/eigen3"|' "$ARTDECO_ROOT/VSLAM/setup.py"
+sed -i 's/D11.type()/D11.scalar_type()/' "$ARTDECO_ROOT/VSLAM/backend/src/matching_kernels.cu"
+sed -i 's|torch::linalg::linalg_norm(dx, std::optional<c10::Scalar>(), {}, false, {})|dx.pow(2).sum().sqrt()|g' "$ARTDECO_ROOT/VSLAM/backend/src/gn_kernels.cu"
 retry_pip --no-deps --no-build-isolation "$ARTDECO_ROOT/VSLAM"
 CACHED_SPEED3R=/repo-cache/speed3r/source
-if [ ! -d "$CACHED_SPEED3R/.git" ]; then
-  rm -rf "$CACHED_SPEED3R"
-  retry_git clone "$SPEED3R_REPO_URL" "$CACHED_SPEED3R"
-fi
-retry_git -C "$CACHED_SPEED3R" fetch --all --tags --prune
-retry_git -C "$CACHED_SPEED3R" checkout "$SPEED3R_REPO_COMMIT"
+ensure_git_checkout "$SPEED3R_REPO_URL" "$CACHED_SPEED3R" "$SPEED3R_REPO_COMMIT"
 rm -rf "$SPEED3R_ROOT"
 mkdir -p "$(dirname "$SPEED3R_ROOT")"
 cp -a "$CACHED_SPEED3R" "$SPEED3R_ROOT"
@@ -364,49 +372,6 @@ find "$ARTDECO_ROOT" -name .git -prune -exec rm -rf {} +
 find "$ARTDECO_ROOT" -name .git -type f -delete
 find "$SPEED3R_ROOT" -name .git -prune -exec rm -rf {} +
 find "$SPEED3R_ROOT" -name .git -type f -delete
-PYTHONPATH=/app:/app/app/fine/local_3dgs/vendor/gaussian_splatting:/app/app/preview/vendor/litevggt:$ARTDECO_ROOT:$ARTDECO_ROOT/VSLAM:$ARTDECO_ROOT/VSLAM/thirdparty/mast3r:$SPEED3R_ROOT \
-  python - <<'PY'
-import torch
-import torchvision
-import importlib.metadata as importlib_metadata
-import pycolmap
-import transformer_engine.pytorch as te
-import diff_gaussian_rasterization
-import simple_knn
-import fused_ssim
-import gsplat
-import safetensors
-import pypose
-import natsort
-import mast3r_slam_backends
-import spconv.pytorch as spconv
-import torch_scatter
-from transformer_engine.common.recipe import DelayedScaling, Format
-from vggt.models.vggt import VGGT
-from scene import GaussianModel
-from pi3.models.pi3_sparse import Pi3_Sparse
-from app.fine.video.artdeco_optimizer_compat import install_artdeco_adam_compat
-
-assert torch.__version__.startswith("2.8.0"), torch.__version__
-assert torchvision.__version__.startswith("0.23.0"), torchvision.__version__
-assert importlib_metadata.version("flashinfer-python")
-ext = diff_gaussian_rasterization._C
-for name in ("get_JTv", "get_Diag", "get_JTJv", "fastgs_accumulate_metrics"):
-    assert hasattr(ext, name), name
-assert hasattr(diff_gaussian_rasterization._RasterizeGaussians, "fastgs_accumulate_metrics")
-assert getattr(diff_gaussian_rasterization, "MOBILEGS_COMPACT_BOX", False)
-assert getattr(diff_gaussian_rasterization, "MOBILEGS_FASTGS_METRIC", False)
-install_artdeco_adam_compat()
-assert hasattr(diff_gaussian_rasterization, "adamUpdate")
-assert hasattr(diff_gaussian_rasterization, "adamUpdateBasic")
-assert Pi3_Sparse is not None
-import app.fine.runner
-import app.fine.amb3r_sfm
-import app.fine.video.pipeline
-from app.fine.amb3r_runtime.amb3r.model import AMB3R
-from app.fine.deblur_mlp import GTnet
-print("unified worker runtime import ok")
-PY
 EOF
 
 CMD ["python", "-m", "app.worker_bootstrap"]

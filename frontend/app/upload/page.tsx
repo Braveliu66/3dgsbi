@@ -34,7 +34,10 @@ export default function UploadPage() {
   const totalBytes = useMemo(() => media.reduce((sum, item) => sum + item.file_size, 0), [media]);
   const imageCount = media.filter((item) => item.kind === "image").length;
   const videoCount = media.filter((item) => item.kind === "video").length;
-  const canStartPreview = Boolean(project && project.input_type === "images" && imageCount >= MIN_INPUT_FRAMES && !isActiveTask(task));
+  const canStartPreview = Boolean(project && !isActiveTask(task) && (
+    (project.input_type === "images" && imageCount >= MIN_INPUT_FRAMES) ||
+    (project.input_type === "video" && videoCount === 1 && media.length === 1)
+  ));
   const canStartFine = Boolean(project && !isActiveTask(task) && (
     (project.input_type === "images" && imageCount >= MIN_FINE_INPUT_FRAMES) ||
     (project.input_type === "video" && videoCount === 1 && media.length === 1)
@@ -129,7 +132,9 @@ export default function UploadPage() {
     setBusy(true);
     setError(null);
     try {
-      const options: Record<string, unknown> = { preview_pipeline: "litevggt_spz" };
+      const options: Record<string, unknown> = {
+        preview_pipeline: project.input_type === "video" ? "lingbot_map_spz" : "litevggt_spz"
+      };
       const next = await api.startPreview(project.id, options);
       rememberTaskId(next.id);
       setTask(next);
@@ -224,7 +229,7 @@ export default function UploadPage() {
               {inputType === "images" ? (
                 <input className="input" value="LiteVGGT 直接出 Spark-SPZ" disabled />
               ) : (
-                <input className="input" value="视频预览管线未启用" disabled />
+                <input className="input" value="LingBot-Map 视频极速预览" disabled />
               )}
             </div>
 
