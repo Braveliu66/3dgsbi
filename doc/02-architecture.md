@@ -99,10 +99,10 @@ flowchart LR
 
 | 场景 | 管线 |
 | --- | --- |
-| 图片极速预览 | 默认 LiteVGGT → EDGS → Spark-SPZ；可选 LiteVGGT → Spark-SPZ 粗预览 |
+| 图片极速预览 | LiteVGGT → Spark-SPZ |
 | 视频极速预览 | 待重写 |
 | 实时摄像头 | 待重写 |
-| 精细重建 | 默认 `mobilegs_lmrs`：AMB3R-SfM 生成无 EXIF 依赖的 COLMAP 兼容 SfM + DeblurMLP-MobileGS + FastGS-style VCD/VCP + patched LM-RS Compact Box rasterizer + 可选 LM-RS matrix-free Phase 2 + Spark-SPZ；pycolmap 仅显式诊断，fine 不依赖 EDGS/RoMA/romatch；预览仍使用 LiteVGGT |
+| 精细重建 | 默认 `mobilegs_lmrs`：AMB3R-SfM 生成无 EXIF 依赖的 COLMAP 兼容 SfM + DeblurMLP-MobileGS + FastGS-style VCD/VCP + patched LM-RS Compact Box rasterizer + 可选 LM-RS matrix-free Phase 2 + Spark-SPZ；pycolmap 仅显式诊断；预览仍使用 LiteVGGT |
 | 稀疏视角 | FreeSplatter 初始化 → 精细合成引擎 |
 | 长视频精细重建 | 待重写 |
 | Mesh 导出 | MeshSplatting → `.ply` / `.obj` / `.glb` |
@@ -150,3 +150,12 @@ viewer          Spark 2.0
 - Preview LiteVGGT remains isolated under the preview vendor path. Fine AMB3R metrics include `sfm_backend=amb3r_sfm_colmap_no_exif`, registered/unmapped image count, resolution, and sparse point count.
 - DeblurMLP uses the Deblurring-3DGS GTnet method at commit `e63366b8581c0fde2fda0ab1aea99518da2e2f10`. It models blurred observations during training and still exports a standard sharp Gaussian PLY.
 - The worker image keeps one CUDA/PyTorch baseline, one patched LM-RS rasterizer, one `simple_knn`, and one `fused_ssim`.
+
+## 2026-05-10 Video Fine Pipeline Update
+
+- Image fine reconstruction remains `mobilegs_lmrs`: AMB3R-SfM, DeblurMLP-MobileGS, optional LM-RS, final PLY validation, and Spark SPZ conversion.
+- Video fine reconstruction uses canonical pipeline `video_artdeco_speed3r`. Legacy names `video_artdeco_litevggt`, `video_litevggt`, and `artdeco_litevggt` are aliases only.
+- Video fine accepts exactly one uploaded video. The worker extracts frames, writes ARTDECO `selfCaptured` calibration, runs ARTDECO VSLAM plus Reconstruct h3dgsv3 mapper/training, validates `point_clouds/gs.ply`, copies it to `final.ply`, and converts `final_web.spz`.
+- Speed3R-Pi3 is only the replacement for ARTDECO Pi3 inference in loop-closure matching. The video path does not call AMB3R, MobileGS, LM-RS, DeblurMLP, or LiteVGGT image preview.
+- Missing video intrinsics use a pinhole default: centered principal point, focal `0.9 * max(width,height)`, and ARTDECO focal optimization enabled. Explicit user intrinsics override this.
+- ARTDECO `bb654395826e50ac9e4671682d901377115a24ce` and Speed3R `5460f7309c87e5daac36385ff6611627de7d7267` are integrated as runtime source boundaries, not copied wholesale into backend app code.

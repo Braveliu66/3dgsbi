@@ -10,7 +10,7 @@ from unittest.mock import patch
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.fine.types import FineFailure  # noqa: E402
+from app.fine.types import FineContext, FineFailure  # noqa: E402
 
 
 def import_fine_runtime():
@@ -119,6 +119,89 @@ class FineRuntimeTests(unittest.TestCase):
 
         self.assertEqual(normalize_fine_pipeline("fused_quality_3dgs"), "mobilegs_lmrs")
         self.assertEqual(normalize_fine_pipeline(None), "mobilegs_lmrs")
+
+    def test_video_fine_pipeline_aliases_to_artdeco_speed3r(self) -> None:
+        *_, normalize_fine_pipeline = import_fine_runtime()
+
+        self.assertEqual(normalize_fine_pipeline("video_artdeco_speed3r"), "video_artdeco_speed3r")
+        self.assertEqual(normalize_fine_pipeline("video_artdeco_litevggt"), "video_artdeco_speed3r")
+        self.assertEqual(normalize_fine_pipeline("video_litevggt"), "video_artdeco_speed3r")
+        self.assertEqual(normalize_fine_pipeline("artdeco_litevggt"), "video_artdeco_speed3r")
+
+    def test_video_fine_does_not_route_through_image_training(self) -> None:
+        runner_source = (BACKEND_ROOT / "app" / "fine" / "runner.py").read_text(encoding="utf-8")
+        video_block = runner_source.split("if pipeline == VIDEO_PIPELINE_NAME:", 1)[1].split("if pipeline != PIPELINE_NAME:", 1)[0]
+
+        self.assertIn("run_video_artdeco_speed3r_pipeline", video_block)
+        self.assertNotIn("train_mobile_3dgs", video_block)
+        self.assertNotIn("build_scene", video_block)
+
+        video_source = "\n".join(path.read_text(encoding="utf-8") for path in (BACKEND_ROOT / "app" / "fine" / "video").glob("*.py"))
+        for forbidden in ("train_mobile_3dgs", "build_scene(", "AMB3R", "MobileGS", "LM-RS", "DeblurMLP"):
+            self.assertNotIn(forbidden, video_source)
+
+    def test_fine_worker_splits_image_and_video_inputs(self) -> None:
+        source = (BACKEND_ROOT / "app" / "fine_worker.py").read_text(encoding="utf-8")
+
+        self.assertIn('project.input_type == "images"', source)
+        self.assertIn('project.input_type == "video"', source)
+        self.assertIn("download_single_video", source)
+        self.assertIn("len(video_items) != 1 or len(project.media) != 1", source)
+        self.assertIn("ensure_video_artdeco_weights", source)
+
+    def test_video_artdeco_mock_output_becomes_final_artifacts(self) -> None:
+        from app.fine.video.types import ArtdecoTrainingResult, ExtractedVideoFrames
+        import app.fine.video.pipeline as video_pipeline
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_video = root / "clip.mp4"
+            input_video.write_bytes(b"video")
+            dataset_root = root / "dataset"
+            (dataset_root / "images").mkdir(parents=True)
+            gs_ply = root / "artdeco_output" / "point_clouds" / "gs.ply"
+            gs_ply.parent.mkdir(parents=True)
+            gs_ply.write_bytes(b"ply\nformat ascii 1.0\nend_header\n")
+            frames = ExtractedVideoFrames(
+                frames_dir=dataset_root / "images",
+                dataset_root=dataset_root,
+                count=3,
+                width=640,
+                height=480,
+                fps=30.0,
+                source_video=input_video,
+            )
+            training = ArtdecoTrainingResult(output_dir=root / "artdeco_output", gs_ply=gs_ply, metrics={"artdeco_metric": 1})
+            ctx = FineContext(
+                task_id="task",
+                project_id="project",
+                pipeline="video_artdeco_speed3r",
+                input_dir=input_video.parent,
+                input_video=input_video,
+                work_dir=root / "work",
+                model_cache_dir=root / "model-cache",
+                final_ply=root / "work" / "final.ply",
+                final_spz=root / "work" / "final_web.spz",
+                metrics_json=root / "work" / "metrics.json",
+                lod_rad=None,
+                source_version=7,
+                options={},
+            )
+
+            with patch.object(video_pipeline, "extract_video_frames", return_value=frames), patch.object(
+                video_pipeline, "run_artdeco_speed3r_training", return_value=training
+            ), patch.object(video_pipeline, "convert_ply_to_spz", side_effect=lambda _ply, spz: (spz.write_bytes(b"spz"), 11)[1]):
+                result = video_pipeline.run_video_artdeco_speed3r_pipeline(
+                    ctx,
+                    settings=SimpleNamespace(),
+                    lod_builder=lambda _ctx: None,
+                )
+
+            self.assertEqual(ctx.final_ply.read_bytes(), gs_ply.read_bytes())
+            self.assertEqual(ctx.final_spz.read_bytes(), b"spz")
+            self.assertEqual(result.metrics["pipeline"], "video_artdeco_speed3r")
+            self.assertEqual(result.metrics["splat_count"], 11)
+            self.assertEqual(result.metrics["artdeco_metric"], 1)
 
     def test_blur_summary_reports_kept_images(self) -> None:
         _, BlurScore, _, summarize_blur_scores, *_ = import_fine_runtime()
@@ -442,8 +525,21 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertNotIn('version("flashinfer-python") ==', dockerfile)
         self.assertIn("timm==0.6.7", requirements)
         self.assertIn("addict==2.4.0", requirements)
+        self.assertIn("gsplat==1.5.3", requirements)
+        self.assertIn("safetensors==0.7.0", requirements)
+        self.assertIn("pypose==0.7.3", requirements)
+        self.assertIn("natsort==8.4.0", requirements)
         self.assertIn("import app.fine.amb3r_sfm", dockerfile)
         self.assertIn("mkdir -p /model-cache/amb3r", dockerfile)
+        self.assertIn("/model-cache/speed3r_pi3", dockerfile)
+        self.assertIn("/model-cache/mast3r", dockerfile)
+        self.assertIn("artdeco_repo_commit", dockerfile)
+        self.assertIn("speed3r_repo_commit", dockerfile)
+        self.assertIn("mast3r_slam_backends", dockerfile)
+        self.assertIn("adamupdate", dockerfile)
+        self.assertIn("adamupdatebasic", dockerfile)
+        self.assertIn("pi3_sparse", dockerfile)
+        self.assertIn("retry_pip --no-deps --no-build-isolation \"$artdeco_root/vslam\"", dockerfile)
         self.assertIn("import pycolmap", dockerfile)
         self.assertIn("'einops==0.8.0' 'transformer-engine[pytorch]==2.4.0'", dockerfile)
         self.assertLess(
@@ -460,6 +556,9 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertNotIn("kaolin", combined)
         self.assertNotIn("open3d", combined)
         self.assertNotIn("xformers", combined)
+        self.assertNotIn("gradio", combined)
+        self.assertNotIn("pyrealsense2", combined)
+        self.assertNotIn("geocalib", combined)
         self.assertNotIn("pytorch3d", combined)
         self.assertNotIn("gdown", combined)
         self.assertNotIn("pip install torch", dockerfile)

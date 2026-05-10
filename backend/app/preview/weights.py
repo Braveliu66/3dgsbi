@@ -29,31 +29,52 @@ LITEVGGT_WEIGHT = ModelWeight(
     "litevggt/te_dict.pt",
     "https://huggingface.co/ZhijianShu/LiteVGGT/resolve/main/te_dict.pt",
 )
-ROMA_WEIGHT = ModelWeight(
-    "roma/roma_indoor.pth",
-    "https://github.com/Parskatt/storage/releases/download/roma/roma_indoor.pth",
-)
-DINOV2_WEIGHT = ModelWeight(
-    "roma/dinov2_vitl14_pretrain.pth",
-    "https://dl.fbaipublicfiles.com/dinov2/dinov2_vitl14/dinov2_vitl14_pretrain.pth",
-)
 AMB3R_WEIGHT = ModelWeight(
     "amb3r/amb3r.pt",
     "https://drive.google.com/file/d/14x0WW2rUE_he2hUEouP6ywSRnlJDeLel/view?usp=sharing",
 )
+SPEED3R_PI3_CONFIG = ModelWeight(
+    "speed3r_pi3/config.json",
+    "https://huggingface.co/weining17/Speed3R_Pi3/resolve/main/config.json",
+)
+SPEED3R_PI3_WEIGHT = ModelWeight(
+    "speed3r_pi3/model.safetensors",
+    "https://huggingface.co/weining17/Speed3R_Pi3/resolve/main/model.safetensors",
+)
+MAST3R_WEIGHT = ModelWeight(
+    "mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth",
+    "https://download.europe.naverlabs.com/ComputerVision/MASt3R/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth",
+)
+MAST3R_RETRIEVAL_WEIGHT = ModelWeight(
+    "mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth",
+    "https://download.europe.naverlabs.com/ComputerVision/MASt3R/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth",
+)
+MAST3R_RETRIEVAL_CODEBOOK = ModelWeight(
+    "mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl",
+    "https://download.europe.naverlabs.com/ComputerVision/MASt3R/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl",
+)
 
 MODEL_WEIGHTS: tuple[ModelWeight, ...] = (
     LITEVGGT_WEIGHT,
-    ROMA_WEIGHT,
-    DINOV2_WEIGHT,
     AMB3R_WEIGHT,
+    SPEED3R_PI3_CONFIG,
+    SPEED3R_PI3_WEIGHT,
+    MAST3R_WEIGHT,
+    MAST3R_RETRIEVAL_WEIGHT,
+    MAST3R_RETRIEVAL_CODEBOOK,
 )
 WEIGHT_BY_RELATIVE_PATH = {item.relative_path: item for item in MODEL_WEIGHTS}
 
 PIPELINE_WEIGHT_PATHS: dict[str, tuple[str, ...]] = {
     "litevggt_spz": ("litevggt/te_dict.pt",),
-    "litevggt_edgs": ("litevggt/te_dict.pt", "roma/roma_indoor.pth", "roma/dinov2_vitl14_pretrain.pth"),
     "mobilegs_lmrs": ("amb3r/amb3r.pt",),
+    "video_artdeco_speed3r": (
+        "speed3r_pi3/config.json",
+        "speed3r_pi3/model.safetensors",
+        "mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth",
+        "mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth",
+        "mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl",
+    ),
 }
 
 

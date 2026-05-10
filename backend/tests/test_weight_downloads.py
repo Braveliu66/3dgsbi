@@ -138,11 +138,18 @@ class WeightDownloadTests(unittest.TestCase):
 
     def test_pipeline_weights_are_task_specific(self) -> None:
         self.assertEqual([item.relative_path for item in weights_for_pipeline("litevggt_spz")], ["litevggt/te_dict.pt"])
-        self.assertEqual(
-            [item.relative_path for item in weights_for_pipeline("litevggt_edgs")],
-            ["litevggt/te_dict.pt", "roma/roma_indoor.pth", "roma/dinov2_vitl14_pretrain.pth"],
-        )
+        self.assertEqual([item.relative_path for item in weights_for_pipeline("litevggt_edgs")], [])
         self.assertEqual([item.relative_path for item in weights_for_pipeline("mobilegs_lmrs")], ["amb3r/amb3r.pt"])
+        self.assertEqual(
+            [item.relative_path for item in weights_for_pipeline("video_artdeco_speed3r")],
+            [
+                "speed3r_pi3/config.json",
+                "speed3r_pi3/model.safetensors",
+                "mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth",
+                "mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth",
+                "mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl",
+            ],
+        )
 
 
 @contextlib.contextmanager

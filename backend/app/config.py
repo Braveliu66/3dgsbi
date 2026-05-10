@@ -40,18 +40,17 @@ class Settings(BaseSettings):
 
     preview_queue_name: str = "preview_tasks"
     preview_expected_seconds_litevggt_spz: int = 180
-    preview_expected_seconds_litevggt_edgs: int = 60
     preview_image_max_side: int = 1600
     preview_image_jpeg_quality: int = 90
 
     fine_queue_name: str = "fine_tasks"
     fine_expected_seconds_images: int = 7200
+    fine_expected_seconds_video: int = 14_400
     fine_image_max_side: int = 2400
     fine_iterations: int = 1000
 
     litevggt_repo_commit: str = "4767c17f8b6f176bb751566e92f60eb885040033"
     amb3r_repo_commit: str = "7aae7fbb77a750651ffa236bb9c3212290c6fc78"
-    edgs_repo_commit: str = "9a897645eb47c1b24d4f9e4428cd745927bf1ee1"
     spark_repo_commit: str = "3cf9fa15adb7ac7c47a1e962740db97b9e8a9fdf"
     fastgs_repo_commit: str = "44e02a5c1d5e9ed64d2ecd4af1cbba14ac92150f"
     fast_dropgaussian_repo_commit: str = "aba6c08e567bc0b99dfe63f159df3a241562efc4"
@@ -61,6 +60,8 @@ class Settings(BaseSettings):
     three_dgs_lm_repo_commit: str = "d6db64b1844b4303caa2f6e9a0a1ba107b96d6c9"
     lmrs_repo_commit: str = "cb40c7c06c2a60f8314ce095ad7b4513fbb33319"
     lmrs_rasterizer_repo_commit: str = "c2529d3bb13bc38271710785c015a89d9d623237"
+    artdeco_repo_commit: str = "bb654395826e50ac9e4671682d901377115a24ce"
+    speed3r_repo_commit: str = "5460f7309c87e5daac36385ff6611627de7d7267"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

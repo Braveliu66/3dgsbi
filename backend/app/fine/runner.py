@@ -14,6 +14,7 @@ from app.fine.local_3dgs.sparse_compensation import compensate_sparse_point_clou
 from app.fine.option_utils import read_float, read_int
 from app.fine.preprocess import build_pycolmap_scene, prepare_mobile_images
 from app.fine.types import FineContext, FineFailure, FineResult
+from app.fine.video.pipeline import VIDEO_PIPELINE_NAME, run_video_artdeco_speed3r_pipeline
 from app.preview.io.spz import convert_ply_to_spz
 from app.preview.types import SOURCE_COMMITS
 from app.preview.types import PreviewFailure
@@ -34,6 +35,8 @@ SOURCE_COMMITS_FINE = {
 def run_fine_pipeline(ctx: FineContext) -> FineResult:
     settings = get_settings()
     pipeline = normalize_fine_pipeline(ctx.pipeline)
+    if pipeline == VIDEO_PIPELINE_NAME:
+        return run_video_artdeco_speed3r_pipeline(ctx, settings=settings, lod_builder=build_lod_rad_if_available)
     if pipeline != PIPELINE_NAME:
         raise FineFailure("UNSUPPORTED_FINE_PIPELINE", f"Unsupported fine pipeline: {ctx.pipeline}")
     assert_runtime_ready()
@@ -176,7 +179,12 @@ def normalize_fine_pipeline(value: str | None) -> str:
         "fused_quality_3dgs": PIPELINE_NAME,
         "mobilegs": PIPELINE_NAME,
         "mobilegs_lmrs": PIPELINE_NAME,
+        "video_artdeco_litevggt": VIDEO_PIPELINE_NAME,
+        "video_litevggt": VIDEO_PIPELINE_NAME,
+        "artdeco_litevggt": VIDEO_PIPELINE_NAME,
+        "video_artdeco_speed3r": VIDEO_PIPELINE_NAME,
         PIPELINE_NAME: PIPELINE_NAME,
+        VIDEO_PIPELINE_NAME: VIDEO_PIPELINE_NAME,
     }
     return aliases.get(normalized, PIPELINE_NAME)
 

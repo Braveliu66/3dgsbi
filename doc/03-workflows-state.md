@@ -46,7 +46,7 @@ sequenceDiagram
     W->>Q: 拉取 preview 任务
     W->>W: 分析图片数量和质量
     W->>W: LiteVGGT 获取位姿和点云
-    W->>W: EDGS 生成预览模型
+    W->>W: Spark 转码生成 preview.spz
     W->>S3: 上传 preview.spz 和 preview_lod1.rad
     W->>API: 回写任务完成
     API-->>FE: 推送 PREVIEW_READY
@@ -138,7 +138,7 @@ sequenceDiagram
     W->>Q: blpop preview task id
     W->>DB: tasks.status = running
     W->>S: 下载真实上传文件到 work_dir
-    W->>A: LiteVGGT -> EDGS -> Spark-SPZ
+    W->>A: LiteVGGT -> Spark-SPZ
     alt 成功且 preview.spz 非空
         W->>S: 上传 preview/preview.spz
         W->>DB: 创建 preview_spz artifact

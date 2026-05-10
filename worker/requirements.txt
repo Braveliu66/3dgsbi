@@ -20,3 +20,7 @@ plyfile==1.1
 rich==13.9.4
 kornia==0.8.0
 loguru==0.7.3
+gsplat==1.5.3
+safetensors==0.7.0
+pypose==0.7.3
+natsort==8.4.0

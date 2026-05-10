@@ -158,7 +158,6 @@ export interface RuntimePreflight {
   gpu: Record<string, unknown>;
   torch: Record<string, unknown>;
   transformer_engine: Record<string, unknown>;
-  edgs_cuda_extensions?: Record<string, unknown>;
   fine_runtime?: Record<string, unknown>;
   spz_converter?: Record<string, unknown>;
   algorithms: RuntimePreflightAlgorithm[];

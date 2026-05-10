@@ -6,7 +6,6 @@ $ErrorActionPreference = "Stop"
 
 $repos = @(
   @{ Name = "LiteVGGT-repo"; Url = "https://github.com/GarlicBa/LiteVGGT-repo.git"; Commit = "4767c17f8b6f176bb751566e92f60eb885040033" },
-  @{ Name = "EDGS"; Url = "https://github.com/CompVis/EDGS.git"; Commit = "9a897645eb47c1b24d4f9e4428cd745927bf1ee1" },
   @{ Name = "spark"; Url = "https://github.com/sparkjsdev/spark.git"; Commit = "3cf9fa15adb7ac7c47a1e962740db97b9e8a9fdf" },
   @{ Name = "lm-rs"; Url = "https://github.com/hamzapehlivan/lm-rs.git"; Commit = "cb40c7c06c2a60f8314ce095ad7b4513fbb33319" }
 )
@@ -24,9 +23,7 @@ foreach ($repo in $repos) {
   }
   git -C $path fetch --all --tags
   git -C $path checkout $repo.Commit
-  if ($repo.Name -eq "EDGS") {
-    git -C $path submodule update --init --recursive submodules/gaussian-splatting
-  } elseif ($repo.Name -eq "lm-rs") {
+  if ($repo.Name -eq "lm-rs") {
     git -C $path submodule update --init --recursive submodules/simple-knn submodules/diff-gaussian-rasterization
     $rasterizer = Join-Path $path "submodules/diff-gaussian-rasterization"
     git -C $rasterizer checkout c2529d3bb13bc38271710785c015a89d9d623237

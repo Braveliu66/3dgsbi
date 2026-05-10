@@ -15,8 +15,9 @@ from sqlalchemy.orm import selectinload
 from app.config import get_settings
 from app.database import SessionLocal, initialize_database_schema
 from app.fine.amb3r_sfm import ensure_amb3r_weight
-from app.fine.runner import run_fine_pipeline
+from app.fine.runner import PIPELINE_NAME, VIDEO_PIPELINE_NAME, normalize_fine_pipeline, run_fine_pipeline
 from app.fine.types import FineContext, FineFailure
+from app.fine.video.speed3r_pi3 import ensure_video_artdeco_weights
 from app.models import Artifact, Project, Task, utc_now
 from app.preview.image_preprocess import normalize_image_directory
 from app.preview.weights import ModelDownloadError, download_model_weights, weights_for_pipeline
@@ -135,32 +136,16 @@ def run_fine_task(task_id: str, worker_id: str) -> None:
             )
             if not task or not project:
                 return
-            image_count = sum(1 for media in project.media if media.kind == "image")
-            if project.input_type != "images" or image_count < 3:
-                raise FineFailure("INSUFFICIENT_IMAGES", "Fine reconstruction requires an image project with at least 3 images")
-
-            input_dir, _ = download_media(project, work_dir)
-            update_task(db, task, project, "input_downloaded", 12, started, f"downloaded {len(project.media)} media files")
-            max_side = read_positive_int((task.options or {}).get("fine_image_max_side"), settings.fine_image_max_side)
-            normalized = normalize_image_directory(input_dir, work_dir / "input_normalized", max_side=max_side, jpeg_quality=92)
-            input_dir = normalized.output_dir
-            update_task(
-                db,
-                task,
-                project,
-                "input_ready",
-                16,
-                started,
-                f"normalized {normalized.output_count} images to RGB JPEG, max side {normalized.max_side}px",
-            )
-            ensure_fine_weights(db, task, project, started)
+            pipeline, input_dir, input_video, input_metrics, preflight_message = prepare_fine_inputs(db, task, project, work_dir, started)
+            ensure_fine_weights(db, task, project, started, pipeline)
 
             source_version = task_source_version(task, project)
             ctx = FineContext(
                 task_id=task.id,
                 project_id=project.id,
-                pipeline=str((task.options or {}).get("fine_pipeline") or "mobilegs_lmrs"),
+                pipeline=pipeline,
                 input_dir=input_dir,
+                input_video=input_video,
                 work_dir=work_dir,
                 model_cache_dir=Path(settings.model_cache_dir).resolve(),
                 final_ply=work_dir / "final.ply",
@@ -173,7 +158,7 @@ def run_fine_task(task_id: str, worker_id: str) -> None:
                     task.id, project.id, stage, progress, started, message, metrics
                 ),
             )
-            update_task(db, task, project, "fine_preflight", 18, started, "checking MobileGS AMB3R-SfM + LM-RS runtime")
+            update_task(db, task, project, "fine_preflight", 18, started, preflight_message)
             result = run_fine_pipeline(ctx)
 
             if not result.final_ply.exists() or result.final_ply.stat().st_size <= 0:
@@ -203,7 +188,7 @@ def run_fine_task(task_id: str, worker_id: str) -> None:
                     "pipeline": ctx.pipeline,
                     "splat_count": result.splat_count,
                     "source_commits": result.source_commits,
-                    **normalized.metrics(),
+                    **input_metrics,
                     **result.metrics,
                 }
                 task.logs = append_log(task.logs, "uploaded final.ply", "uploaded final_web.spz", "uploaded metrics.json")
@@ -259,7 +244,7 @@ def upload_fine_artifacts(
     result,
 ) -> list[Artifact]:
     common_metadata = {
-        "pipeline": "mobilegs_lmrs",
+        "pipeline": result.metrics.get("pipeline", PIPELINE_NAME) if getattr(result, "metrics", None) else PIPELINE_NAME,
         "source_version": source_version,
         "generated_by": worker_id,
         "source_commits": result.source_commits,
@@ -293,21 +278,72 @@ def upload_fine_artifacts(
     return artifacts
 
 
-def ensure_fine_weights(db, task: Task, project: Project, started: float) -> None:
-    update_task(db, task, project, "weights_checking", 8, started, "checking AMB3R weight for fine reconstruction")
+def prepare_fine_inputs(db, task: Task, project: Project, work_dir: Path, started: float) -> tuple[str, Path, Path | None, dict[str, Any], str]:
+    options = task.options or {}
+    if project.input_type == "images":
+        image_count = sum(1 for media in project.media if media.kind == "image")
+        if image_count < 3:
+            raise FineFailure("INSUFFICIENT_IMAGES", "Fine reconstruction requires an image project with at least 3 images")
+        pipeline = normalize_fine_pipeline(str(options.get("fine_pipeline") or PIPELINE_NAME))
+        if pipeline != PIPELINE_NAME:
+            raise FineFailure("UNSUPPORTED_FINE_PIPELINE", f"Image fine reconstruction only supports {PIPELINE_NAME}")
+        input_dir = download_media(project, work_dir)
+        update_task(db, task, project, "input_downloaded", 12, started, f"downloaded {len(project.media)} media files")
+        max_side = read_positive_int(options.get("fine_image_max_side"), settings.fine_image_max_side)
+        normalized = normalize_image_directory(input_dir, work_dir / "input_normalized", max_side=max_side, jpeg_quality=92)
+        update_task(
+            db,
+            task,
+            project,
+            "input_ready",
+            16,
+            started,
+            f"normalized {normalized.output_count} images to RGB JPEG, max side {normalized.max_side}px",
+        )
+        return pipeline, normalized.output_dir, None, normalized.metrics(), "checking MobileGS AMB3R-SfM + LM-RS runtime"
+
+    if project.input_type == "video":
+        video_items = [media for media in project.media if media.kind == "video"]
+        if len(video_items) != 1 or len(project.media) != 1:
+            raise FineFailure("INVALID_VIDEO_INPUT", "Video fine reconstruction requires exactly one uploaded video file")
+        pipeline = normalize_fine_pipeline(str(options.get("fine_pipeline") or VIDEO_PIPELINE_NAME))
+        if pipeline != VIDEO_PIPELINE_NAME:
+            raise FineFailure("UNSUPPORTED_FINE_PIPELINE", f"Video fine reconstruction only supports {VIDEO_PIPELINE_NAME}")
+        input_video = download_single_video(video_items[0], work_dir)
+        input_dir = input_video.parent
+        update_task(db, task, project, "input_ready", 16, started, f"downloaded video file {video_items[0].file_name}")
+        return pipeline, input_dir, input_video, {"input_videos": 1}, "checking ARTDECO VSLAM + Speed3R-Pi3 runtime"
+
+    raise FineFailure("UNSUPPORTED_FINE_INPUT", f"Unsupported fine reconstruction input type: {project.input_type}")
+
+
+def download_single_video(media, work_dir: Path) -> Path:
+    input_dir = work_dir / "input_video"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    suffix = Path(media.file_name).suffix or ".mp4"
+    target = input_dir / f"000000-{media.id}{suffix}"
+    return storage.download_to_path(media.object_uri, target)
+
+
+def ensure_fine_weights(db, task: Task, project: Project, started: float, pipeline: str) -> None:
+    specs = weights_for_pipeline(pipeline)
+    update_task(db, task, project, "weights_checking", 8, started, f"checking {len(specs)} model weights for {pipeline}")
     if settings.model_auto_download:
         try:
             download_model_weights(
                 Path(settings.model_cache_dir),
-                weights_for_pipeline("mobilegs_lmrs"),
+                specs,
                 prefer_hf_mirror=settings.model_download_prefer_hf_mirror,
                 lock_timeout_seconds=settings.model_download_lock_timeout_seconds,
                 log=lambda line: progress_fine_task(task.id, project.id, "weights_downloading", 10, started, line),
             )
         except ModelDownloadError as exc:
             raise FineFailure("MODEL_WEIGHT_DOWNLOAD_FAILED", str(exc)) from exc
-    ensure_amb3r_weight(Path(settings.model_cache_dir))
-    update_task(db, task, project, "weights_ready", 12, started, "AMB3R fine reconstruction weight is ready")
+    if pipeline == PIPELINE_NAME:
+        ensure_amb3r_weight(Path(settings.model_cache_dir))
+    elif pipeline == VIDEO_PIPELINE_NAME:
+        ensure_video_artdeco_weights(Path(settings.model_cache_dir))
+    update_task(db, task, project, "weights_ready", 12, started, f"model weights ready for {pipeline}")
 
 
 def update_task(db, task: Task, project: Project, stage: str, progress: int, started: float, *logs: str) -> None:
@@ -344,7 +380,9 @@ def estimate_fine_eta(task: Task, started: float) -> int | None:
     if progress >= 100:
         return 0
     elapsed = max(1.0, time.monotonic() - started)
-    expected = int((task.options or {}).get("fine_expected_seconds") or settings.fine_expected_seconds_images)
+    pipeline = normalize_fine_pipeline(str((task.options or {}).get("fine_pipeline") or PIPELINE_NAME))
+    fallback_expected = settings.fine_expected_seconds_video if pipeline == VIDEO_PIPELINE_NAME else settings.fine_expected_seconds_images
+    expected = int((task.options or {}).get("fine_expected_seconds") or fallback_expected)
     by_progress = elapsed * (100 - progress) / progress
     by_expected = max(0, expected - elapsed)
     if progress < 20:

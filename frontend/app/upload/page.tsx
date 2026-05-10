@@ -19,7 +19,6 @@ export default function UploadPage() {
   const thumbsRef = useRef<Record<string, string>>({});
   const [name, setName] = useState("新建重建项目");
   const [inputType, setInputType] = useState<Project["input_type"]>("images");
-  const [previewPipeline, setPreviewPipeline] = useState<"litevggt_edgs" | "litevggt_spz">("litevggt_edgs");
   const [tags, setTags] = useState("preview, research");
   const [project, setProject] = useState<Project | null>(null);
   const [media, setMedia] = useState<MediaAsset[]>([]);
@@ -34,8 +33,12 @@ export default function UploadPage() {
 
   const totalBytes = useMemo(() => media.reduce((sum, item) => sum + item.file_size, 0), [media]);
   const imageCount = media.filter((item) => item.kind === "image").length;
-  const canStartPreview = Boolean(project && imageCount >= MIN_INPUT_FRAMES && !isActiveTask(task));
-  const canStartFine = Boolean(project && project.input_type === "images" && imageCount >= MIN_FINE_INPUT_FRAMES && !isActiveTask(task));
+  const videoCount = media.filter((item) => item.kind === "video").length;
+  const canStartPreview = Boolean(project && project.input_type === "images" && imageCount >= MIN_INPUT_FRAMES && !isActiveTask(task));
+  const canStartFine = Boolean(project && !isActiveTask(task) && (
+    (project.input_type === "images" && imageCount >= MIN_FINE_INPUT_FRAMES) ||
+    (project.input_type === "video" && videoCount === 1 && media.length === 1)
+  ));
 
   useEffect(() => {
     return () => {
@@ -126,7 +129,7 @@ export default function UploadPage() {
     setBusy(true);
     setError(null);
     try {
-      const options = { preview_pipeline: previewPipeline };
+      const options: Record<string, unknown> = { preview_pipeline: "litevggt_spz" };
       const next = await api.startPreview(project.id, options);
       rememberTaskId(next.id);
       setTask(next);
@@ -208,6 +211,7 @@ export default function UploadPage() {
                 <label>输入类型</label>
                 <select className="select" value={inputType} onChange={(event) => setInputType(event.target.value as Project["input_type"])} disabled={Boolean(project)}>
                   <option value="images">图片序列</option>
+                  <option value="video">视频</option>
                 </select>
               </div>
             </div>
@@ -218,15 +222,7 @@ export default function UploadPage() {
             <div className="field">
               <label>预览管线</label>
               {inputType === "images" ? (
-                <select
-                  className="select"
-                  value={previewPipeline}
-                  onChange={(event) => setPreviewPipeline(event.target.value as "litevggt_edgs" | "litevggt_spz")}
-                  disabled={Boolean(task && isActiveTask(task))}
-                >
-                  <option value="litevggt_edgs">LiteVGGT + EDGS + Spark-SPZ</option>
-                  <option value="litevggt_spz">LiteVGGT 直接出 Spark-SPZ</option>
-                </select>
+                <input className="input" value="LiteVGGT 直接出 Spark-SPZ" disabled />
               ) : (
                 <input className="input" value="视频预览管线未启用" disabled />
               )}
@@ -261,7 +257,7 @@ export default function UploadPage() {
             <div className="grid three">
               <div className="panel stat flat"><span className="muted small">文件</span><strong>{media.length}</strong></div>
               <div className="panel stat flat"><span className="muted small">图片</span><strong>{imageCount}</strong></div>
-              <div className="panel stat flat"><span className="muted small">大小</span><strong>{formatBytes(totalBytes)}</strong></div>
+              <div className="panel stat flat"><span className="muted small">视频</span><strong>{videoCount}</strong></div>
             </div>
 
             <div className="media-grid dense">
@@ -302,6 +298,9 @@ export default function UploadPage() {
 
             {inputType === "images" && imageCount > 0 && imageCount < MIN_INPUT_FRAMES ? (
               <div className="error-box"><AlertTriangle size={16} /> 启动预览前至少上传 {MIN_INPUT_FRAMES} 张图片。</div>
+            ) : null}
+            {inputType === "video" && videoCount > 1 ? (
+              <div className="error-box"><AlertTriangle size={16} /> 视频精细重建 v1 只支持单个视频文件。</div>
             ) : null}
             {error ? <div className="error-box">{error}</div> : null}
           </div>

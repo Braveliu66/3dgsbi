@@ -18,6 +18,7 @@ class FineContext:
     project_id: str
     pipeline: str
     input_dir: Path
+    input_video: Path | None
     work_dir: Path
     model_cache_dir: Path
     final_ply: Path

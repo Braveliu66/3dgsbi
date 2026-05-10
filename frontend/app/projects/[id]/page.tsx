@@ -58,10 +58,14 @@ export default function ProjectDetailPage() {
   const latestTask = project?.tasks?.[0];
   const media = project?.media ?? [];
   const imageCount = media.filter((item) => item.kind === "image").length;
+  const videoCount = media.filter((item) => item.kind === "video").length;
   const tasks = project?.tasks ?? [];
   const logs = latestTask?.logs ?? [];
   const showCompactLogs = logs.length > LOG_LIST_THRESHOLD;
-  const canStartFine = Boolean(project && project.input_type === "images" && imageCount >= 3 && !isActiveTask(latestTask));
+  const canStartFine = Boolean(project && !isActiveTask(latestTask) && (
+    (project.input_type === "images" && imageCount >= 3) ||
+    (project.input_type === "video" && videoCount === 1 && media.length === 1)
+  ));
   const downloadableArtifacts = useMemo(() => artifacts.filter((artifact) => !isPlyArtifact(artifact)), [artifacts]);
   const originalPlyArtifact = useMemo(() => {
     const plyArtifacts = artifacts.filter(isPlyArtifact).sort(compareArtifactCreatedAtDesc);

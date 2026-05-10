@@ -48,6 +48,5 @@ class PreviewResult:
 
 SOURCE_COMMITS: dict[str, str] = {
     "LiteVGGT": "4767c17f8b6f176bb751566e92f60eb885040033",
-    "EDGS": "9a897645eb47c1b24d4f9e4428cd745927bf1ee1",
     "Spark": "3cf9fa15adb7ac7c47a1e962740db97b9e8a9fdf",
 }

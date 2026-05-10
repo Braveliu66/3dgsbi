@@ -238,7 +238,7 @@ GET /api/projects/{project_id}/events
   "task_type": "preview",
   "status": "running",
   "progress": 42,
-  "message": "EDGS training",
+  "message": "LiteVGGT direct SPZ preview",
   "created_at": "2026-04-25T20:00:00+08:00"
 }
 ```
@@ -269,7 +269,7 @@ GET /api/projects/{project_id}/events
   "raw_uri": "s3://bucket/users/user-id/projects/project-id/raw/images/",
   "output_prefix": "s3://bucket/users/user-id/projects/project-id/preview/",
   "options": {
-    "pipeline": "litevggt_edgs",
+    "pipeline": "litevggt_spz",
     "timeout_seconds": 300
   },
   "real_algorithm_required": true

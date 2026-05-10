@@ -83,7 +83,6 @@
 交付内容：
 
 - LiteVGGT 适配器。
-- EDGS 适配器。
 - 视频/摄像头极速预览适配器待重新设计。
 - 真实 `preview.spz` 和 `preview_lod1.rad` 产物上传。
 - 素材质量分析和补拍建议。
@@ -118,7 +117,7 @@
 交付内容：
 
 - 图片项目精细重建任务入口，可直接从上传素材启动，不要求先完成极速预览。
-- 默认精细管线 `mobilegs_lmrs`：使用 AMB3R-SfM 生成无 EXIF 依赖的 COLMAP 兼容 SfM，接入 DeblurMLP-MobileGS，pycolmap 仅显式诊断，fine 不再依赖 EDGS/RoMA/romatch；预览链路仍使用 LiteVGGT。
+- 默认精细管线 `mobilegs_lmrs`：使用 AMB3R-SfM 生成无 EXIF 依赖的 COLMAP 兼容 SfM，接入 DeblurMLP-MobileGS，pycolmap 仅显式诊断；预览链路仍使用 LiteVGGT。
 - `worker-preview` 与 `worker-fine` 复用同一个统一 CUDA worker 镜像和同一个 `model-cache`，不创建第二套 conda/CUDA 11.x 环境。
 - FastGS 官方仓库只登记为后续可选参考；当前不整仓 vendoring，只把关键算法思想转化为本系统参数调度和训练流程。
 - DeblurMLP 已作为训练期模糊观测模型接入；FreeSplatter 仍作为后续条件启用接口。LM-RS Phase 2 已接入 matrix-free wrapper，runtime 会先检测 `get_JTv/get_Diag/get_JTJv` 和 Compact Box patch marker，缺失时失败而不是记录伪成功 fallback。
@@ -169,7 +168,7 @@
 
 | 风险 | 处理方式 |
 | --- | --- |
-| 真实算法仓库集成复杂 | 先实现适配器接口和环境检查，再接入 LiteVGGT、EDGS；视频/实时视频管线另行重写 |
+| 真实算法仓库集成复杂 | 先实现适配器接口和环境检查，再接入 LiteVGGT；视频/实时视频管线另行重写 |
 | GPU 资源不足 | 明确显示资源不可用；算法任务失败返回可解释错误，不伪造结果 |
 | SPZ/RAD 测试资产缺失 | 使用真实算法生成的最小样例资产；没有资产时 Viewer 展示未完成状态 |
 | 许可证限制 | 从第一版就维护 `algorithm_registry` 和关于页面 |
@@ -184,7 +183,7 @@
 - PostgreSQL 目标模型、Alembic、Redis 任务队列、MinIO 对象存储适配、独立 preview worker 已接入。
 - 本机单元测试使用 SQLite 和本地对象存储后端，验证认证、权限隔离、任务入队、worker 失败路径和禁止假 artifact。
 - Docker Compose 已覆盖 backend、worker、postgres、redis、minio、frontend；真实算法 bootstrap 仍独立执行，不在 API 启动时下载仓库或权重。
-- 当前成功产物仍只允许来自真实 LiteVGGT → EDGS → Spark-SPZ 命令输出；未配置算法时任务失败且 artifact 表为空。
+- 当前成功产物仍只允许来自真实 LiteVGGT → Spark-SPZ 命令输出；未配置算法时任务失败且 artifact 表为空。
 - Docker Compose 新增 `worker-fine`，默认精细管线为 `mobilegs_lmrs`，直接消费图片项目并输出 `final.ply`、`final_web.spz`、`metrics.json`。
 - FastGS 登记为 `FastGS Reference` 可选项，不作为默认主干，也不要求独立下载官方仓库或新建 CUDA 11.x/conda 环境。
 
@@ -197,3 +196,13 @@
 - GTnet parameters are added to the same Gaussian optimizer. Topology updates skip the `GTnet` parameter group so LM-RS/MobileGS densify and prune operations keep working.
 - Worker dependency goal: one PyTorch 2.7.1/cu128 baseline, system cuDNN headers, one Transformer Engine build, one patched LM-RS rasterizer, one `simple_knn`, and one `fused_ssim`. Do not add FlashInfer, Kaolin, Open3D, Gradio, duplicate torch/CUDA, or pip cuDNN.
 - Tests now cover LiteVGGT-only routing, no-EXIF image normalization, DeblurMLP branch shapes, optimizer attachment, and static Docker dependency checks.
+
+## 8. 2026-05-10 Video Fine Implementation Update
+
+- M6 now has separate fine routes. Image projects keep `mobilegs_lmrs`; video projects use `video_artdeco_speed3r` and require exactly one uploaded video asset.
+- The video worker reuses system services only: task queue, storage download/upload, model cache downloader, progress updates, final PLY validation, metrics, and Spark SPZ conversion.
+- Video reconstruction does not reuse the image AMB3R/MobileGS/LM-RS/DeblurMLP training path. It runs ARTDECO's native VSLAM state/frontend/backend plus Reconstruct h3dgsv3 SceneModel and optimizer flow.
+- Speed3R-Pi3 is mounted as an ARTDECO Pi3 adapter using `model-cache/speed3r_pi3/config.json` and `model-cache/speed3r_pi3/model.safetensors`.
+- ARTDECO/MASt3R assets are cached under `model-cache/mast3r/`. Downloads are task-specific and retain `.part`, `.lock`, Range resume, and skip-if-existing behavior.
+- The worker image keeps the existing PyTorch/CUDA/cuDNN stack. It adds `gsplat`, `safetensors`, `pypose`, and `natsort`, compiles ARTDECO `mast3r_slam_backends`, and patches Python-visible `adamUpdate/adamUpdateBasic` symbols onto the existing rasterizer instead of installing a second rasterizer.
+- Explicit exclusions remain: no Open3D, xFormers, Gradio, pyrealsense2, GeoCalib, full Depth-Anything environment, second conda, or duplicate torch/CUDA stack.

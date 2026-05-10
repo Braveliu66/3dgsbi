@@ -8,10 +8,10 @@ from typing import Iterator
 import torch
 
 from app.fine.types import FineFailure
-from app.preview.utils import VENDOR_ROOT, prepend_sys_path
+from app.preview.utils import prepend_sys_path
 
 
-GS_ROOT = VENDOR_ROOT / "edgs" / "gaussian_splatting"
+GS_ROOT = Path(__file__).resolve().parent / "vendor" / "gaussian_splatting"
 
 
 @dataclass(slots=True)
@@ -58,4 +58,3 @@ def normalize_visibility_filter(visibility_filter: torch.Tensor, gaussian_count:
 def normalize_render_pkg(render_pkg: dict[str, torch.Tensor], gaussian_count: int) -> dict[str, torch.Tensor]:
     render_pkg["visibility_filter"] = normalize_visibility_filter(render_pkg["visibility_filter"], gaussian_count)
     return render_pkg
-

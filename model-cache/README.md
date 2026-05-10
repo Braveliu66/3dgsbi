@@ -1,20 +1,21 @@
 # Model Cache
 
-Third-party model weights live here. Large weights are intentionally ignored by Git and are not baked into Docker images.
+Third-party model weights live here. Large weights are ignored by Git and are not baked into Docker images.
 
-`worker-preview` checks this mounted directory when a task starts and downloads only the weights required by that task's preview pipeline. Interrupted downloads keep a sibling `.part` file and resume on the next task run or `docker compose up`.
-
-`worker-fine` does not download AMB3R weights. Fine reconstruction requires the file `amb3r/amb3r.pt` to be placed here manually. The code creates/checks the `amb3r/` directory, but if `amb3r.pt` is absent the task fails with `AMB3R_WEIGHT_MISSING`.
+Workers download only the weights required by the selected pipeline. Downloads use the shared model downloader: existing non-empty files are skipped, interrupted downloads keep a sibling `.part`, active downloads hold a `.lock`, and HTTP Range resume is used when the server supports it.
 
 Expected paths:
 
 - `litevggt/te_dict.pt`
-- `amb3r/amb3r.pt` (manual cache only; no automatic download)
-- `roma/roma_indoor.pth`
-- `roma/dinov2_vitl14_pretrain.pth`
-- `torch/hub/checkpoints/vgg16-397923af.pth`
+- `amb3r/amb3r.pt`
+- `speed3r_pi3/config.json`
+- `speed3r_pi3/model.safetensors`
+- `mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth`
+- `mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth`
+- `mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl`
+- `torch/`
 - `huggingface/`
 
-Each completed download writes `<filename>.download.json` with URL, size and completion metadata. If a `.part` file is stuck or corrupted, stop `worker-preview`, delete only that `.part` and matching `.lock`, then start the worker again.
+`mobilegs_lmrs` fine reconstruction uses `amb3r/amb3r.pt`. `video_artdeco_speed3r` fine reconstruction uses the Speed3R-Pi3 files plus the MASt3R checkpoint and retrieval codebook. The video weights carry upstream research/non-commercial restrictions; verify ARTDECO, MASt3R and Speed3R-Pi3 terms before commercial use.
 
-`litevggt/te_dict.pt` is used by LiteVGGT preview. `amb3r/amb3r.pt` is used by the default `mobilegs_lmrs` fine reconstruction SfM stage and must be copied in manually. `roma/*` is only used by the EDGS preview path. `torch/*` and `huggingface/*` keep framework-managed runtime caches such as LPIPS VGG16 and Hugging Face files on the host. Keep these files in the mounted cache so rebuilt images and restarted containers do not download large models again.
+Each completed download writes `<filename>.download.json` with URL, size and completion metadata. If a `.part` file is stuck or corrupted, stop the worker, delete only that `.part` and matching `.lock`, then start the worker again.

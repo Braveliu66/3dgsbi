@@ -208,7 +208,74 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(payload["status"], "queued")
             self.assertEqual(payload["options"]["fine_pipeline"], "mobilegs_lmrs")
             self.assertEqual(payload["options"]["source_version"], 3)
-            self.assertEqual(payload["options"]["fine_iterations"], 2000)
+            self.assertEqual(payload["options"]["fine_iterations"], 1000)
+
+    def test_preview_rejects_legacy_edgs_pipeline(self) -> None:
+        with TestClient(app) as client:
+            headers = auth_headers(client)
+            project_id = create_image_project(client, headers, "legacy edgs preview")
+            upload_response = client.post(
+                f"/api/projects/{project_id}/media",
+                files={"file": ("image.png", PNG_BYTES, "image/png")},
+                headers=headers,
+            )
+            upload_response.raise_for_status()
+
+            response = client.post(
+                f"/api/projects/{project_id}/tasks/preview",
+                json={"options": {"preview_pipeline": "litevggt_edgs"}},
+                headers=headers,
+            )
+
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("Unsupported preview pipeline", response.text)
+
+    def test_preview_defaults_to_litevggt_spz(self) -> None:
+        fake_redis = FakeRedis()
+        with TestClient(app) as client, patch("app.main.get_redis", return_value=fake_redis):
+            headers = auth_headers(client)
+            project_id = create_image_project(client, headers, "default preview")
+            upload_response = client.post(
+                f"/api/projects/{project_id}/media",
+                files={"file": ("image.png", PNG_BYTES, "image/png")},
+                headers=headers,
+            )
+            upload_response.raise_for_status()
+
+            response = client.post(f"/api/projects/{project_id}/tasks/preview", json={"options": {}}, headers=headers)
+
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["options"]["preview_pipeline"], "litevggt_spz")
+
+    def test_video_fine_task_uses_artdeco_speed3r_pipeline(self) -> None:
+        with TestClient(app) as client, patch("app.main.enqueue_fine_task", return_value=None):
+            headers = auth_headers(client)
+            project_id = create_video_project(client, headers, "direct video fine start")
+            upload_video(client, headers, project_id, b"not-a-real-video")
+
+            response = client.post(f"/api/projects/{project_id}/tasks/fine", json={"options": {}}, headers=headers)
+            response.raise_for_status()
+            payload = response.json()
+
+            self.assertEqual(payload["type"], "fine")
+            self.assertEqual(payload["status"], "queued")
+            self.assertEqual(payload["options"]["fine_pipeline"], "video_artdeco_speed3r")
+            self.assertEqual(payload["options"]["source_version"], 1)
+
+    def test_video_fine_task_rejects_missing_or_multiple_videos(self) -> None:
+        with TestClient(app) as client, patch("app.main.enqueue_fine_task", return_value=None):
+            headers = auth_headers(client)
+            empty_project = create_video_project(client, headers, "empty video fine")
+
+            empty_response = client.post(f"/api/projects/{empty_project}/tasks/fine", json={"options": {}}, headers=headers)
+            self.assertEqual(empty_response.status_code, 400)
+
+            multi_project = create_video_project(client, headers, "multi video fine")
+            upload_video(client, headers, multi_project, b"video-1", "one.mp4")
+            upload_video(client, headers, multi_project, b"video-2", "two.mp4")
+
+            multi_response = client.post(f"/api/projects/{multi_project}/tasks/fine", json={"options": {}}, headers=headers)
+            self.assertEqual(multi_response.status_code, 400)
 
     def test_cancel_queued_task_removes_it_from_redis_queue(self) -> None:
         fake_redis = FakeRedis()
@@ -439,6 +506,16 @@ def upload_image(client: TestClient, headers: dict[str, str]) -> dict[str, objec
     upload_response = client.post(
         f"/api/projects/{project_id}/media",
         files={"file": ("one.png", PNG_BYTES, "image/png")},
+        headers=headers,
+    )
+    upload_response.raise_for_status()
+    return upload_response.json()
+
+
+def upload_video(client: TestClient, headers: dict[str, str], project_id: str, content: bytes, file_name: str = "clip.mp4") -> dict[str, object]:
+    upload_response = client.post(
+        f"/api/projects/{project_id}/media",
+        files={"file": (file_name, content, "video/mp4")},
         headers=headers,
     )
     upload_response.raise_for_status()

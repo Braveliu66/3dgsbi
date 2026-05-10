@@ -21,9 +21,7 @@ clone_checkout() {
   fi
   git -C "$path" fetch --all --tags
   git -C "$path" checkout "$commit"
-  if [ "$name" = "EDGS" ]; then
-    git -C "$path" submodule update --init --recursive submodules/gaussian-splatting
-  elif [ "$name" = "lm-rs" ]; then
+  if [ "$name" = "lm-rs" ]; then
     git -C "$path" submodule update --init --recursive submodules/simple-knn submodules/diff-gaussian-rasterization
     git -C "$path/submodules/diff-gaussian-rasterization" checkout c2529d3bb13bc38271710785c015a89d9d623237
     git -C "$path/submodules/diff-gaussian-rasterization" submodule update --init --recursive
@@ -37,7 +35,6 @@ clone_checkout() {
 }
 
 clone_checkout "LiteVGGT-repo" "https://github.com/GarlicBa/LiteVGGT-repo.git" "4767c17f8b6f176bb751566e92f60eb885040033"
-clone_checkout "EDGS" "https://github.com/CompVis/EDGS.git" "9a897645eb47c1b24d4f9e4428cd745927bf1ee1"
 clone_checkout "spark" "https://github.com/sparkjsdev/spark.git" "3cf9fa15adb7ac7c47a1e962740db97b9e8a9fdf"
 clone_checkout "lm-rs" "https://github.com/hamzapehlivan/lm-rs.git" "cb40c7c06c2a60f8314ce095ad7b4513fbb33319"
 

@@ -188,7 +188,7 @@ class AlgorithmRegistry(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     name: Mapped[str] = mapped_column(String(120), index=True)
     repo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    license: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    license: Mapped[str | None] = mapped_column(Text, nullable=True)
     commit_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     weight_source: Mapped[str | None] = mapped_column(Text, nullable=True)
     local_path: Mapped[str | None] = mapped_column(Text, nullable=True)

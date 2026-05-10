@@ -27,7 +27,7 @@ ENV HF_HUB_CACHE=/model-cache/huggingface/hub
 ENV XDG_CACHE_HOME=/model-cache/xdg
 ENV TORCH_EXTENSIONS_DIR=/model-cache/torch_extensions
 
-RUN mkdir -p /model-cache/amb3r
+RUN mkdir -p /model-cache/amb3r /model-cache/speed3r_pi3 /model-cache/mast3r
 
 RUN --mount=type=cache,id=three-dgs-worker-apt-cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-apt-lists,target=/var/lib/apt/lists,sharing=locked \
@@ -107,9 +107,15 @@ FROM worker-common AS worker
 ARG LMRS_REPO_URL=https://github.com/hamzapehlivan/lm-rs.git
 ARG LMRS_REPO_COMMIT=cb40c7c06c2a60f8314ce095ad7b4513fbb33319
 ARG LMRS_RASTERIZER_COMMIT=c2529d3bb13bc38271710785c015a89d9d623237
+ARG ARTDECO_REPO_URL=https://github.com/InternRobotics/ARTDECO.git
+ARG ARTDECO_REPO_COMMIT=bb654395826e50ac9e4671682d901377115a24ce
+ARG SPEED3R_REPO_URL=https://github.com/Visual-AI/speed3r.git
+ARG SPEED3R_REPO_COMMIT=5460f7309c87e5daac36385ff6611627de7d7267
 
 ENV FINE_RECONSTRUCTION_ENABLED=true
 ENV LMRS_ROOT=/opt/lm-rs
+ENV ARTDECO_ROOT=/opt/artdeco-runtime
+ENV SPEED3R_ROOT=/opt/speed3r-runtime
 ENV MAX_JOBS=2
 ENV CUDA_PATH=/usr/local/cuda
 ENV NVTE_FRAMEWORK=pytorch
@@ -264,7 +270,9 @@ EOF
 COPY backend/app ./app
 
 RUN --mount=type=cache,id=three-dgs-worker-runtime-extension-pip-cache,target=/root/.cache/pip,sharing=locked \
-    --mount=type=cache,id=three-dgs-worker-lmrs-git-cache,target=/repo-cache/lm-rs,sharing=locked <<'EOF'
+    --mount=type=cache,id=three-dgs-worker-lmrs-git-cache,target=/repo-cache/lm-rs,sharing=locked \
+    --mount=type=cache,id=three-dgs-worker-artdeco-git-cache,target=/repo-cache/artdeco,sharing=locked \
+    --mount=type=cache,id=three-dgs-worker-speed3r-git-cache,target=/repo-cache/speed3r,sharing=locked <<'EOF'
 set -eu
 retry_pip() {
   attempt=1
@@ -305,7 +313,7 @@ retry_git -C "$CACHED_LMRS" submodule update --init --recursive submodules/simpl
 retry_git -C "$CACHED_LMRS/submodules/diff-gaussian-rasterization" checkout "$LMRS_RASTERIZER_COMMIT"
 retry_git -C "$CACHED_LMRS/submodules/diff-gaussian-rasterization" submodule update --init --recursive
 LMRS_GLM="$CACHED_LMRS/submodules/diff-gaussian-rasterization/third_party/glm"
-VENDORED_GLM=/app/app/preview/vendor/edgs/gaussian_splatting/submodules/diff-gaussian-rasterization/third_party/glm
+VENDORED_GLM=/app/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/diff-gaussian-rasterization/third_party/glm
 if [ ! -f "$LMRS_GLM/glm/glm.hpp" ]; then
   rm -rf "$LMRS_GLM"
   mkdir -p "$(dirname "$LMRS_GLM")"
@@ -325,26 +333,59 @@ apply_rasterizer_patch /tmp/lmrs-fastgs-compact-box.patch
 apply_rasterizer_patch /tmp/fastgs-cuda-metric-accumulation.patch
 retry_pip --no-build-isolation "$LMRS_ROOT/submodules/diff-gaussian-rasterization"
 retry_pip --no-build-isolation "$LMRS_ROOT/submodules/simple-knn"
-retry_pip --no-build-isolation /app/app/preview/vendor/edgs/gaussian_splatting/submodules/fused-ssim
+retry_pip --no-build-isolation /app/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/fused-ssim
+CACHED_ARTDECO=/repo-cache/artdeco/source
+export GIT_LFS_SKIP_SMUDGE=1
+if [ ! -d "$CACHED_ARTDECO/.git" ]; then
+  rm -rf "$CACHED_ARTDECO"
+  retry_git clone "$ARTDECO_REPO_URL" "$CACHED_ARTDECO"
+fi
+retry_git -C "$CACHED_ARTDECO" fetch --all --tags --prune
+retry_git -C "$CACHED_ARTDECO" checkout "$ARTDECO_REPO_COMMIT"
+retry_git -C "$CACHED_ARTDECO" submodule update --init --recursive VSLAM/thirdparty/eigen
+rm -rf "$ARTDECO_ROOT"
+mkdir -p "$(dirname "$ARTDECO_ROOT")"
+cp -a "$CACHED_ARTDECO" "$ARTDECO_ROOT"
+sed -i 's/if not (torch.cuda.is_available() and CUDA_HOME):/if not CUDA_HOME:/' "$ARTDECO_ROOT/VSLAM/setup.py"
+retry_pip --no-deps --no-build-isolation "$ARTDECO_ROOT/VSLAM"
+CACHED_SPEED3R=/repo-cache/speed3r/source
+if [ ! -d "$CACHED_SPEED3R/.git" ]; then
+  rm -rf "$CACHED_SPEED3R"
+  retry_git clone "$SPEED3R_REPO_URL" "$CACHED_SPEED3R"
+fi
+retry_git -C "$CACHED_SPEED3R" fetch --all --tags --prune
+retry_git -C "$CACHED_SPEED3R" checkout "$SPEED3R_REPO_COMMIT"
+rm -rf "$SPEED3R_ROOT"
+mkdir -p "$(dirname "$SPEED3R_ROOT")"
+cp -a "$CACHED_SPEED3R" "$SPEED3R_ROOT"
 find "$LMRS_ROOT" -name .git -prune -exec rm -rf {} +
 find "$LMRS_ROOT" -name .git -type f -delete
-PYTHONPATH=/app:/app/app/preview/vendor/edgs:/app/app/preview/vendor/edgs/gaussian_splatting:/app/app/preview/vendor/edgs/roma:/app/app/preview/vendor/litevggt \
+find "$ARTDECO_ROOT" -name .git -prune -exec rm -rf {} +
+find "$ARTDECO_ROOT" -name .git -type f -delete
+find "$SPEED3R_ROOT" -name .git -prune -exec rm -rf {} +
+find "$SPEED3R_ROOT" -name .git -type f -delete
+PYTHONPATH=/app:/app/app/fine/local_3dgs/vendor/gaussian_splatting:/app/app/preview/vendor/litevggt:$ARTDECO_ROOT:$ARTDECO_ROOT/VSLAM:$ARTDECO_ROOT/VSLAM/thirdparty/mast3r:$SPEED3R_ROOT \
   python - <<'PY'
 import torch
 import torchvision
 import importlib.metadata as importlib_metadata
-import romatch
 import pycolmap
 import transformer_engine.pytorch as te
 import diff_gaussian_rasterization
 import simple_knn
 import fused_ssim
+import gsplat
+import safetensors
+import pypose
+import natsort
+import mast3r_slam_backends
 import spconv.pytorch as spconv
 import torch_scatter
 from transformer_engine.common.recipe import DelayedScaling, Format
-from romatch.utils.local_correlation import local_correlation
 from vggt.models.vggt import VGGT
 from scene import GaussianModel
+from pi3.models.pi3_sparse import Pi3_Sparse
+from app.fine.video.artdeco_optimizer_compat import install_artdeco_adam_compat
 
 assert torch.__version__.startswith("2.8.0"), torch.__version__
 assert torchvision.__version__.startswith("0.23.0"), torchvision.__version__
@@ -355,9 +396,13 @@ for name in ("get_JTv", "get_Diag", "get_JTJv", "fastgs_accumulate_metrics"):
 assert hasattr(diff_gaussian_rasterization._RasterizeGaussians, "fastgs_accumulate_metrics")
 assert getattr(diff_gaussian_rasterization, "MOBILEGS_COMPACT_BOX", False)
 assert getattr(diff_gaussian_rasterization, "MOBILEGS_FASTGS_METRIC", False)
-assert callable(local_correlation)
+install_artdeco_adam_compat()
+assert hasattr(diff_gaussian_rasterization, "adamUpdate")
+assert hasattr(diff_gaussian_rasterization, "adamUpdateBasic")
+assert Pi3_Sparse is not None
 import app.fine.runner
 import app.fine.amb3r_sfm
+import app.fine.video.pipeline
 from app.fine.amb3r_runtime.amb3r.model import AMB3R
 from app.fine.deblur_mlp import GTnet
 print("unified worker runtime import ok")

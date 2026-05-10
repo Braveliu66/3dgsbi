@@ -473,10 +473,25 @@ def ensure_upload_session_schema() -> None:
         connection.execute(text("ALTER TABLE upload_sessions ADD COLUMN error_message TEXT"))
 
 
+def ensure_algorithm_registry_schema() -> None:
+    if engine.dialect.name != "postgresql":
+        return
+    inspector = inspect(engine)
+    if "algorithm_registry" not in inspector.get_table_names():
+        return
+    columns = {item["name"]: item for item in inspector.get_columns("algorithm_registry")}
+    license_column = columns.get("license")
+    if not license_column or getattr(license_column["type"], "length", None) is None:
+        return
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE algorithm_registry ALTER COLUMN license TYPE TEXT"))
+
+
 @app.on_event("startup")
 def startup() -> None:
     initialize_database_schema()
     ensure_upload_session_schema()
+    ensure_algorithm_registry_schema()
     storage.ensure_bucket()
     with SessionLocal() as db:
         seed_database(db)
@@ -855,6 +870,8 @@ def create_preview_task(
     if project.input_type != "images":
         raise HTTPException(status_code=400, detail="Video preview pipeline is unavailable")
     pipeline = normalize_preview_pipeline(str((payload.options or {}).get("preview_pipeline") or ""), project.input_type)
+    if pipeline != "litevggt_spz":
+        raise HTTPException(status_code=400, detail=f"Unsupported preview pipeline: {pipeline}")
     task = Task(
         project_id=project.id,
         type="preview",
@@ -898,14 +915,20 @@ def create_fine_task(
     if active_task:
         raise HTTPException(status_code=409, detail="Project already has an active task")
     image_count = sum(1 for item in project.media if item.kind == "image")
-    if project.input_type != "images":
-        raise HTTPException(status_code=400, detail="Fine reconstruction currently requires an image project")
-    if image_count < 3:
+    video_count = sum(1 for item in project.media if item.kind == "video")
+    if project.input_type == "images" and image_count < 3:
         raise HTTPException(status_code=400, detail="Fine reconstruction requires at least 3 images")
+    if project.input_type == "video" and (video_count != 1 or len(project.media) != 1):
+        raise HTTPException(status_code=400, detail="Video fine reconstruction requires exactly one video file")
+    if project.input_type not in {"images", "video"}:
+        raise HTTPException(status_code=400, detail="Fine reconstruction input type is unsupported")
+
+    fine_pipeline = "video_artdeco_speed3r" if project.input_type == "video" else "mobilegs_lmrs"
+    eta_seconds = settings.fine_expected_seconds_video if project.input_type == "video" else settings.fine_expected_seconds_images
 
     options = {
         **(payload.options or {}),
-        "fine_pipeline": "mobilegs_lmrs",
+        "fine_pipeline": fine_pipeline,
         "source_version": project.source_version,
         "fine_iterations": int((payload.options or {}).get("fine_iterations") or settings.fine_iterations),
     }
@@ -916,7 +939,7 @@ def create_fine_task(
         priority=40,
         progress=0,
         current_stage="queued",
-        eta_seconds=settings.fine_expected_seconds_images,
+        eta_seconds=eta_seconds,
         options=options,
     )
     project.status = "FINE_RUNNING"

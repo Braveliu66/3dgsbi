@@ -15,22 +15,16 @@
 ```text
 model-cache/litevggt/te_dict.pt
 model-cache/amb3r/amb3r.pt
-model-cache/roma/roma_indoor.pth
-model-cache/roma/dinov2_vitl14_pretrain.pth
 ```
 
 `amb3r/amb3r.pt` is part of the task-specific model auto-download path for fine
 AMB3R-SfM when `MODEL_AUTO_DOWNLOAD=true`. The worker stores it under
 `model-cache/amb3r/` and still supports pre-seeding the file manually.
 
-`roma/*` 是 EDGS 的 RoMA correspondence 初始化依赖；缺失时 `litevggt_edgs`
-会失败并写出明确错误，不会生成 artifact。
-
 ## Worker 镜像
 
 `worker-base` 包含 CUDA devel、Python 3.10、PyTorch CUDA、Node 22、视觉依赖和编译工具。
-`worker-preview` 从项目内置 vendor 路径编译 EDGS 的 `diff-gaussian-rasterization`、
-`simple-knn`、`fused-ssim` 扩展，并安装 Spark 转码 CLI。
+`worker-preview` 运行 LiteVGGT 直接 Spark-SPZ 预览，并安装 Spark 转码 CLI。
 
 构建和启动：
 
@@ -63,3 +57,23 @@ admin / admin123
 ```
 
 部署时必须替换 `SECRET_KEY` 和管理员密码。
+## 2026-05-10 Video Fine Runtime
+
+The unified worker image builds the video fine runtime in the same PyTorch/CUDA/cuDNN environment as image fine. It clones ARTDECO at `bb654395826e50ac9e4671682d901377115a24ce`, clones Speed3R at `5460f7309c87e5daac36385ff6611627de7d7267`, compiles ARTDECO `mast3r_slam_backends`, and keeps runtime source under:
+
+```text
+/opt/artdeco-runtime
+/opt/speed3r-runtime
+```
+
+Video fine model cache paths:
+
+```text
+model-cache/speed3r_pi3/config.json
+model-cache/speed3r_pi3/model.safetensors
+model-cache/mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth
+model-cache/mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth
+model-cache/mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl
+```
+
+Do not install a second torch/CUDA stack for ARTDECO or Speed3R. The worker intentionally excludes Open3D, xFormers, Gradio, pyrealsense2, GeoCalib, and full Depth-Anything dependencies.

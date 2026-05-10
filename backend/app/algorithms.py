@@ -35,19 +35,6 @@ ALGORITHMS: list[dict[str, Any]] = [
         "notes": "Bundled LiteVGGT direct point cloud preview.",
     },
     {
-        "name": "EDGS",
-        "repo_url": "https://github.com/CompVis/EDGS",
-        "license": "Non-commercial academic/personal use",
-        "commit_hash_setting": "edgs_repo_commit",
-        "local_path": VENDOR_ROOT / "edgs",
-        "enabled": True,
-        "weight_paths": ["roma/roma_indoor.pth", "roma/dinov2_vitl14_pretrain.pth"],
-        "commands": {},
-        "source_type": "bundled",
-        "license_notice": "EDGS is limited to non-commercial academic/personal use.",
-        "notes": "Bundled EDGS preview Gaussian optimizer; CUDA extensions are compiled in the unified worker image.",
-    },
-    {
         "name": "Spark SPZ",
         "repo_url": "https://github.com/sparkjsdev/spark",
         "license": "MIT",
@@ -72,6 +59,25 @@ ALGORITHMS: list[dict[str, Any]] = [
         "source_type": "system",
         "license_notice": "Fine pipeline integrates the minimal AMB3R-SfM runtime from commit 7aae7fbb77a750651ffa236bb9c3212290c6fc78, Deblurring-3DGS GTnet ideas, and LM-RS matrix-free optimization. Preview still uses LiteVGGT.",
         "notes": "Default image fine reconstruction pipeline: JPG/PNG normalization, AMB3R-SfM COLMAP-compatible no-EXIF sparse/0 initialization, DeblurMLP-MobileGS training, FastGS-style densification/pruning, patched LM-RS Compact Box rasterizer, optional LM-RS matrix-free Phase 2, and Spark SPZ conversion. pycolmap is explicit diagnostics only.",
+    },
+    {
+        "name": "Video Fine ARTDECO + Speed3R-Pi3",
+        "repo_url": "https://github.com/InternRobotics/ARTDECO",
+        "license": "ARTDECO/MASt3R/Speed3R-Pi3 research and non-commercial restrictions; verify upstream terms before commercial use",
+        "commit_hash_setting": "artdeco_repo_commit",
+        "local_path": FINE_ROOT / "video",
+        "enabled": True,
+        "weight_paths": [
+            "speed3r_pi3/config.json",
+            "speed3r_pi3/model.safetensors",
+            "mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth",
+            "mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth",
+            "mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl",
+        ],
+        "commands": {},
+        "source_type": "adapted_module",
+        "license_notice": "Video fine integrates ARTDECO VSLAM/Reconstruct at commit bb654395826e50ac9e4671682d901377115a24ce and replaces Pi3 loop-closure inference with Speed3R-Pi3 from commit 5460f7309c87e5daac36385ff6611627de7d7267. Speed3R-Pi3 weights are CC BY-NC 4.0.",
+        "notes": "Canonical video pipeline video_artdeco_speed3r. It accepts exactly one video, extracts frames, writes pinhole intrinsics when absent, runs ARTDECO h3dgsv3 training, validates point_clouds/gs.ply, and only then converts final.ply to Spark SPZ. It does not call AMB3R, MobileGS, LM-RS, or DeblurMLP.",
     },
     {
         "name": "Deblurring-3DGS GTnet",
@@ -143,16 +149,13 @@ def seed_algorithm_registry(db: Session, settings: Settings | None = None) -> No
 
 
 def normalize_preview_pipeline(value: str | None, _input_type: str) -> str:
-    normalized = (value or "litevggt_edgs").strip().lower()
+    normalized = (value or "litevggt_spz").strip().lower()
     aliases = {
-        "edgs": "litevggt_edgs",
-        "litevggt_edgs": "litevggt_edgs",
-        "litevggt+edgs": "litevggt_edgs",
         "litevggt_spark": "litevggt_spz",
         "litevggt_spz": "litevggt_spz",
         "direct": "litevggt_spz",
     }
-    return aliases.get(normalized, "litevggt_edgs")
+    return aliases.get(normalized, normalized)
 
 
 def runtime_preflight(db: Session, settings: Settings | None = None) -> dict[str, Any]:
@@ -160,7 +163,6 @@ def runtime_preflight(db: Session, settings: Settings | None = None) -> dict[str
     algorithms = []
     errors: list[str] = []
     warnings: list[str] = []
-    preview_workers = preview_worker_status(db)
     fine_workers = fine_worker_status(db)
     for item in db.scalars(select(AlgorithmRegistry).order_by(AlgorithmRegistry.name)).all():
         issues = []
@@ -180,16 +182,16 @@ def runtime_preflight(db: Session, settings: Settings | None = None) -> dict[str
                     weights_ready = False
             if not module_status.get("available", True):
                 issues.append(f"bundled module import failed: {module_status.get('error')}")
-            if item.name == "EDGS":
-                edgs_ext = extension_pair_status()
-                extensions_ready = bool(edgs_ext["available"] or preview_workers["available"])
-                if not extensions_ready:
-                    issues.append("worker-preview heartbeat missing and backend EDGS CUDA extensions unavailable")
             if item.name == "MobileGS Fine (AMB3R-SfM + DeblurMLP + LM-RS)":
                 fine_runtime = fine_runtime_status()
                 extensions_ready = bool(fine_runtime["available"] or fine_workers["available"])
                 if not extensions_ready:
                     issues.append("worker-fine heartbeat missing and backend fine CUDA runtime unavailable")
+            if item.name == "Video Fine ARTDECO + Speed3R-Pi3":
+                video_runtime = artdeco_video_runtime_status()
+                extensions_ready = bool(video_runtime["available"] or fine_workers["available"])
+                if not extensions_ready:
+                    issues.append("worker-fine heartbeat missing and backend ARTDECO video runtime unavailable")
             if item.name == "Spark SPZ":
                 if not spz_converter_ready["available"]:
                     issues.append(f"Spark SPZ converter unavailable: {spz_converter_ready['error']}")
@@ -229,8 +231,8 @@ def runtime_preflight(db: Session, settings: Settings | None = None) -> dict[str
         "gpu": gpu,
         "torch": torch,
         "transformer_engine": import_check("transformer_engine"),
-        "edgs_cuda_extensions": {**extension_pair_status(), "worker_preview": preview_workers},
         "fine_runtime": {**fine_runtime_status(), "worker_fine": fine_workers},
+        "video_fine_runtime": {**artdeco_video_runtime_status(), "worker_fine": fine_workers},
         "spz_converter": spark_converter_status(),
         "algorithms": algorithms,
         "errors": errors,
@@ -264,7 +266,7 @@ def preview_worker_status(db: Session) -> dict[str, Any]:
         "active_count": len(active),
         "stale_count": max(0, len(workers) - len(active)),
         "workers": active,
-        "note": "EDGS CUDA extensions are compiled and smoke-checked in the unified worker image.",
+        "note": "worker-preview runs LiteVGGT direct Spark SPZ preview tasks.",
     }
 
 
@@ -294,7 +296,7 @@ def fine_worker_status(db: Session) -> dict[str, Any]:
         "active_count": len(active),
         "stale_count": max(0, len(workers) - len(active)),
         "workers": active,
-        "note": "worker-fine runs from the same CUDA/PyTorch worker image and model-cache as preview, but fine tasks do not require EDGS/RoMA weights.",
+        "note": "worker-fine runs from the same CUDA/PyTorch worker image and model-cache as preview.",
     }
 
 
@@ -309,8 +311,8 @@ def import_check(module_name: str) -> dict[str, Any]:
 def bundled_module_status(name: str) -> dict[str, Any]:
     modules = {
         "LiteVGGT": "app.preview.vendor.litevggt_runtime",
-        "EDGS": "app.preview.vendor.edgs_runtime",
         "MobileGS Fine (AMB3R-SfM + DeblurMLP + LM-RS)": "app.fine.runner",
+        "Video Fine ARTDECO + Speed3R-Pi3": "app.fine.video.pipeline",
         "Deblurring-3DGS GTnet": "app.fine.deblur_mlp",
         "Spark SPZ": "app.preview.io.spz",
     }
@@ -365,6 +367,53 @@ def fine_runtime_status() -> dict[str, Any]:
         **optional_modules,
         "error": None if available else "CUDA torch/Spark SPZ/AMB3R-SfM/DeblurMLP/LM-RS rasterizer/Compact Box/simple_knn/fused_ssim check failed",
     }
+
+
+def artdeco_video_runtime_status() -> dict[str, Any]:
+    torch_status = torch_info()
+    spark_status = spark_converter_status()
+    modules = {
+        "video_pipeline": import_check("app.fine.video.pipeline"),
+        "speed3r_pi3": import_check("app.fine.video.speed3r_pi3"),
+        "gsplat": import_check("gsplat"),
+        "safetensors": import_check("safetensors"),
+        "pypose": import_check("pypose"),
+        "natsort": import_check("natsort"),
+        "mast3r_slam_backends": import_check("mast3r_slam_backends"),
+        "diff_gaussian_rasterization": import_check("diff_gaussian_rasterization"),
+        "simple_knn": import_check("simple_knn"),
+        "fused_ssim": import_check("fused_ssim"),
+    }
+    modules["artdeco_adam"] = artdeco_adam_status(modules["diff_gaussian_rasterization"])
+    available = bool(
+        torch_status.get("available")
+        and torch_status.get("cuda_available")
+        and spark_status.get("available")
+        and all(item.get("available") for item in modules.values())
+    )
+    return {
+        "available": available,
+        "torch_cuda": torch_status,
+        "spark_spz": spark_status,
+        **modules,
+        "error": None if available else "CUDA torch/Spark SPZ/ARTDECO VSLAM backend/Speed3R-Pi3/MASt3R runtime check failed",
+    }
+
+
+def artdeco_adam_status(raster_status: dict[str, Any]) -> dict[str, Any]:
+    if not raster_status.get("available"):
+        return {"available": False, "error": "diff_gaussian_rasterization import failed"}
+    try:
+        from app.fine.video.artdeco_optimizer_compat import install_artdeco_adam_compat
+
+        install_artdeco_adam_compat()
+        module = __import__("diff_gaussian_rasterization")
+        missing = [name for name in ("adamUpdate", "adamUpdateBasic") if not hasattr(module, name)]
+        if missing:
+            return {"available": False, "error": f"missing ARTDECO Adam symbols: {', '.join(missing)}"}
+        return {"available": True, "symbols": ["adamUpdate", "adamUpdateBasic"]}
+    except Exception as exc:
+        return {"available": False, "error": str(exc)}
 
 
 def litevggt_runtime_status() -> dict[str, Any]:

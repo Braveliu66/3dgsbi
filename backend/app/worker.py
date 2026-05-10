@@ -686,24 +686,19 @@ def estimate_eta(task: Task, project: Project, started: float) -> int | None:
 
 def expected_seconds_for_task(task: Task, project: Project) -> int:
     pipeline = str((task.options or {}).get("preview_pipeline") or "")
-    if pipeline == "litevggt_edgs":
-        frame_count = max(1, len(project.media))
-        default_steps = 1_500 if frame_count < 16 else 3_000
-        steps = int((task.options or {}).get("edgs_preview_steps") or default_steps)
-        return int(max(25, 24 + steps * 0.035 + max(0, frame_count - 6) * 0.8))
     return expected_seconds_for_pipeline(pipeline)
 
 
 def expected_seconds_for_pipeline(pipeline: str | None) -> int:
     if pipeline == "litevggt_spz":
         return settings.preview_expected_seconds_litevggt_spz
-    return settings.preview_expected_seconds_litevggt_edgs
+    return settings.preview_expected_seconds_litevggt_spz
 
 
 def stage_for_pipeline(pipeline: str) -> str:
     if pipeline == "litevggt_spz":
         return "litevggt_direct_spz"
-    return "litevggt_edgs_training"
+    return "unknown_preview_pipeline"
 
 
 if __name__ == "__main__":

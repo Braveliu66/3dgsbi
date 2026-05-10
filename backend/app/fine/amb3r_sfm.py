@@ -11,11 +11,11 @@ from PIL import Image, ImageOps
 
 from app.fine.preprocess import SceneBuildResult
 from app.fine.types import FineFailure
-from app.preview.utils import VENDOR_ROOT, image_files, prepend_sys_path
+from app.preview.utils import image_files, prepend_sys_path
 
 
 Progress = Callable[[str, int, str], None]
-GS_ROOT = VENDOR_ROOT / "edgs" / "gaussian_splatting"
+GS_ROOT = Path(__file__).resolve().parent / "local_3dgs" / "vendor" / "gaussian_splatting"
 AMB3R_COMMIT = "7aae7fbb77a750651ffa236bb9c3212290c6fc78"
 AMB3R_BACKEND = "amb3r_sfm_colmap_no_exif"
 AMB3R_WEIGHT_RELATIVE_PATH = Path("amb3r") / "amb3r.pt"

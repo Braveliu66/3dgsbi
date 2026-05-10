@@ -6,10 +6,10 @@ from typing import Any
 
 import numpy as np
 
-from app.preview.utils import VENDOR_ROOT, image_files, prepend_sys_path
+from app.preview.utils import image_files, prepend_sys_path
 
 
-GS_ROOT = VENDOR_ROOT / "edgs" / "gaussian_splatting"
+GS_ROOT = Path(__file__).resolve().parent / "vendor" / "gaussian_splatting"
 
 
 @dataclass(slots=True)
