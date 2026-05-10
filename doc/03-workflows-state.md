@@ -55,35 +55,11 @@ sequenceDiagram
 
 ## 3. 视频极速预览流程
 
-```mermaid
-sequenceDiagram
-    participant U as 用户
-    participant FE as 前端
-    participant API as 后端
-    participant S3 as 对象存储
-    participant Q as Redis 队列
-    participant W as GPU Worker
-    participant V as Viewer
-
-    U->>FE: 上传视频
-    FE->>API: 创建项目并上传视频
-    API->>S3: 保存 raw/video
-    API->>Q: 创建 preview 任务
-    W->>Q: 拉取任务
-    W->>W: LingBot-Map 按完整时长采样并重建点云
-    W->>S3: 保存 preview.spz
-    API-->>FE: 推送 PREVIEW_READY
-    FE->>V: 加载预览模型
-```
+视频极速预览管线已清理，待重新设计与实现。当前系统可以保存视频素材，但不会创建视频预览任务或生成视频预览 artifact。
 
 ## 4. 实时摄像头粗重建流程
 
-1. 前端请求摄像头权限。
-2. 前端将视频帧按固定频率发送到后端或实时 Worker。
-3. 前端使用 MediaRecorder 每 1 秒上传一个视频窗口。
-4. API 创建 `preview_camera_tasks` 任务，camera-worker 使用 LingBot-Map streaming 模式生成窗口级点云。
-5. Worker 将窗口级点云转换为 `preview_segment_*.spz`，写入 `preview_spz_segment` artifact。
-6. Viewer 通过 SSE 收到 `preview_segment_ready` 后拉取新增 segment 并追加渲染；未完成时间段显示为灰色占位。
+实时摄像头采集页面、分片上传 API 和实时预览管线已清理。新管线实现后再定义录制素材、任务队列、artifact 和 Viewer 加载流程。
 
 ## 5. 精细重建流程
 
@@ -92,7 +68,7 @@ flowchart TD
     Start["用户点击精细重建"] --> Queue["创建 fine 任务"]
     Queue --> Analysis["素材质量分析"]
     Analysis --> LongVideo{"视频或序列 > 500 帧?"}
-    LongVideo -- 是且启用 --> Global["LingBot-Map + MASt3R + Pi3 全局优化"]
+    LongVideo -- 是且启用 --> Global["长视频全局优化管线待重写"]
     LongVideo -- 否或未启用 --> Init["标准初始化"]
     Global --> Init
     Init --> Sparse{"有效视角 < 15 或位姿失败?"}
@@ -121,7 +97,7 @@ flowchart TD
 
 | 任务类型 | 优先级 | GPU 策略 |
 | --- | --- | --- |
-| 实时摄像头 | 最高 | 低延迟，持续运行 |
+| 实时摄像头 | 待重写 | 新管线实现后重新定义 |
 | 极速预览 | 高 | 可并发，快速返回 |
 | LOD 生成 | 中 | 可与部分轻量任务错峰 |
 | Mesh 导出 | 中 | 默认独占 GPU |
@@ -151,7 +127,7 @@ sequenceDiagram
     participant W as Preview Worker
     participant A as 真实算法适配层
 
-    U->>FE: 登录并上传图片或视频
+    U->>FE: 登录并上传图片
     FE->>API: Authorization: Bearer token
     API->>DB: 校验用户和项目归属
     API->>S: 保存真实上传文件
@@ -179,7 +155,7 @@ sequenceDiagram
 - worker 接手后进入 `running`，并写入 `worker_id`、`current_stage`、`started_at`。
 - 算法环境失败时进入 `failed`，项目进入 `FAILED`，`artifacts` 表不新增成功产物。
 - 只有真实非空 `preview.spz` 上传成功后，任务才进入 `succeeded`，项目进入 `PREVIEW_READY`。
-- viewer config 存在 `preview_spz` 时返回 `mode=single`；存在 `preview_spz_segment` 时返回 `mode=progressive` 和 segment 列表；都不存在时返回 `unavailable`。
+- viewer config 存在 `preview_spz` 时返回 `mode=single`；不存在时返回 `unavailable`。视频/实时视频加载语义待新管线重新定义。
 - 当前取消接口只持久化 `canceled` 状态；正在执行的外部算法进程中断和临时目录清理属于后续增强。
 
 ## 2026-05-07 Fine Workflow Update

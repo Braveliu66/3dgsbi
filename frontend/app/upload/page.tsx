@@ -34,7 +34,7 @@ export default function UploadPage() {
 
   const totalBytes = useMemo(() => media.reduce((sum, item) => sum + item.file_size, 0), [media]);
   const imageCount = media.filter((item) => item.kind === "image").length;
-  const canStartPreview = Boolean(project && media.length > 0 && (inputType === "video" || imageCount >= MIN_INPUT_FRAMES) && !isActiveTask(task));
+  const canStartPreview = Boolean(project && imageCount >= MIN_INPUT_FRAMES && !isActiveTask(task));
   const canStartFine = Boolean(project && project.input_type === "images" && imageCount >= MIN_FINE_INPUT_FRAMES && !isActiveTask(task));
 
   useEffect(() => {
@@ -126,9 +126,7 @@ export default function UploadPage() {
     setBusy(true);
     setError(null);
     try {
-      const options = inputType === "images"
-        ? { preview_pipeline: previewPipeline }
-        : { preview_pipeline: "lingbot_map_spark" };
+      const options = { preview_pipeline: previewPipeline };
       const next = await api.startPreview(project.id, options);
       rememberTaskId(next.id);
       setTask(next);
@@ -210,7 +208,6 @@ export default function UploadPage() {
                 <label>输入类型</label>
                 <select className="select" value={inputType} onChange={(event) => setInputType(event.target.value as Project["input_type"])} disabled={Boolean(project)}>
                   <option value="images">图片序列</option>
-                  <option value="video">视频</option>
                 </select>
               </div>
             </div>
@@ -231,7 +228,7 @@ export default function UploadPage() {
                   <option value="litevggt_spz">LiteVGGT 直接出 Spark-SPZ</option>
                 </select>
               ) : (
-                <input className="input" value="LingBot-Map + Spark-SPZ" disabled />
+                <input className="input" value="视频预览管线未启用" disabled />
               )}
             </div>
 
@@ -336,7 +333,7 @@ export default function UploadPage() {
           <div className="panel-body scrollable" style={{ padding: 0 }}>
             {viewer?.stale ? <div className="notice-box preview-stale">{viewer.message}</div> : null}
             {viewer?.status === "ready" ? (
-              <SplatViewer modelUrl={viewer.model_url} segments={viewer.segments} />
+              <SplatViewer modelUrl={viewer.model_url} />
             ) : (
               <div className="preview-stage">
                 <div className="preview-placeholder">

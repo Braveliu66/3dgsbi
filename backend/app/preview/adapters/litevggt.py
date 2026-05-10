@@ -22,19 +22,19 @@ def run(ctx: PreviewContext) -> PreviewResult:
     if coverage_mode == "complete":
         keep_ratio = float(ctx.options.get("litevggt_keep_ratio") or 0.95)
         spatial_keep_quantile = float(ctx.options.get("litevggt_spatial_keep_quantile") or 1.0)
-        preserve_full_image = bool(ctx.options.get("litevggt_preserve_full_image", True))
+        preserve_full_image = _read_bool(ctx.options.get("litevggt_preserve_full_image"), True)
         frame_selection = str(ctx.options.get("litevggt_frame_selection") or "scene")
         max_points = int(ctx.options.get("preview_max_points") or 25_000_000)
     elif coverage_mode == "balanced":
         keep_ratio = float(ctx.options.get("litevggt_keep_ratio") or 0.75)
         spatial_keep_quantile = float(ctx.options.get("litevggt_spatial_keep_quantile") or 0.999)
-        preserve_full_image = bool(ctx.options.get("litevggt_preserve_full_image", True))
+        preserve_full_image = _read_bool(ctx.options.get("litevggt_preserve_full_image"), True)
         frame_selection = str(ctx.options.get("litevggt_frame_selection") or "scene")
         max_points = int(ctx.options.get("preview_max_points") or 15_000_000)
     else:
         keep_ratio = float(ctx.options.get("litevggt_keep_ratio") or 0.42)
         spatial_keep_quantile = float(ctx.options.get("litevggt_spatial_keep_quantile") or 0.995)
-        preserve_full_image = bool(ctx.options.get("litevggt_preserve_full_image", False))
+        preserve_full_image = _read_bool(ctx.options.get("litevggt_preserve_full_image"), True)
         frame_selection = str(ctx.options.get("litevggt_frame_selection") or "head")
         max_points = int(ctx.options.get("preview_max_points") or 10_000_000)
 
@@ -87,3 +87,16 @@ def run(ctx: PreviewContext) -> PreviewResult:
         },
         source_commits={"LiteVGGT": SOURCE_COMMITS["LiteVGGT"], "Spark": SOURCE_COMMITS["Spark"]},
     )
+
+
+def _read_bool(value, fallback: bool) -> bool:
+    if value is None:
+        return fallback
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    return fallback

@@ -29,10 +29,6 @@ LITEVGGT_WEIGHT = ModelWeight(
     "litevggt/te_dict.pt",
     "https://huggingface.co/ZhijianShu/LiteVGGT/resolve/main/te_dict.pt",
 )
-LINGBOT_WEIGHT = ModelWeight(
-    "lingbot-map/lingbot-map-long.pt",
-    "https://huggingface.co/robbyant/lingbot-map/resolve/main/lingbot-map-long.pt",
-)
 ROMA_WEIGHT = ModelWeight(
     "roma/roma_indoor.pth",
     "https://github.com/Parskatt/storage/releases/download/roma/roma_indoor.pth",
@@ -48,7 +44,6 @@ AMB3R_WEIGHT = ModelWeight(
 
 MODEL_WEIGHTS: tuple[ModelWeight, ...] = (
     LITEVGGT_WEIGHT,
-    LINGBOT_WEIGHT,
     ROMA_WEIGHT,
     DINOV2_WEIGHT,
     AMB3R_WEIGHT,
@@ -57,9 +52,8 @@ WEIGHT_BY_RELATIVE_PATH = {item.relative_path: item for item in MODEL_WEIGHTS}
 
 PIPELINE_WEIGHT_PATHS: dict[str, tuple[str, ...]] = {
     "litevggt_spz": ("litevggt/te_dict.pt",),
-    "litevggt_edgs": ("roma/roma_indoor.pth", "roma/dinov2_vitl14_pretrain.pth"),
+    "litevggt_edgs": ("litevggt/te_dict.pt", "roma/roma_indoor.pth", "roma/dinov2_vitl14_pretrain.pth"),
     "mobilegs_lmrs": ("amb3r/amb3r.pt",),
-    "lingbot_spz": ("lingbot-map/lingbot-map-long.pt",),
 }
 
 

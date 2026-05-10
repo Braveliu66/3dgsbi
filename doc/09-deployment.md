@@ -15,7 +15,6 @@
 ```text
 model-cache/litevggt/te_dict.pt
 model-cache/amb3r/amb3r.pt
-model-cache/lingbot-map/lingbot-map-long.pt
 model-cache/roma/roma_indoor.pth
 model-cache/roma/dinov2_vitl14_pretrain.pth
 ```

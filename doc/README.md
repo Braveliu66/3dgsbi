@@ -17,7 +17,7 @@
 3. `03-workflows-state.md`：上传、预览、精细重建、导出、状态机与任务规则。
 4. `04-data-api.md`：数据模型、对象存储路径、后端 API 与事件通道草案。
 5. `05-implementation-plan.md`：推荐开发顺序、里程碑、验证方法和风险项。
-6. `06-frontend-pages.md`：首页、上传页、实时视频页、项目管理页和详情页的页面规格。
+6. `06-frontend-pages.md`：首页、上传页、项目管理页和详情页的页面规格。
 7. `07-backend-constraints.md`：真实算法接入、高并发、多 GPU、存储、权限和禁止占位实现的约束。
 8. `08-progress.md`：当前工程实现进度、已验证项、未接入项和下一步。
 9. `09-deployment.md`：Docker/WSL 启动方式、环境变量、迁移、种子账号和运行验证。

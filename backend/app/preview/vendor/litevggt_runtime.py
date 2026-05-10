@@ -6,6 +6,8 @@ from __future__ import annotations
 # 固定提交: 4767c17f8b6f176bb751566e92f60eb885040033
 # 许可证: MIT
 
+import shutil
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -18,6 +20,19 @@ from app.preview.utils import VENDOR_ROOT, image_files, prepend_sys_path
 
 
 Progress = Callable[[str, int, str], None]
+
+
+@dataclass(slots=True)
+class LiteVGGTReconstruction:
+    files: list[Path]
+    images: np.ndarray
+    valid_masks: np.ndarray
+    w2c: np.ndarray
+    intrinsics: np.ndarray
+    points: np.ndarray
+    colors: np.ndarray
+    confidence: np.ndarray
+    metrics: dict[str, int | float | str | bool]
 
 
 def _load_small_gray(image_path: Path, size: int = 160) -> np.ndarray:
@@ -417,25 +432,24 @@ def voxel_downsample_points(
     return points[selected], colors[selected], confidence[selected]
 
 
-def run_litevggt_pointcloud(
+def _run_litevggt_reconstruction(
     *,
     input_dir: Path,
     checkpoint_path: Path,
-    output_ply: Path,
     keep_ratio: float,
     max_points: int,
-    spatial_keep_quantile: float = 0.995,
-    preserve_full_image: bool = False,
-    letterbox_size: int = 518,
-    max_input_frames: int | None = None,
-    frame_selection: str = "scene",
-    min_scene_change: float = 0.045,
-    edge_keep_ratio: float = 0.15,
-    axis_trim_low_quantile: float = 0.0005,
-    axis_trim_high_quantile: float = 0.9995,
-    selection_strategy: str = "per_frame",
+    spatial_keep_quantile: float,
+    preserve_full_image: bool,
+    letterbox_size: int,
+    max_input_frames: int | None,
+    frame_selection: str,
+    min_scene_change: float,
+    edge_keep_ratio: float,
+    axis_trim_low_quantile: float,
+    axis_trim_high_quantile: float,
+    selection_strategy: str,
     progress: Progress,
-) -> dict[str, int | float | str | bool]:
+) -> LiteVGGTReconstruction:
     """执行 LiteVGGT 直接点云预览。
 
     这里没有调用原仓库脚本，而是把 run_demo.py 的关键步骤变成系统函数。
@@ -547,11 +561,13 @@ def run_litevggt_pointcloud(
             progress("litevggt_unproject", 58, "unprojecting depth maps to world point cloud")
             points_3d = unproject_depth_map_to_point_map(depth_map.squeeze(0), w2c_pre.squeeze(0), intrinsic.squeeze(0))
             points = points_3d.reshape(-1, 3)
-            color_image = image_batch[0].permute(0, 2, 3, 1).reshape(-1, 3).detach().cpu().numpy()
+            image_array = image_batch[0].permute(0, 2, 3, 1).detach().cpu().numpy()
+            color_image = image_array.reshape(-1, 3)
             colors = np.clip(color_image * 255.0, 0, 255).astype(np.uint8)
 
             confidence = depth_conf.reshape(-1).detach().cpu().numpy()
-            valid_pixels = valid_mask_batch.reshape(-1).detach().cpu().numpy().astype(bool)
+            valid_mask_array = valid_mask_batch.detach().cpu().numpy().astype(bool)
+            valid_pixels = valid_mask_array.reshape(-1)
             finite = np.isfinite(points).all(axis=1) & np.isfinite(confidence)
             valid_pixels = valid_pixels & finite
 
@@ -607,36 +623,291 @@ def run_litevggt_pointcloud(
 
             point_count_after_downsample = int(trimmed_points.shape[0])
 
-            point_count = write_point_cloud_ply(
-                trimmed_points,
-                trimmed_colors,
-                output_ply,
-                confidence=trimmed_confidence,
-                max_points=max_points,
-            )
-
         peak_mb = int(torch.cuda.max_memory_allocated() / 1024 / 1024) if torch.cuda.is_available() else 0
-        return {
-            "original_frame_count": int(original_frame_count),
-            "input_frame_count": aligned_count,
-            "frame_selection": frame_selection,
-            "min_scene_change": float(min_scene_change),
-            "point_selection_strategy": selection_strategy,
-            "point_count": point_count,
-            "keep_ratio": float(keep_ratio),
-            "edge_keep_ratio": float(edge_keep_ratio),
-            "spatial_keep_quantile": float(spatial_keep_quantile),
-            "axis_trim_low_quantile": float(axis_trim_low_quantile),
-            "axis_trim_high_quantile": float(axis_trim_high_quantile),
-            "preserve_full_image": bool(preserve_full_image),
-            "letterbox_size": int(letterbox_size),
-            "valid_pixel_count": int(valid_pixels.sum()),
-            "point_count_before_spatial_trim": int(selected_points.shape[0]),
-            "point_count_after_spatial_trim": point_count_after_spatial_trim,
-            "point_count_before_downsample": point_count_before_downsample,
-            "point_count_after_downsample": point_count_after_downsample,
-            "cuda_memory_peak_mb": float(peak_mb),
-        }
+        return LiteVGGTReconstruction(
+            files=files,
+            images=image_array,
+            valid_masks=valid_mask_array,
+            w2c=w2c_pre.squeeze(0).detach().float().cpu().numpy(),
+            intrinsics=intrinsic.squeeze(0).detach().float().cpu().numpy(),
+            points=trimmed_points,
+            colors=trimmed_colors,
+            confidence=trimmed_confidence,
+            metrics={
+                "original_frame_count": int(original_frame_count),
+                "input_frame_count": aligned_count,
+                "frame_selection": frame_selection,
+                "min_scene_change": float(min_scene_change),
+                "point_selection_strategy": selection_strategy,
+                "keep_ratio": float(keep_ratio),
+                "edge_keep_ratio": float(edge_keep_ratio),
+                "spatial_keep_quantile": float(spatial_keep_quantile),
+                "axis_trim_low_quantile": float(axis_trim_low_quantile),
+                "axis_trim_high_quantile": float(axis_trim_high_quantile),
+                "preserve_full_image": bool(preserve_full_image),
+                "letterbox_size": int(letterbox_size),
+                "valid_pixel_count": int(valid_pixels.sum()),
+                "point_count_before_spatial_trim": int(selected_points.shape[0]),
+                "point_count_after_spatial_trim": point_count_after_spatial_trim,
+                "point_count_before_downsample": point_count_before_downsample,
+                "point_count_after_downsample": point_count_after_downsample,
+                "cuda_memory_peak_mb": float(peak_mb),
+            },
+        )
+
+
+def build_litevggt_colmap_scene(
+    *,
+    input_dir: Path,
+    checkpoint_path: Path,
+    scene_dir: Path,
+    keep_ratio: float,
+    max_points: int,
+    spatial_keep_quantile: float = 1.0,
+    letterbox_size: int = 518,
+    max_input_frames: int | None = None,
+    frame_selection: str = "scene",
+    min_scene_change: float = 0.045,
+    edge_keep_ratio: float = 0.15,
+    axis_trim_low_quantile: float = 0.0005,
+    axis_trim_high_quantile: float = 0.9995,
+    selection_strategy: str = "per_frame",
+    progress: Progress,
+) -> dict[str, int | float | str | bool]:
+    reconstruction = _run_litevggt_reconstruction(
+        input_dir=input_dir,
+        checkpoint_path=checkpoint_path,
+        keep_ratio=keep_ratio,
+        max_points=max_points,
+        spatial_keep_quantile=spatial_keep_quantile,
+        preserve_full_image=True,
+        letterbox_size=letterbox_size,
+        max_input_frames=max_input_frames,
+        frame_selection=frame_selection,
+        min_scene_change=min_scene_change,
+        edge_keep_ratio=edge_keep_ratio,
+        axis_trim_low_quantile=axis_trim_low_quantile,
+        axis_trim_high_quantile=axis_trim_high_quantile,
+        selection_strategy=selection_strategy,
+        progress=progress,
+    )
+    progress("litevggt_colmap_scene", 66, "writing LiteVGGT COLMAP-compatible scene")
+    write_litevggt_colmap_scene(
+        scene_dir,
+        reconstruction.images,
+        reconstruction.w2c,
+        reconstruction.intrinsics,
+        reconstruction.points,
+        reconstruction.colors,
+    )
+    return {
+        **reconstruction.metrics,
+        "point_count": int(reconstruction.points.shape[0]),
+        "sfm_backend": "litevggt_colmap_no_pycolmap",
+        "pycolmap_used": False,
+        "litevggt_pad_mode": True,
+    }
+
+
+def run_litevggt_pointcloud(
+    *,
+    input_dir: Path,
+    checkpoint_path: Path,
+    output_ply: Path,
+    keep_ratio: float,
+    max_points: int,
+    spatial_keep_quantile: float = 0.995,
+    preserve_full_image: bool = True,
+    letterbox_size: int = 518,
+    max_input_frames: int | None = None,
+    frame_selection: str = "scene",
+    min_scene_change: float = 0.045,
+    edge_keep_ratio: float = 0.15,
+    axis_trim_low_quantile: float = 0.0005,
+    axis_trim_high_quantile: float = 0.9995,
+    selection_strategy: str = "per_frame",
+    progress: Progress,
+) -> dict[str, int | float | str | bool]:
+    reconstruction = _run_litevggt_reconstruction(
+        input_dir=input_dir,
+        checkpoint_path=checkpoint_path,
+        keep_ratio=keep_ratio,
+        max_points=max_points,
+        spatial_keep_quantile=spatial_keep_quantile,
+        preserve_full_image=preserve_full_image,
+        letterbox_size=letterbox_size,
+        max_input_frames=max_input_frames,
+        frame_selection=frame_selection,
+        min_scene_change=min_scene_change,
+        edge_keep_ratio=edge_keep_ratio,
+        axis_trim_low_quantile=axis_trim_low_quantile,
+        axis_trim_high_quantile=axis_trim_high_quantile,
+        selection_strategy=selection_strategy,
+        progress=progress,
+    )
+    point_count = write_point_cloud_ply(
+        reconstruction.points,
+        reconstruction.colors,
+        output_ply,
+        confidence=reconstruction.confidence,
+        max_points=max_points,
+    )
+    return {**reconstruction.metrics, "point_count": point_count}
+
+
+def write_litevggt_colmap_scene(
+    scene_dir: Path,
+    images: np.ndarray,
+    w2c: np.ndarray,
+    intrinsics: np.ndarray,
+    points: np.ndarray,
+    colors: np.ndarray,
+) -> int:
+    image_array = np.asarray(images, dtype=np.float32)
+    if image_array.ndim != 4 or image_array.shape[-1] != 3:
+        raise PreviewFailure("LITEVGGT_SCENE_INVALID", "LiteVGGT scene images must have shape SxHxWx3")
+
+    frame_count = int(image_array.shape[0])
+    if frame_count < 3:
+        raise PreviewFailure("LITEVGGT_SCENE_NOT_ENOUGH_IMAGES", "LiteVGGT EDGS scene requires at least 3 registered images")
+
+    w2c_array = np.asarray(w2c, dtype=np.float64)
+    intrinsics_array = np.asarray(intrinsics, dtype=np.float64)
+    if w2c_array.shape[0] != frame_count or intrinsics_array.shape[0] != frame_count:
+        raise PreviewFailure("LITEVGGT_SCENE_INVALID", "camera arrays do not match LiteVGGT image count")
+
+    point_array, color_array = _normalize_scene_points(points, colors)
+
+    if scene_dir.exists():
+        shutil.rmtree(scene_dir)
+    images_dir = scene_dir / "images"
+    sparse_dir = scene_dir / "sparse" / "0"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    sparse_dir.mkdir(parents=True, exist_ok=True)
+
+    height = int(image_array.shape[1])
+    width = int(image_array.shape[2])
+    image_names = []
+    for index, image in enumerate(image_array):
+        name = f"{index:08d}.png"
+        image_names.append(name)
+        encoded = np.clip(image * 255.0, 0, 255).astype(np.uint8)
+        Image.fromarray(encoded, mode="RGB").save(images_dir / name)
+
+    _write_scene_point_cloud_ply(sparse_dir / "points3D.ply", point_array, color_array)
+
+    gs_utils_root = VENDOR_ROOT / "edgs" / "gaussian_splatting" / "utils"
+    with prepend_sys_path(gs_utils_root):
+        from read_write_model import Camera, Image as ColmapImage, Point3D, rotmat2qvec, write_model
+
+    cameras = {}
+    colmap_images = {}
+    for index, name in enumerate(image_names):
+        image_id = index + 1
+        camera_id = image_id
+        k = intrinsics_array[index]
+        if not np.isfinite(k).all() or float(k[0, 0]) <= 0.0 or float(k[1, 1]) <= 0.0:
+            raise PreviewFailure("LITEVGGT_INVALID_INTRINSICS", f"invalid LiteVGGT intrinsics for frame {index}")
+        matrix = _as_w2c_3x4(w2c_array[index])
+        cameras[camera_id] = Camera(
+            id=camera_id,
+            model="PINHOLE",
+            width=width,
+            height=height,
+            params=np.array([k[0, 0], k[1, 1], k[0, 2], k[1, 2]], dtype=np.float64),
+        )
+        colmap_images[image_id] = ColmapImage(
+            id=image_id,
+            qvec=rotmat2qvec(matrix[:3, :3]),
+            tvec=matrix[:3, 3].astype(np.float64),
+            camera_id=camera_id,
+            name=name,
+            xys=np.empty((0, 2), dtype=np.float64),
+            point3D_ids=np.empty((0,), dtype=np.int64),
+        )
+
+    points3d = {}
+    for index, (xyz, rgb) in enumerate(zip(point_array, color_array), start=1):
+        points3d[index] = Point3D(
+            id=index,
+            xyz=np.asarray(xyz, dtype=np.float64),
+            rgb=np.asarray(rgb, dtype=np.uint8),
+            error=0.0,
+            image_ids=np.empty((0,), dtype=np.int32),
+            point2D_idxs=np.empty((0,), dtype=np.int32),
+        )
+    write_model(cameras, colmap_images, points3d, str(sparse_dir), ext=".bin")
+    return int(point_array.shape[0])
+
+
+def _normalize_scene_points(points: np.ndarray, colors: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    point_array = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+    color_array = np.asarray(colors).reshape(-1, 3)
+    if point_array.shape[0] != color_array.shape[0]:
+        raise PreviewFailure("LITEVGGT_SCENE_POINT_MISMATCH", "LiteVGGT scene points and colors must have the same length")
+    valid = np.isfinite(point_array).all(axis=1)
+    point_array = point_array[valid]
+    color_array = color_array[valid]
+    if point_array.shape[0] == 0:
+        raise PreviewFailure("LITEVGGT_EMPTY_POINT_CLOUD", "LiteVGGT produced no valid points for EDGS scene")
+    if color_array.dtype.kind == "f" and float(np.nanmax(color_array)) <= 1.0:
+        color_array = color_array * 255.0
+    return point_array, np.clip(color_array, 0, 255).astype(np.uint8)
+
+
+def _write_scene_point_cloud_ply(path: Path, points: np.ndarray, colors: np.ndarray) -> None:
+    normals = np.zeros_like(points, dtype=np.float32)
+    dtype = np.dtype(
+        [
+            ("x", "<f4"),
+            ("y", "<f4"),
+            ("z", "<f4"),
+            ("nx", "<f4"),
+            ("ny", "<f4"),
+            ("nz", "<f4"),
+            ("red", "u1"),
+            ("green", "u1"),
+            ("blue", "u1"),
+        ]
+    )
+    records = np.empty(points.shape[0], dtype=dtype)
+    records["x"] = points[:, 0]
+    records["y"] = points[:, 1]
+    records["z"] = points[:, 2]
+    records["nx"] = normals[:, 0]
+    records["ny"] = normals[:, 1]
+    records["nz"] = normals[:, 2]
+    records["red"] = colors[:, 0]
+    records["green"] = colors[:, 1]
+    records["blue"] = colors[:, 2]
+
+    with path.open("wb") as handle:
+        header = (
+            "ply\n"
+            "format binary_little_endian 1.0\n"
+            f"element vertex {points.shape[0]}\n"
+            "property float x\n"
+            "property float y\n"
+            "property float z\n"
+            "property float nx\n"
+            "property float ny\n"
+            "property float nz\n"
+            "property uchar red\n"
+            "property uchar green\n"
+            "property uchar blue\n"
+            "end_header\n"
+        )
+        handle.write(header.encode("ascii"))
+        handle.write(records.tobytes())
+
+
+def _as_w2c_3x4(matrix: np.ndarray) -> np.ndarray:
+    arr = np.asarray(matrix, dtype=np.float64)
+    if arr.shape == (3, 4):
+        return arr
+    if arr.shape == (4, 4):
+        return arr[:3, :]
+    raise PreviewFailure("LITEVGGT_INVALID_EXTRINSICS", f"invalid LiteVGGT extrinsic shape: {arr.shape}")
 
 
 def require_transformer_engine() -> None:

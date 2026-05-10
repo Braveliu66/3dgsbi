@@ -21,7 +21,7 @@
 | id | uuid | 项目 ID |
 | owner_id | uuid | 所属用户 |
 | name | varchar | 项目名称 |
-| input_type | varchar | `images`、`video`、`camera` |
+| input_type | varchar | `images`、`video`；`camera` 待新管线重新定义 |
 | status | varchar | 项目状态 |
 | cover_artifact_id | uuid | 封面或默认预览产物 |
 | error_message | text | 最近一次失败原因 |
@@ -196,9 +196,6 @@ users/{user_id}/projects/{project_id}/metrics/{task_id}.json
 | GET | `/api/projects/{project_id}/artifacts` | 获取项目产物列表 |
 | GET | `/api/artifacts/{artifact_id}/download-url` | 获取签名下载链接 |
 | GET | `/api/projects/{project_id}/viewer-config` | 获取 Viewer 加载配置 |
-| POST | `/api/camera/sessions` | 创建实时摄像头项目 |
-| POST | `/api/projects/{project_id}/camera/chunks` | 上传摄像头 MediaRecorder 分片并创建 camera preview task |
-| POST | `/api/projects/{project_id}/camera/finish` | 结束实时摄像头 session |
 
 ### 3.5 用户与反馈
 
@@ -257,7 +254,6 @@ GET /api/projects/{project_id}/events
 | `task_succeeded` | 任务成功 |
 | `task_failed` | 任务失败 |
 | `artifact_created` | 新产物已生成 |
-| `preview_segment_ready` | 新增量 SPZ 片段已生成 |
 | `resource_usage` | CPU、GPU、显存占用变化 |
 | `capture_suggestion` | 补拍建议或素材质量提示 |
 
@@ -326,7 +322,7 @@ Worker 返回结果：
 - 当前已实现的认证接口为 `POST /api/auth/register`、`POST /api/auth/login`、`POST /api/auth/logout`、`GET /api/me`，使用 JWT Bearer token。
 - 当前上传接口为 `POST /api/projects/{project_id}/media`，直接写入对象存储并记录真实文件大小；分片上传接口仍是后续项。
 - `POST /api/projects/{project_id}/tasks/preview` 只创建 task 并入 Redis 队列，不在 API 请求内运行算法。
-- `GET /api/projects/{project_id}/viewer-config` 存在真实 `preview_spz` artifact 时返回 `mode=single`；存在 `preview_spz_segment` artifact 时返回 `mode=progressive` 和 segment URL 列表；否则返回 unavailable。
+- `GET /api/projects/{project_id}/viewer-config` 存在真实 `preview_spz` artifact 时返回 `mode=single`；否则返回 unavailable。视频和实时视频加载语义待新管线重新定义。
 - `GET /api/algorithms` 为公开算法合规信息；`GET /api/admin/algorithms`、`GET /api/admin/tasks`、`GET /api/admin/workers`、`GET /api/admin/system/resources` 需要管理员角色。
 - artifact 下载优先使用 MinIO presigned URL；本地开发后端会发放 1 小时 artifact token 访问 `/api/artifacts/{artifact_id}/file`。
 
@@ -334,8 +330,7 @@ Worker 返回结果：
 
 - 管理员接口 `GET /api/admin/runtime/preflight` 返回 Python、CUDA、torch、GPU、算法仓库、权重、命令和 commit 检查结果。
 - 图片预览任务创建前要求至少 1 张图片；超过 800 张时任务 options 中记录采样上限。
-- 视频预览任务创建前要求已上传视频；video-worker 使用 LingBot-Map 按完整时长采样，少于配置最小帧数时标记失败且不创建 artifact。
-- 实时摄像头分片进入 `preview_camera_tasks`，camera-worker 使用 LingBot-Map streaming 处理，成功后创建 `preview_spz_segment` artifact，metadata 记录 `segment_index`、时间窗口、LOD 和估算 splat 数。
+- 视频预览任务和实时摄像头分片预览已清理，待新管线重新定义 API 与 artifact 语义。
 - `Task.options.input_frame_policy` 记录 `min_input_frames`、`max_input_frames`、`available_input_frames` 和 `selected_input_frames`。
 
 ## 8. 2026-05-07 Fine API Metrics

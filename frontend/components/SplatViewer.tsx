@@ -5,7 +5,6 @@ import { useEffect, useRef, useState } from "react";
 import type { Box3, Object3D, PerspectiveCamera, Vector3, WebGLRenderer } from "three";
 import type { OrbitControls as OrbitControlsType } from "three/examples/jsm/controls/OrbitControls.js";
 import { artifactUrl } from "@/lib/api";
-import type { ViewerSegment } from "@/lib/types";
 
 type ViewerState = "idle" | "loading" | "ready" | "error";
 type AxisView = "x-positive" | "x-negative" | "y-positive" | "y-negative" | "z-positive" | "z-negative";
@@ -57,7 +56,7 @@ const MAX_RENDER_SPLATS = readNumber(process.env.VIEWER_MAX_SPLATS, 5_000_000);
 const DEFAULT_FIT_RADIUS = 1;
 const FIT_PADDING = 1.35;
 
-export function SplatViewer({ modelUrl, segments }: { modelUrl?: string | null; segments?: ViewerSegment[] }) {
+export function SplatViewer({ modelUrl }: { modelUrl?: string | null }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewerApiRef = useRef<ViewerControlApi | null>(null);
   const [state, setState] = useState<ViewerState>("idle");
@@ -66,21 +65,9 @@ export function SplatViewer({ modelUrl, segments }: { modelUrl?: string | null; 
   const [fps, setFps] = useState(0);
   const [qualityIndex, setQualityIndex] = useState(1);
   const [splatCount, setSplatCount] = useState<number | null>(null);
-  const [activeSegment, setActiveSegment] = useState(0);
-  const segmentList = [...(segments ?? [])].sort((a, b) => a.segment_index - b.segment_index);
-  const segmentKey = segmentList.map((segment) => `${segment.artifact_id}:${segment.segment_index}`).join("|");
-  const hasSegments = segmentList.length > 0;
 
   useEffect(() => {
-    if (segmentList.length) setActiveSegment(segmentList.length - 1);
-  }, [segmentKey]);
-
-  useEffect(() => {
-    const urls = hasSegments
-      ? segmentList.slice(0, activeSegment + 1).map((segment) => segment.model_url)
-      : modelUrl
-        ? [modelUrl]
-        : [];
+    const urls = modelUrl ? [modelUrl] : [];
     if (!urls.length || !hostRef.current) {
       viewerApiRef.current = null;
       setViewerReady(false);
@@ -258,7 +245,7 @@ export function SplatViewer({ modelUrl, segments }: { modelUrl?: string | null; 
         animationFrame = requestAnimationFrame(render);
 
         setState("ready");
-        setMessage(hasSegments ? `Spark Viewer 已加载 ${urls.length} 个增量 SPZ 片段。` : "Spark Viewer 已加载真实 SPZ 产物。");
+        setMessage("Spark Viewer 已加载真实 SPZ 产物。");
       } catch (error) {
         cleanup?.();
         if (cancelled) return;
@@ -274,7 +261,7 @@ export function SplatViewer({ modelUrl, segments }: { modelUrl?: string | null; 
       setViewerReady(false);
       cleanup?.();
     };
-  }, [modelUrl, segmentKey, activeSegment, hasSegments]);
+  }, [modelUrl]);
 
   const quality = QUALITY_LEVELS[qualityIndex] ?? QUALITY_LEVELS[0];
   return (
@@ -301,19 +288,6 @@ export function SplatViewer({ modelUrl, segments }: { modelUrl?: string | null; 
           </button>
         </div>
       </div>
-      {hasSegments ? (
-        <div className="viewer-timeline">
-          <input
-            type="range"
-            min={0}
-            max={Math.max(segmentList.length - 1, 0)}
-            value={activeSegment}
-            onChange={(event) => setActiveSegment(Number(event.target.value))}
-            aria-label="预览时间线"
-          />
-          <span>{Math.round(((activeSegment + 1) / Math.max(segmentList.length, 1)) * 100)}%</span>
-        </div>
-      ) : null}
       <div className={`viewer-overlay ${state}`}>
         <span>{message}</span>
         <span className="viewer-stats">

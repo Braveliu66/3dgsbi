@@ -12,16 +12,11 @@ from app.preview.types import PreviewFailure
 
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff", ".heic", ".heif"}
-VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 VENDOR_ROOT = Path(__file__).resolve().parent / "vendor"
 
 
 def image_files(input_dir: Path) -> list[Path]:
     return sorted(path for path in input_dir.iterdir() if path.suffix.lower() in IMAGE_SUFFIXES)
-
-
-def video_files(input_dir: Path) -> list[Path]:
-    return sorted(path for path in input_dir.iterdir() if path.suffix.lower() in VIDEO_SUFFIXES)
 
 
 def require_file(path: Path, code: str, label: str) -> Path:

@@ -4,7 +4,6 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   Boxes,
-  Camera,
   ChevronDown,
   Cpu,
   FolderKanban,
@@ -23,7 +22,6 @@ import type { Task, User } from "@/lib/types";
 
 const nav = [
   { href: "/", label: "新建项目", icon: Home },
-  { href: "/camera", label: "实时视频", icon: Camera },
   { href: "/projects", label: "项目控制台", icon: FolderKanban }
 ];
 
@@ -238,7 +236,6 @@ function getRouteLabel(pathname: string): string {
   if (pathname.startsWith("/upload")) return "离线上传与预览";
   if (pathname.startsWith("/projects/")) return "项目详情";
   if (pathname.startsWith("/projects")) return "项目控制台";
-  if (pathname.startsWith("/camera")) return "实时视频";
   if (pathname.startsWith("/admin")) return "管理面板";
   if (pathname.startsWith("/feedback")) return "问题反馈";
   if (pathname.startsWith("/about")) return "算法合规";

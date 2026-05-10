@@ -48,19 +48,6 @@ ALGORITHMS: list[dict[str, Any]] = [
         "notes": "Bundled EDGS preview Gaussian optimizer; CUDA extensions are compiled in the unified worker image.",
     },
     {
-        "name": "LingBot-Map",
-        "repo_url": "https://github.com/robbyant/lingbot-map",
-        "license": "Apache-2.0",
-        "commit_hash_setting": "lingbot_repo_commit",
-        "local_path": VENDOR_ROOT / "lingbot",
-        "enabled": True,
-        "weight_paths": ["lingbot-map/lingbot-map-long.pt"],
-        "commands": {},
-        "source_type": "bundled",
-        "license_notice": "Apache-2.0; bundled key preview code from fixed upstream commit.",
-        "notes": "Bundled LingBot-Map video/streaming preview path.",
-    },
-    {
         "name": "Spark SPZ",
         "repo_url": "https://github.com/sparkjsdev/spark",
         "license": "MIT",
@@ -155,9 +142,7 @@ def seed_algorithm_registry(db: Session, settings: Settings | None = None) -> No
     db.commit()
 
 
-def normalize_preview_pipeline(value: str | None, input_type: str) -> str:
-    if input_type in {"video", "camera"}:
-        return "lingbot_spz"
+def normalize_preview_pipeline(value: str | None, _input_type: str) -> str:
     normalized = (value or "litevggt_edgs").strip().lower()
     aliases = {
         "edgs": "litevggt_edgs",
@@ -166,10 +151,6 @@ def normalize_preview_pipeline(value: str | None, input_type: str) -> str:
         "litevggt_spark": "litevggt_spz",
         "litevggt_spz": "litevggt_spz",
         "direct": "litevggt_spz",
-        "lingbot": "lingbot_spz",
-        "lingbot_spz": "lingbot_spz",
-        "lingbot_map": "lingbot_spz",
-        "lingbot_map_spark": "lingbot_spz",
     }
     return aliases.get(normalized, "litevggt_edgs")
 
@@ -199,10 +180,6 @@ def runtime_preflight(db: Session, settings: Settings | None = None) -> dict[str
                     weights_ready = False
             if not module_status.get("available", True):
                 issues.append(f"bundled module import failed: {module_status.get('error')}")
-            if item.name == "LingBot-Map":
-                flashinfer_status = import_check("flashinfer")
-                if not flashinfer_status.get("available"):
-                    issues.append(f"FlashInfer unavailable for default LingBot backend: {flashinfer_status.get('error')}")
             if item.name == "EDGS":
                 edgs_ext = extension_pair_status()
                 extensions_ready = bool(edgs_ext["available"] or preview_workers["available"])
@@ -254,7 +231,6 @@ def runtime_preflight(db: Session, settings: Settings | None = None) -> dict[str
         "transformer_engine": import_check("transformer_engine"),
         "edgs_cuda_extensions": {**extension_pair_status(), "worker_preview": preview_workers},
         "fine_runtime": {**fine_runtime_status(), "worker_fine": fine_workers},
-        "lingbot_runtime": {"flashinfer": import_check("flashinfer"), "default_backend": "flashinfer", "sdpa_fallback": False},
         "spz_converter": spark_converter_status(),
         "algorithms": algorithms,
         "errors": errors,
@@ -336,7 +312,6 @@ def bundled_module_status(name: str) -> dict[str, Any]:
         "EDGS": "app.preview.vendor.edgs_runtime",
         "MobileGS Fine (AMB3R-SfM + DeblurMLP + LM-RS)": "app.fine.runner",
         "Deblurring-3DGS GTnet": "app.fine.deblur_mlp",
-        "LingBot-Map": "app.preview.vendor.lingbot_runtime",
         "Spark SPZ": "app.preview.io.spz",
     }
     module = modules.get(name)

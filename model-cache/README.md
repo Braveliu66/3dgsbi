@@ -10,7 +10,6 @@ Expected paths:
 
 - `litevggt/te_dict.pt`
 - `amb3r/amb3r.pt` (manual cache only; no automatic download)
-- `lingbot-map/lingbot-map-long.pt`
 - `roma/roma_indoor.pth`
 - `roma/dinov2_vitl14_pretrain.pth`
 - `torch/hub/checkpoints/vgg16-397923af.pth`

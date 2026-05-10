@@ -29,7 +29,7 @@ export interface Project {
   id: string;
   owner_id: string;
   name: string;
-  input_type: "images" | "video" | "camera";
+  input_type: "images" | "video";
   status: ProjectStatus;
   tags: string[];
   total_size_bytes: number;
@@ -95,18 +95,6 @@ export interface Artifact {
   created_at: string;
 }
 
-export interface ViewerSegment {
-  artifact_id: string;
-  model_url: string;
-  format: "spz" | "rad";
-  segment_index: number;
-  segment_start_seconds?: number | null;
-  segment_end_seconds?: number | null;
-  lod?: number | null;
-  estimated_splats?: number | null;
-  file_size?: number | null;
-}
-
 export interface ViewerLod {
   artifact_id: string;
   model_url: string;
@@ -119,13 +107,11 @@ export interface ViewerLod {
 
 export interface ViewerConfig {
   status: "ready" | "unavailable";
-  mode?: "single" | "progressive";
+  mode?: "single";
   source?: "final" | "preview";
   artifact_id?: string;
   model_url?: string | null;
-  segments?: ViewerSegment[];
   lods?: ViewerLod[];
-  progressive?: boolean;
   format?: "spz" | "rad";
   message?: string;
   stale?: boolean;
@@ -174,7 +160,6 @@ export interface RuntimePreflight {
   transformer_engine: Record<string, unknown>;
   edgs_cuda_extensions?: Record<string, unknown>;
   fine_runtime?: Record<string, unknown>;
-  lingbot_runtime?: Record<string, unknown>;
   spz_converter?: Record<string, unknown>;
   algorithms: RuntimePreflightAlgorithm[];
   errors: string[];

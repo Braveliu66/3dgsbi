@@ -3,7 +3,7 @@
 ## 已完成
 
 - FastAPI、Next.js、PostgreSQL、Redis、本地对象存储、preview worker、fine worker 的单机 Docker Compose 拓扑已建立。
-- 极速预览继续使用真实 LiteVGGT、EDGS、LingBot-Map 和 Spark SPZ 路径；未生成真实非空产物时任务不会伪造成功。
+- 极速预览继续使用真实 LiteVGGT、EDGS 和 Spark SPZ 路径；视频/实时视频极速预览管线已清理，待重写。
 - 精细重建默认管线已切换为 `mobilegs_lmrs`，不再调用 EDGS preview runtime，也不再要求 `romatch`、RoMA 权重或 DINOv2 权重。
 - `worker-fine` 权重检查已接入 `model-cache/amb3r/amb3r.pt` 自动下载；本地已有文件时优先复用。
 - 精细重建入口现在按 MobileGS 顺序执行：JPG/PNG 归一化、模糊分析和低质帧过滤、AMB3R-SfM 生成无 EXIF 相机参数依赖的 COLMAP 兼容 `sparse/0`、DeblurMLP-MobileGS 训练、可选 LM-RS、Spark SPZ 转码。预览链路仍使用 LiteVGGT。

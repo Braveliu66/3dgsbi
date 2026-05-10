@@ -40,11 +40,10 @@ flowchart LR
 
 | 模块 | 职责 |
 | --- | --- |
-| 首页 / 新建项目 | 默认入口，提供上传图片/视频和实时视频两种创建方式，显示系统资源和训练中项目 |
+| 首页 / 新建项目 | 默认入口，提供图片项目创建方式，显示系统资源和训练中项目 |
 | 项目列表 | 展示项目、状态、创建时间、主要产物 |
 | 项目详情 | 展示上传素材、任务进度、预览模型、导出入口 |
 | 完整素材上传页 | 支持图片多选、视频上传、分片上传、补传、删除素材、缩略图大图预览和素材统计 |
-| 实时视频页 | 左侧摄像头画面，右侧实时粗重建 Viewer，结束后支持重拍或精细重建 |
 | Viewer | 使用 Spark 2.0 加载 SPZ 或 RAD 模型，支持 LOD |
 | 任务进度 | 通过 WebSocket 或 SSE 接收任务状态和进度 |
 | 导出面板 | 发起 Mesh 导出，展示导出文件和下载链接 |
@@ -101,11 +100,11 @@ flowchart LR
 | 场景 | 管线 |
 | --- | --- |
 | 图片极速预览 | 默认 LiteVGGT → EDGS → Spark-SPZ；可选 LiteVGGT → Spark-SPZ 粗预览 |
-| 视频极速预览 | LingBot-Map → Spark-SPZ |
-| 实时摄像头 | LingBot-Map streaming → 增量 `preview_segment_*.spz` |
+| 视频极速预览 | 待重写 |
+| 实时摄像头 | 待重写 |
 | 精细重建 | 默认 `mobilegs_lmrs`：AMB3R-SfM 生成无 EXIF 依赖的 COLMAP 兼容 SfM + DeblurMLP-MobileGS + FastGS-style VCD/VCP + patched LM-RS Compact Box rasterizer + 可选 LM-RS matrix-free Phase 2 + Spark-SPZ；pycolmap 仅显式诊断，fine 不依赖 EDGS/RoMA/romatch；预览仍使用 LiteVGGT |
 | 稀疏视角 | FreeSplatter 初始化 → 精细合成引擎 |
-| 长视频精细重建 | 可选 LingBot-Map + MASt3R + Pi3 → 精细合成引擎 |
+| 长视频精细重建 | 待重写 |
 | Mesh 导出 | MeshSplatting → `.ply` / `.obj` / `.glb` |
 | LOD 生成 |
 
@@ -140,9 +139,7 @@ viewer          Spark 2.0
 
 ## 9. 渐进式渲染与 LOD 加载
 
-- Worker 可为视频或摄像头任务输出多个 `preview_spz_segment` artifact；metadata 记录 `segment_index`、时间窗口、LOD 和估算 splat 数。
-- `GET /api/projects/{project_id}/viewer-config` 返回 `mode=single` 或 `mode=progressive`；progressive 模式返回按时间排序的 segment URL 列表。
-- Viewer 通过 SSE 监听 `preview_segment_ready`，收到事件后刷新 viewer-config，只加载新增片段，不等待完整 `preview.spz`。
+- `GET /api/projects/{project_id}/viewer-config` 当前返回单个预览或最终模型；视频/实时视频渐进加载待新管线重新定义。
 - Viewer 以 800 万 Gaussians 为默认预算，根据 FPS、网络状况和时间线位置自动降低远处/旧片段的 LOD 质量，目标保持 90 FPS。
 
 ## 2026-05-07 Fine Pipeline Update

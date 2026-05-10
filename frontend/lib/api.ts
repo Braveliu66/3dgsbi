@@ -486,26 +486,6 @@ export const api = {
   deleteProject: (id: string) => request<{ deleted: boolean }>(`/api/projects/${id}`, { method: "DELETE" }),
   createProject: (payload: { name: string; input_type: Project["input_type"]; tags: string[] }) =>
     request<Project>("/api/projects", { method: "POST", body: JSON.stringify(payload) }),
-  createCameraSession: (payload: { name?: string; tags?: string[] } = {}) =>
-    request<Project>("/api/camera/sessions", { method: "POST", body: JSON.stringify(payload) }),
-  uploadCameraChunk: (
-    projectId: string,
-    file: Blob,
-    params: { segment_index: number; segment_start_seconds: number; segment_end_seconds?: number | null }
-  ) => {
-    const body = new FormData();
-    body.append("file", file, `camera-segment-${String(params.segment_index).padStart(4, "0")}.webm`);
-    const search = new URLSearchParams({
-      segment_index: String(params.segment_index),
-      segment_start_seconds: String(params.segment_start_seconds)
-    });
-    if (params.segment_end_seconds !== undefined && params.segment_end_seconds !== null) {
-      search.set("segment_end_seconds", String(params.segment_end_seconds));
-    }
-    return request<{ media: MediaAsset; task: Task }>(`/api/projects/${projectId}/camera/chunks?${search.toString()}`, { method: "POST", body });
-  },
-  finishCameraSession: (projectId: string) =>
-    request<Project>(`/api/projects/${projectId}/camera/finish`, { method: "POST" }),
   uploadMedia: (projectId: string, file: File, onProgress?: TransferProgressCallback) => uploadMediaInChunks(projectId, file, onProgress),
   deleteMedia: (projectId: string, mediaId: string) =>
     request<{ deleted: boolean; source_version?: number }>(`/api/projects/${projectId}/media/${mediaId}`, { method: "DELETE" }),

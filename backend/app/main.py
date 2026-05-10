@@ -556,7 +556,7 @@ def list_projects(user: User = Depends(get_current_user), db: Session = Depends(
 
 @app.post("/api/projects")
 def create_project(payload: ProjectCreatePayload, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
-    if payload.input_type not in {"images", "video", "camera"}:
+    if payload.input_type not in {"images", "video"}:
         raise HTTPException(status_code=400, detail="Unsupported input_type")
     project = Project(
         owner_id=user.id,
@@ -565,16 +565,6 @@ def create_project(payload: ProjectCreatePayload, user: User = Depends(get_curre
         tags=payload.tags,
         status="CREATED",
     )
-    db.add(project)
-    db.commit()
-    db.refresh(project)
-    return project_dict(project, include_children=True)
-
-
-@app.post("/api/camera/sessions")
-def create_camera_session(payload: dict[str, Any] | None = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
-    payload = payload or {}
-    project = Project(owner_id=user.id, name=payload.get("name") or "Realtime camera", input_type="camera", tags=payload.get("tags") or [])
     db.add(project)
     db.commit()
     db.refresh(project)
@@ -862,8 +852,8 @@ def create_preview_task(
         raise HTTPException(status_code=400, detail="请先上传真实素材")
     if project.input_type == "images" and not any(item.kind == "image" for item in project.media):
         raise HTTPException(status_code=400, detail="图片预览至少需要 1 张图片")
-    if project.input_type == "video" and not any(item.kind == "video" for item in project.media):
-        raise HTTPException(status_code=400, detail="视频预览需要上传视频文件")
+    if project.input_type != "images":
+        raise HTTPException(status_code=400, detail="Video preview pipeline is unavailable")
     pipeline = normalize_preview_pipeline(str((payload.options or {}).get("preview_pipeline") or ""), project.input_type)
     task = Task(
         project_id=project.id,
@@ -1105,48 +1095,6 @@ def stored_file_response(uri: str, *, filename: str | None = None, media_type: s
     return FileResponse(storage.local_path(uri), filename=filename if attachment else None, media_type=media_type)
 
 
-def camera_preview_segments(project: Project, artifacts: list[Artifact]) -> list[dict[str, Any]]:
-    valid_segments = set()
-    for media in project.media:
-        segment_index = metadata_int((media.quality_flags or {}).get("segment_index"))
-        if segment_index is not None:
-            valid_segments.add(segment_index)
-    latest: dict[int, Artifact] = {}
-    for artifact in artifacts:
-        metadata = artifact.metadata_json or {}
-        segment_index = metadata_int(metadata.get("segment_index"))
-        if segment_index is None or artifact.source_version > project.source_version:
-            continue
-        if valid_segments and segment_index not in valid_segments:
-            continue
-        previous = latest.get(segment_index)
-        if previous is None or (artifact.source_version, artifact.created_at) > (previous.source_version, previous.created_at):
-            latest[segment_index] = artifact
-    segments = []
-    for segment_index, artifact in sorted(latest.items()):
-        metadata = artifact.metadata_json or {}
-        segments.append(
-            {
-                "artifact_id": artifact.id,
-                "model_url": artifact_url(artifact),
-                "format": "spz",
-                "segment_index": segment_index,
-                "segment_start_seconds": metadata.get("segment_start_seconds"),
-                "segment_end_seconds": metadata.get("segment_end_seconds"),
-                "estimated_splats": metadata.get("splat_count"),
-                "file_size": artifact.file_size,
-            }
-        )
-    return segments
-
-
-def metadata_int(value: Any) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
 @app.get("/api/projects/{project_id}/viewer-config")
 def viewer_config(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
     project = owned_project(db, project_id, user, include_children=True)
@@ -1161,20 +1109,8 @@ def viewer_config(project_id: str, user: User = Depends(get_current_user), db: S
             "artifact_id": artifact.id,
             "model_url": artifact_url(artifact),
             "format": "rad" if artifact.kind == "lod_rad" or artifact.file_name.lower().endswith(".rad") else "spz",
-            "progressive": False,
         }
     preview_artifacts = [item for item in project.artifacts if item.kind == "preview_spz"]
-    if project.input_type == "camera":
-        segments = camera_preview_segments(project, preview_artifacts)
-        if segments:
-            return {
-                "status": "ready",
-                "mode": "progressive",
-                "source": "preview",
-                "segments": segments,
-                "format": "spz",
-                "progressive": True,
-            }
     fresh = [item for item in preview_artifacts if item.source_version == project.source_version]
     if fresh:
         artifact = sorted(fresh, key=lambda item: item.created_at, reverse=True)[0]
@@ -1185,7 +1121,6 @@ def viewer_config(project_id: str, user: User = Depends(get_current_user), db: S
             "artifact_id": artifact.id,
             "model_url": artifact_url(artifact),
             "format": "spz",
-            "progressive": False,
         }
     if final_artifacts:
         return {
@@ -1294,67 +1229,6 @@ async def project_events(project_id: str, user: User = Depends(get_current_user)
             await asyncio.sleep(1)
 
     return StreamingResponse(stream(), media_type="text/event-stream")
-
-
-@app.post("/api/projects/{project_id}/camera/chunks")
-async def camera_chunk(
-    project_id: str,
-    file: UploadFile = File(...),
-    segment_index: int = Query(...),
-    segment_start_seconds: float = Query(...),
-    segment_end_seconds: float | None = Query(default=None),
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> dict[str, Any]:
-    project = owned_project(db, project_id, user)
-    media_id = new_id()
-    file_name = safe_filename(file.filename or "camera.webm")
-    key = storage_key("users", project.owner_id, "projects", project.id, "raw", "video", f"camera-{segment_index:04d}.webm")
-    uri, size = await storage.save_upload(file, key)
-    media = MediaAsset(project_id=project.id, id=media_id, kind="video", object_uri=uri, file_name=file_name, file_size=size)
-    media.quality_flags = {"segment_index": segment_index, "segment_start_seconds": segment_start_seconds, "segment_end_seconds": segment_end_seconds}
-    project.total_size_bytes += size
-    project.source_version += 1
-    media.source_version = project.source_version
-    thumb_uri, width, height, duration = create_video_thumbnail(uri, project, media.id)
-    media.thumbnail_uri = thumb_uri
-    media.width = width
-    media.height = height
-    media.duration_seconds = duration
-    if thumb_uri and not project.preview_image_uri:
-        project.preview_image_uri = media.thumbnail_uri
-    project.updated_at = utc_now()
-    task = Task(
-        project_id=project.id,
-        type="preview",
-        status="queued",
-        priority=95,
-        current_stage="camera_segment_queued",
-        options={
-            "preview_pipeline": "lingbot_spz",
-            "segment_index": segment_index,
-            "source_version": project.source_version,
-            "fps": 5,
-            "lingbot_fps": 5,
-            "lingbot_max_frames": 10,
-        },
-    )
-    db.add(media)
-    db.add(task)
-    db.commit()
-    try:
-        enqueue_preview_task(task.id)
-    except Exception:
-        pass
-    return {"media": media_dict(media), "task": task_dict(task, project.name)}
-
-
-@app.post("/api/projects/{project_id}/camera/finish")
-def camera_finish(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
-    project = owned_project(db, project_id, user, include_children=True)
-    project.updated_at = utc_now()
-    db.commit()
-    return project_dict(project, include_children=True)
 
 
 def sse(event: str, payload: dict[str, Any]) -> str:

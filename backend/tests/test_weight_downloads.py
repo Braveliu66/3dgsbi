@@ -140,13 +140,9 @@ class WeightDownloadTests(unittest.TestCase):
         self.assertEqual([item.relative_path for item in weights_for_pipeline("litevggt_spz")], ["litevggt/te_dict.pt"])
         self.assertEqual(
             [item.relative_path for item in weights_for_pipeline("litevggt_edgs")],
-            ["roma/roma_indoor.pth", "roma/dinov2_vitl14_pretrain.pth"],
+            ["litevggt/te_dict.pt", "roma/roma_indoor.pth", "roma/dinov2_vitl14_pretrain.pth"],
         )
         self.assertEqual([item.relative_path for item in weights_for_pipeline("mobilegs_lmrs")], ["amb3r/amb3r.pt"])
-        self.assertEqual(
-            [item.relative_path for item in weights_for_pipeline("lingbot_spz")],
-            ["lingbot-map/lingbot-map-long.pt"],
-        )
 
 
 @contextlib.contextmanager

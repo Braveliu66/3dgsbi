@@ -44,7 +44,6 @@ export function taskTypeLabel(type?: Task["type"] | null): string {
 export function inputTypeLabel(type?: Project["input_type"] | null): string {
   if (type === "images") return "图片序列";
   if (type === "video") return "视频";
-  if (type === "camera") return "实时相机";
   return "-";
 }
 
