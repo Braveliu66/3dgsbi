@@ -206,3 +206,14 @@
 - ARTDECO/MASt3R assets are cached under `model-cache/mast3r/`. Downloads are task-specific and retain `.part`, `.lock`, Range resume, and skip-if-existing behavior.
 - The worker image keeps the existing PyTorch/CUDA/cuDNN stack. It adds `gsplat`, `safetensors`, `pypose`, and `natsort`, compiles ARTDECO `mast3r_slam_backends`, and patches Python-visible `adamUpdate/adamUpdateBasic` symbols onto the existing rasterizer instead of installing a second rasterizer.
 - Explicit exclusions remain: no Open3D, xFormers, Gradio, pyrealsense2, GeoCalib, full Depth-Anything environment, second conda, or duplicate torch/CUDA stack.
+
+## 9. 2026-05-10 Image Fine EDGS/RoMA Implementation Update
+
+- `mobilegs_lmrs` now keeps AMB3R-SfM as the frontend and adds local EDGS/RoMA dense-correspondence Gaussian initialization before `training_setup`.
+- Only the key EDGS initialization runtime is present under `backend/app/fine/edgs_runtime/`; the full EDGS repo, UI, Gradio app, training scripts, and broad config tree are intentionally excluded.
+- `backend/app/fine/edgs_init.py` provides `EDGSDenseInit`, `make_edgs_cfg`, and RoMA weight helpers. Missing runtime dependencies fail with `EDGS_RUNTIME_UNAVAILABLE`; missing weights fail explicitly.
+- Default EDGS settings are `matches_per_ref=15000`, `nns_per_ref=3`, `num_refs=len(train cameras)`, and `roma_model=outdoor`.
+- EDGS mode disables MobileGS densification by setting `densify_until_iter=0` and leaves final prune behavior.
+- DeblurMLP now has a default `fine_deblur_warmup_iters=3000`; GTnet activates after warmup and xyz learning rate is multiplied by `fine_deblur_xyz_lr_scale=0.1`.
+- Worker dependencies include `romatch` and `scikit-learn`. Docker downloads RoMA/DINOv2 assets through `https://hf-mirror.com` into `model-cache/roma/`.
+- Static tests cover mirror usage, no full EDGS clone, EDGS-before-`training_setup`, EDGS densification disable, and Deblur warmup configuration. Local Python smoke tests are not required for this update.

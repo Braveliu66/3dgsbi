@@ -68,7 +68,15 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
     scene_result = build_scene(ctx, train_input_dir, scene_dir, colmap_features, colmap_max_size, colmap_threads)
     if scene_result.backend == "amb3r_sfm_colmap_no_exif":
         scene_result.metrics.update(assess_sfm_scene_quality(scene_result.scene_dir, prefix="amb3r").metrics)
-    scene_result.metrics.update(compensate_sparse_point_cloud(scene_result.scene_dir, ctx.options).metrics)
+    if read_bool(ctx.options.get("fine_edgs_enabled"), True):
+        scene_result.metrics.update(
+            {
+                "sparse_compensation_enabled": False,
+                "sparse_compensation_reason": "disabled_by_edgs",
+            }
+        )
+    else:
+        scene_result.metrics.update(compensate_sparse_point_cloud(scene_result.scene_dir, ctx.options).metrics)
 
     ctx_progress(ctx, "fine_mobilegs_train_start", 42, f"training MobileGS with {scene_result.backend} initialization")
     from app.fine.mobilegs_trainer import train_mobile_3dgs
@@ -216,6 +224,17 @@ def deblur_mlp_enabled_by_default(blur_mode: str, options: dict[str, Any]) -> bo
     if value in {"1", "true", "yes", "on"}:
         return blur_mode != "sharp"
     return blur_mode in {"motion", "defocus", "mixed"}
+
+
+def read_bool(value: Any, fallback: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return fallback
 
 
 def build_lod_rad_if_available(ctx: FineContext) -> Path | None:

@@ -10,6 +10,7 @@ from typing import Callable, Any
 import torch
 
 from app.fine.deblur_mlp import attach_deblur_mlp_optimizer, build_deblur_mlp_state, render_with_deblur_mlp
+from app.fine.edgs_init import EDGSDenseInit, make_edgs_cfg
 from app.fine.fastgs_policy import FastGSPolicy
 from app.fine.local_3dgs.cg_optimizer import LocalCGOptimizer
 from app.fine.local_3dgs.cg_state import BatchState, CGSolverState
@@ -75,10 +76,16 @@ def train_mobile_3dgs(
         )
         gaussians = GaussianModel(3, "default")
         scene = Scene(dataset, gaussians, shuffle=True)
+        edgs_metrics = initialize_edgs_if_enabled(gaussians, scene, opt, options)
         gaussians.training_setup(opt)
         background = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32, device="cuda")
         deblur_state = build_deblur_mlp_state(blur_mode, options, device=background.device)
         attach_deblur_mlp_optimizer(gaussians, deblur_state)
+        deblur_warmup_iters = read_int(options.get("fine_deblur_warmup_iters"), 3000, minimum=0, maximum=iterations)
+        deblur_xyz_lr_scale = read_float(options.get("fine_deblur_xyz_lr_scale"), 0.1, minimum=0.001, maximum=1.0)
+        deblur_activated = False
+        if deblur_state.enabled:
+            deblur_state.model.requires_grad_(False)
         cameras = scene.getTrainCameras().copy()
         if not cameras:
             raise FineFailure("FINE_CAMERA_LOAD_FAILED", "3DGS scene contains no train cameras")
@@ -99,8 +106,8 @@ def train_mobile_3dgs(
         def standard_render(viewpoint, model, pipeline, bg, **render_options):
             return normalize_render_pkg(render_gaussians(viewpoint, model, pipeline, bg, **render_options), int(model.get_xyz.shape[0]))
 
-        def training_render(viewpoint, model, pipeline, bg, **render_options):
-            if deblur_state.enabled:
+        def training_render(viewpoint, model, pipeline, bg, *, use_deblur: bool = True, **render_options):
+            if deblur_state.enabled and use_deblur:
                 return normalize_render_pkg(render_with_deblur_mlp(viewpoint, model, pipeline, bg, deblur_state), int(model.get_xyz.shape[0]))
             return standard_render(viewpoint, model, pipeline, bg, **render_options)
 
@@ -112,8 +119,14 @@ def train_mobile_3dgs(
 
         for iteration in range(1, iterations + 1):
             in_lm_phase = bool(lm_status["active"] and iteration >= lm_start_iter)
+            deblur_active = bool(deblur_state.enabled and iteration > deblur_warmup_iters)
             if not in_lm_phase:
                 gaussians.update_learning_rate(iteration)
+            if deblur_active and not deblur_activated:
+                deblur_state.model.requires_grad_(True)
+                deblur_activated = True
+            if deblur_active:
+                scale_xyz_learning_rate(gaussians, deblur_xyz_lr_scale)
             if iteration % 1000 == 0:
                 gaussians.oneupSHdegree()
             if in_lm_phase:
@@ -151,7 +164,7 @@ def train_mobile_3dgs(
             viewpoint = train_stack.pop(random.randrange(len(train_stack)))
             gt_image = viewpoint.original_image.to("cuda")
 
-            render_pkg = training_render(viewpoint, gaussians, pipe, background)
+            render_pkg = training_render(viewpoint, gaussians, pipe, background, use_deblur=deblur_active)
             image = render_pkg["render"]
             l1_value = l1_loss(image, gt_image)
             ssim_value = 1.0 - ssim(image, gt_image)
@@ -180,7 +193,7 @@ def train_mobile_3dgs(
                             gaussians=gaussians,
                             pipe=pipe,
                             background=background,
-                            render_fn=training_render if deblur_state.enabled else standard_render,
+                            render_fn=training_render if deblur_active else standard_render,
                             ssim_fn=ssim,
                         )
                         changed = policy.apply_fastgs_densify_and_prune(
@@ -201,7 +214,7 @@ def train_mobile_3dgs(
                         gaussians=gaussians,
                         pipe=pipe,
                         background=background,
-                        render_fn=training_render if deblur_state.enabled else standard_render,
+                        render_fn=training_render if deblur_activated else standard_render,
                         ssim_fn=ssim,
                     )
                     policy.apply_final_prune(gaussians)
@@ -217,7 +230,7 @@ def train_mobile_3dgs(
                 gaussians=gaussians,
                 pipe=pipe,
                 background=background,
-                render_fn=training_render if deblur_state.enabled else standard_render,
+                render_fn=training_render if deblur_activated else standard_render,
                 ssim_fn=ssim,
             )
             policy.apply_final_prune(gaussians)
@@ -241,7 +254,11 @@ def train_mobile_3dgs(
                 "last_ssim_loss": last_ssim,
                 "ema_loss": ema_loss,
                 "deblur_mode": blur_mode,
+                "deblur_warmup_iters": deblur_warmup_iters,
+                "deblur_xyz_lr_scale": deblur_xyz_lr_scale,
+                "deblur_activated_after_warmup": deblur_activated,
                 **deblur_state.metrics(),
+                **edgs_metrics,
                 "lm_optimizer": lm_status,
                 "lmrs_phase_iterations": lm_iterations,
                 "lmrs_phase_elapsed_seconds": round(lm_elapsed, 3),
@@ -287,6 +304,55 @@ def build_optimization_options(iterations: int, options: dict[str, Any]) -> Simp
         random_background=False,
         optimizer_type=str(options.get("fine_optimizer_type") or "default"),
     )
+
+
+def initialize_edgs_if_enabled(gaussians: Any, scene: Any, opt: SimpleNamespace, options: dict[str, Any]) -> dict[str, Any]:
+    if not read_bool(options.get("fine_edgs_enabled"), True):
+        return {
+            "edgs_enabled": False,
+            "densification_disabled_by_edgs": False,
+        }
+
+    cfg = make_edgs_cfg(
+        matches_per_ref=read_int(options.get("fine_edgs_matches_per_ref"), 15_000, minimum=1_000, maximum=50_000),
+        nns_per_ref=read_int(options.get("fine_edgs_nns_per_ref"), 3, minimum=1, maximum=8),
+        num_refs=read_optional_int(options.get("fine_edgs_num_refs")),
+        scene=scene,
+        roma_model=str(options.get("fine_edgs_roma_model") or "outdoor"),
+        max_points=read_int(options.get("fine_edgs_max_points"), 500_000, minimum=10_000, maximum=2_000_000),
+        reprojection_error=read_float(options.get("fine_edgs_reprojection_error"), 4.0, minimum=0.5, maximum=32.0),
+    )
+    before = int(gaussians.get_xyz.shape[0])
+    edgs = EDGSDenseInit(device="cuda", roma_model_name=cfg.roma_model)
+    edgs.initialize(gaussians, scene, cfg)
+    opt.densify_until_iter = 0
+    return {
+        **edgs.last_metrics,
+        "edgs_sparse_gaussians_before": before,
+        "densification_disabled_by_edgs": True,
+    }
+
+
+def read_optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized in {"", "auto", "none"}:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def scale_xyz_learning_rate(gaussians: Any, multiplier: float) -> None:
+    optimizer = getattr(gaussians, "optimizer", None)
+    if optimizer is None:
+        return
+    for group in optimizer.param_groups:
+        if group.get("name") == "xyz":
+            group["lr"] *= multiplier
+            return
 
 
 def resolve_local_lm_status(

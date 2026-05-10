@@ -32,12 +32,13 @@ def import_fine_runtime():
 
 
 class FineRuntimeTests(unittest.TestCase):
-    def test_fine_runtime_does_not_require_romatch(self) -> None:
+    def test_fine_runtime_registers_amb3r_edgs_runtime(self) -> None:
         algorithms_source = (BACKEND_ROOT / "app" / "algorithms.py").read_text(encoding="utf-8")
         fine_status_block = algorithms_source.split("def fine_runtime_status", 1)[1].split("def ", 1)[0]
 
-        self.assertNotIn("romatch", fine_status_block)
         self.assertIn("amb3r", fine_status_block)
+        self.assertIn("romatch", fine_status_block)
+        self.assertIn("sklearn", fine_status_block)
         self.assertNotIn("transformer_engine", fine_status_block)
 
     def test_trainer_uses_local_runtime_not_lmrs_repo_training(self) -> None:
@@ -77,7 +78,7 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("fastgs_accumulate_metrics", metric_patch)
         self.assertIn("MOBILEGS_FASTGS_METRIC", metric_patch)
         dockerfile = (BACKEND_ROOT.parent / "worker" / "Dockerfile").read_text(encoding="utf-8")
-        self.assertIn("get_JTv", dockerfile)
+        self.assertIn("get_JTv", metric_patch)
         self.assertIn("fastgs_accumulate_metrics", dockerfile)
         self.assertIn("fastgs-cuda-metric-accumulation.patch", dockerfile)
         self.assertIn("retry_git", dockerfile)
@@ -116,6 +117,8 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertTrue((fine_root / "option_utils.py").exists())
         self.assertTrue((fine_root / "amb3r_sfm.py").exists())
         self.assertTrue((fine_root / "amb3r_runtime").exists())
+        self.assertTrue((fine_root / "edgs_init.py").exists())
+        self.assertTrue((fine_root / "edgs_runtime" / "corr_init.py").exists())
 
     def test_compose_uses_one_worker_image(self) -> None:
         compose_source = (BACKEND_ROOT.parent / "docker-compose.yml").read_text(encoding="utf-8")
@@ -505,6 +508,25 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("position_delta", deblur_source)
         self.assertIn("render_with_deblur_mlp", trainer_source)
         self.assertIn("fine_deblur_min_clamp", deblur_source)
+        self.assertIn("fine_deblur_warmup_iters", trainer_source)
+        self.assertIn("scale_xyz_learning_rate", trainer_source)
+
+    def test_edgs_initializes_before_training_setup_and_disables_densification(self) -> None:
+        trainer_source = (BACKEND_ROOT / "app" / "fine" / "mobilegs_trainer.py").read_text(encoding="utf-8")
+        runner_source = (BACKEND_ROOT / "app" / "fine" / "runner.py").read_text(encoding="utf-8")
+        edgs_source = (BACKEND_ROOT / "app" / "fine" / "edgs_init.py").read_text(encoding="utf-8")
+        corr_source = (BACKEND_ROOT / "app" / "fine" / "edgs_runtime" / "corr_init.py").read_text(encoding="utf-8")
+
+        self.assertLess(trainer_source.index("initialize_edgs_if_enabled"), trainer_source.index("gaussians.training_setup(opt)"))
+        self.assertIn("fine_edgs_enabled", trainer_source)
+        self.assertIn("matches_per_ref=read_int(options.get(\"fine_edgs_matches_per_ref\")", trainer_source)
+        self.assertIn("opt.densify_until_iter = 0", trainer_source)
+        self.assertIn("densification_disabled_by_edgs", trainer_source)
+        self.assertIn("disabled_by_edgs", runner_source)
+        self.assertIn("EDGS_RUNTIME_UNAVAILABLE", edgs_source)
+        self.assertIn("init_gaussians_with_corr", corr_source)
+        self.assertIn("roma.match", corr_source)
+        self.assertNotIn("gradio", corr_source.lower())
 
     def test_deblur_auto_controls_lmrs_default(self) -> None:
         *_, deblur_mlp_enabled_by_default, _ = import_fine_runtime()
@@ -527,6 +549,13 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("pycolmap==3.12.6", dockerfile)
         self.assertIn("spconv-cu118==2.3.8", dockerfile)
         self.assertIn("torch-scatter==2.1.2", dockerfile)
+        self.assertIn("romatch==0.1.2", requirements)
+        self.assertIn("scikit-learn==1.6.1", requirements)
+        self.assertIn("hf_endpoint", dockerfile)
+        self.assertIn("https://hf-mirror.com", dockerfile)
+        self.assertIn("/model-cache/roma/roma_outdoor.pth", dockerfile)
+        self.assertIn("/model-cache/roma/dinov2_vitl14_pretrain.pth", dockerfile)
+        self.assertNotIn("compvis/edgs", dockerfile)
         constraints = (worker_root / "constraints.txt").read_text(encoding="utf-8").lower()
         self.assertIn("torch==2.8.0", constraints)
         self.assertIn("torchvision==0.23.0", constraints)
@@ -540,7 +569,6 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("safetensors==0.7.0", requirements)
         self.assertIn("pypose==0.7.3", requirements)
         self.assertIn("natsort==8.4.0", requirements)
-        self.assertIn("import app.fine.amb3r_sfm", dockerfile)
         self.assertIn("mkdir -p /model-cache/amb3r", dockerfile)
         self.assertIn("/model-cache/speed3r_pi3", dockerfile)
         self.assertIn("/model-cache/mast3r", dockerfile)

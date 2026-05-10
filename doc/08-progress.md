@@ -25,4 +25,14 @@
 ## 下一步
 
 - 在真实 GPU 环境启动统一 worker，确认 patched LM-RS rasterizer 的 `get_JTv/get_Diag/get_JTJv` 和 `MOBILEGS_COMPACT_BOX` smoke check 通过。
-- 确认 `model-cache/amb3r/amb3r.pt` 自动下载或手动预置完成后，用 3 张和 8 张以上 JPG/PNG 手机图像分别验证 AMB3R-SfM、DeblurMLP 训练、`final.ply`、`final_web.spz` 和 `metrics.json`；同时确认预览 LiteVGGT 任务仍可运行。
+- 确认 `model-cache/amb3r/amb3r.pt`、`model-cache/roma/roma_outdoor.pth`、`model-cache/roma/roma_indoor.pth` 和 `model-cache/roma/dinov2_vitl14_pretrain.pth` 自动下载或手动预置完成后，用 3 张和 8 张以上 JPG/PNG 手机图像分别验证 AMB3R-SfM、EDGS/RoMA 初始化、DeblurMLP 训练、`final.ply`、`final_web.spz` 和 `metrics.json`；同时确认预览 LiteVGGT 任务仍可运行。
+
+## 2026-05-10 Image Fine EDGS/RoMA Progress
+
+- Added the local EDGS/RoMA initialization boundary: `backend/app/fine/edgs_init.py` wraps the minimal runtime in `backend/app/fine/edgs_runtime/`.
+- The implementation keeps AMB3R-SfM as the frontend and does not vendor the full EDGS repository, EDGS UI, Gradio app, original training scripts, or broad config tree.
+- EDGS is enabled by default with `matches_per_ref=15000`, `nns_per_ref=3`, automatic `num_refs`, and `roma_model=outdoor`; `fine_edgs_enabled=false` keeps the AMB3R sparse path.
+- MobileGS now runs EDGS initialization before `training_setup` and disables densification in EDGS mode.
+- DeblurMLP warmup defaults to 3000 iterations, then activates GTnet and applies xyz lr scale `0.1`.
+- Docker now installs `romatch` and `scikit-learn`, and RoMA/DINOv2 downloads prefer `https://hf-mirror.com`.
+- No local Python smoke was run for this update; coverage is static checks and code review against the requested plan.

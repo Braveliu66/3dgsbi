@@ -61,17 +61,22 @@ ALGORITHMS: list[dict[str, Any]] = [
         "notes": "Spark-readable SPZ conversion/validation.",
     },
     {
-        "name": "MobileGS Fine (AMB3R-SfM + DeblurMLP + LM-RS)",
+        "name": "MobileGS Fine (AMB3R-SfM + EDGS/RoMA + DeblurMLP)",
         "repo_url": "https://github.com/HengyiWang/amb3r",
         "license": "Mixed upstream terms; AMB3R/VGGT/PTv3 + Deblur/LM-RS research use",
         "commit_hash_setting": "amb3r_repo_commit",
         "local_path": FINE_ROOT / "runner.py",
         "enabled": True,
-        "weight_paths": ["amb3r/amb3r.pt"],
+        "weight_paths": [
+            "amb3r/amb3r.pt",
+            "roma/roma_outdoor.pth",
+            "roma/roma_indoor.pth",
+            "roma/dinov2_vitl14_pretrain.pth",
+        ],
         "commands": {},
         "source_type": "system",
         "license_notice": "Fine pipeline integrates the minimal AMB3R-SfM runtime from commit 7aae7fbb77a750651ffa236bb9c3212290c6fc78, Deblurring-3DGS GTnet ideas, and LM-RS matrix-free optimization. Preview still uses LiteVGGT.",
-        "notes": "Default image fine reconstruction pipeline: JPG/PNG normalization, AMB3R-SfM COLMAP-compatible no-EXIF sparse/0 initialization, DeblurMLP-MobileGS training, FastGS-style densification/pruning, patched LM-RS Compact Box rasterizer, optional LM-RS matrix-free Phase 2, and Spark SPZ conversion. pycolmap is explicit diagnostics only.",
+        "notes": "Default image fine reconstruction pipeline: JPG/PNG normalization, AMB3R-SfM COLMAP-compatible no-EXIF sparse/0, EDGS/RoMA dense-correspondence Gaussian initialization, DeblurMLP-MobileGS warmup training, FastGS-style final pruning, patched LM-RS Compact Box rasterizer, optional LM-RS matrix-free Phase 2, and Spark SPZ conversion. pycolmap is explicit diagnostics only.",
     },
     {
         "name": "Video Fine ARTDECO + Speed3R-Pi3",
@@ -200,7 +205,7 @@ def runtime_preflight(db: Session, settings: Settings | None = None) -> dict[str
                     weights_ready = False
             if not module_status.get("available", True):
                 issues.append(f"bundled module import failed: {module_status.get('error')}")
-            if item.name == "MobileGS Fine (AMB3R-SfM + DeblurMLP + LM-RS)":
+            if item.name == "MobileGS Fine (AMB3R-SfM + EDGS/RoMA + DeblurMLP)":
                 fine_runtime = fine_runtime_status()
                 extensions_ready = bool(fine_runtime["available"] or fine_workers["available"])
                 if not extensions_ready:
@@ -336,7 +341,7 @@ def bundled_module_status(name: str) -> dict[str, Any]:
     modules = {
         "LiteVGGT": "app.preview.vendor.litevggt_runtime",
         "LingBot-Map Video Preview": "app.preview.adapters.lingbot",
-        "MobileGS Fine (AMB3R-SfM + DeblurMLP + LM-RS)": "app.fine.runner",
+        "MobileGS Fine (AMB3R-SfM + EDGS/RoMA + DeblurMLP)": "app.fine.runner",
         "Video Fine ARTDECO + Speed3R-Pi3": "app.fine.video.pipeline",
         "Deblurring-3DGS GTnet": "app.fine.deblur_mlp",
         "Spark SPZ": "app.preview.io.spz",
@@ -368,6 +373,8 @@ def fine_runtime_status() -> dict[str, Any]:
         "spconv": import_check("spconv.pytorch"),
         "torch_scatter": import_check("torch_scatter"),
         "timm": import_check("timm"),
+        "romatch": import_check("romatch"),
+        "sklearn": import_check("sklearn"),
         "deblur_mlp": import_check("app.fine.deblur_mlp"),
         "diff_gaussian_rasterization": import_check("diff_gaussian_rasterization"),
         "simple_knn": import_check("simple_knn"),
@@ -390,7 +397,7 @@ def fine_runtime_status() -> dict[str, Any]:
         "spark_spz": spark_status,
         **modules,
         **optional_modules,
-        "error": None if available else "CUDA torch/Spark SPZ/AMB3R-SfM/DeblurMLP/LM-RS rasterizer/Compact Box/simple_knn/fused_ssim check failed",
+        "error": None if available else "CUDA torch/Spark SPZ/AMB3R-SfM/EDGS-RoMA/DeblurMLP/LM-RS rasterizer/Compact Box/simple_knn/fused_ssim check failed",
     }
 
 

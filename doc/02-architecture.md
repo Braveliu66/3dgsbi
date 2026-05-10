@@ -151,6 +151,16 @@ viewer          Spark 2.0
 - DeblurMLP uses the Deblurring-3DGS GTnet method at commit `e63366b8581c0fde2fda0ab1aea99518da2e2f10`. It models blurred observations during training and still exports a standard sharp Gaussian PLY.
 - The worker image keeps one CUDA/PyTorch baseline, one patched LM-RS rasterizer, one `simple_knn`, and one `fused_ssim`.
 
+## 2026-05-10 Image Fine EDGS/RoMA Update
+
+- Image fine remains `mobilegs_lmrs`: JPG/PNG normalization -> AMB3R-SfM -> local EDGS/RoMA dense-correspondence Gaussian initialization -> DeblurMLP-MobileGS training -> optional LM-RS -> final PLY validation -> Spark SPZ.
+- The backend does not clone or vendor the full EDGS repository. The only EDGS-specific code in this project is the minimal initialization adapter under `backend/app/fine/edgs_init.py` and `backend/app/fine/edgs_runtime/`.
+- EDGS initialization runs after `Scene(...)` and before `gaussians.training_setup(opt)`. If the runtime or weights are missing, fine fails with an explicit runtime/weight error instead of silently falling back.
+- EDGS is enabled by default. `fine_edgs_enabled=false` falls back to AMB3R sparse initialization and sparse point compensation.
+- EDGS defaults are `matches_per_ref=15000`, `nns_per_ref=3`, `num_refs=len(train cameras)`, and `roma_model=outdoor`.
+- When EDGS is enabled, MobileGS densification is disabled with `densify_until_iter=0`; final prune behavior remains.
+- DeblurMLP uses a default 3000-iteration warmup. GTnet activates after warmup and xyz learning rate is scaled by `0.1` while DeblurMLP is active.
+
 ## 2026-05-10 Video Fine Pipeline Update
 
 - Image fine reconstruction remains `mobilegs_lmrs`: AMB3R-SfM, DeblurMLP-MobileGS, optional LM-RS, final PLY validation, and Spark SPZ conversion.

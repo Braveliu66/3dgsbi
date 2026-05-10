@@ -9,9 +9,11 @@ ARG APT_MIRROR_HOST=https://mirrors.tuna.tsinghua.edu.cn
 ARG NODEJS_DIST_BASE_URL=https://npmmirror.com/mirrors/node
 ARG NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG HF_MIRROR_BASE_URL=https://hf-mirror.com
 
 ENV NPM_CONFIG_REGISTRY=${NPM_CONFIG_REGISTRY}
 ENV PIP_INDEX_URL=${PIP_INDEX_URL}
+ENV HF_ENDPOINT=${HF_MIRROR_BASE_URL}
 ENV PIP_CACHE_DIR=/root/.cache/pip
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 ENV PIP_DEFAULT_TIMEOUT=120
@@ -27,7 +29,7 @@ ENV HF_HUB_CACHE=/model-cache/huggingface/hub
 ENV XDG_CACHE_HOME=/model-cache/xdg
 ENV TORCH_EXTENSIONS_DIR=/model-cache/torch_extensions
 
-RUN mkdir -p /model-cache/amb3r /model-cache/lingbot /model-cache/speed3r_pi3 /model-cache/mast3r
+RUN mkdir -p /model-cache/amb3r /model-cache/lingbot /model-cache/speed3r_pi3 /model-cache/mast3r /model-cache/roma
 
 RUN --mount=type=cache,id=three-dgs-worker-apt-cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-apt-lists,target=/var/lib/apt/lists,sharing=locked \
@@ -247,6 +249,35 @@ PY
   sleep $((attempt * 20))
   attempt=$((attempt + 1))
 done
+EOF
+
+RUN <<'EOF'
+set -eu
+download_weight() {
+  url="$1"
+  target="$2"
+  if [ -s "$target" ]; then
+    return 0
+  fi
+  tmp="${target}.part"
+  attempt=1
+  while [ "$attempt" -le 5 ]; do
+    if curl -fL --retry 5 --retry-delay 10 "$url" -o "$tmp"; then
+      mv "$tmp" "$target"
+      return 0
+    fi
+    rm -f "$tmp"
+    if [ "$attempt" -eq 5 ]; then
+      return 1
+    fi
+    echo "RoMA weight download failed, retrying in $((attempt * 20)) seconds ($attempt/5)"
+    sleep $((attempt * 20))
+    attempt=$((attempt + 1))
+  done
+}
+download_weight "${HF_ENDPOINT}/xmanifold/roma/resolve/main/roma_outdoor.pth" /model-cache/roma/roma_outdoor.pth
+download_weight "${HF_ENDPOINT}/xmanifold/roma/resolve/main/roma_indoor.pth" /model-cache/roma/roma_indoor.pth
+download_weight "${HF_ENDPOINT}/Dominoc/dinov2_vitl14_pretrain/resolve/main/dinov2_vitl14_pretrain.pth" /model-cache/roma/dinov2_vitl14_pretrain.pth
 EOF
 
 RUN --mount=type=cache,id=three-dgs-worker-pycolmap-pip-cache,target=/root/.cache/pip,sharing=locked <<'EOF'

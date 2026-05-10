@@ -110,3 +110,19 @@
 
 
 - 构建期默认使用 `hf-mirror.com`、清华 PyPI 镜像和 `registry.npmmirror.com`，但必须可通过 build args 覆盖。
+
+## 2026-05-10 EDGS/RoMA Runtime Constraints
+
+- Image fine EDGS support must stay as a minimal local initialization runtime under `backend/app/fine/edgs_runtime/`; do not clone, vendor, or import the full CompVis/EDGS repository tree.
+- Required Python runtime packages are installed in the worker image, including `romatch` and `scikit-learn`.
+- RoMA/DINOv2 weights live in shared model cache:
+
+```text
+model-cache/roma/roma_outdoor.pth
+model-cache/roma/roma_indoor.pth
+model-cache/roma/dinov2_vitl14_pretrain.pth
+```
+
+- Docker and task-specific downloads must prefer `https://hf-mirror.com`; fallback sources must remain configurable rather than hard-coded as the only path.
+- When `fine_edgs_enabled=true`, worker preflight must check RoMA weights and the trainer must fail explicitly if the EDGS/RoMA runtime is unavailable.
+- When `fine_edgs_enabled=false`, AMB3R sparse initialization and sparse point compensation remain available.

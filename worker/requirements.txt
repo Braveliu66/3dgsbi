@@ -20,6 +20,8 @@ plyfile==1.1
 rich==13.9.4
 kornia==0.8.0
 loguru==0.7.3
+romatch==0.1.2
+scikit-learn==1.6.1
 gsplat==1.5.3
 safetensors==0.7.0
 pypose==0.7.3

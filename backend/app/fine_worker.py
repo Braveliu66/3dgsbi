@@ -14,6 +14,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.database import SessionLocal, initialize_database_schema
+from app.fine.edgs_init import ensure_roma_weights
 from app.fine.amb3r_sfm import ensure_amb3r_weight
 from app.fine.runner import PIPELINE_NAME, VIDEO_PIPELINE_NAME, normalize_fine_pipeline, run_fine_pipeline
 from app.fine.types import FineContext, FineFailure
@@ -327,6 +328,8 @@ def download_single_video(media, work_dir: Path) -> Path:
 
 def ensure_fine_weights(db, task: Task, project: Project, started: float, pipeline: str) -> None:
     specs = weights_for_pipeline(pipeline)
+    if pipeline == PIPELINE_NAME and not read_bool((task.options or {}).get("fine_edgs_enabled"), True):
+        specs = tuple(spec for spec in specs if not spec.relative_path.startswith("roma/"))
     update_task(db, task, project, "weights_checking", 8, started, f"checking {len(specs)} model weights for {pipeline}")
     if settings.model_auto_download:
         try:
@@ -341,6 +344,8 @@ def ensure_fine_weights(db, task: Task, project: Project, started: float, pipeli
             raise FineFailure("MODEL_WEIGHT_DOWNLOAD_FAILED", str(exc)) from exc
     if pipeline == PIPELINE_NAME:
         ensure_amb3r_weight(Path(settings.model_cache_dir))
+        if read_bool((task.options or {}).get("fine_edgs_enabled"), True):
+            ensure_roma_weights(Path(settings.model_cache_dir))
     elif pipeline == VIDEO_PIPELINE_NAME:
         ensure_video_artdeco_weights(Path(settings.model_cache_dir))
     update_task(db, task, project, "weights_ready", 12, started, f"model weights ready for {pipeline}")
@@ -388,6 +393,17 @@ def estimate_fine_eta(task: Task, started: float) -> int | None:
     if progress < 20:
         return int(by_expected)
     return int(max(0, by_progress * 0.45 + by_expected * 0.55))
+
+
+def read_bool(value: Any, fallback: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return fallback
 
 
 if __name__ == "__main__":
