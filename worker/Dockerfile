@@ -29,7 +29,7 @@ ENV HF_HUB_CACHE=/model-cache/huggingface/hub
 ENV XDG_CACHE_HOME=/model-cache/xdg
 ENV TORCH_EXTENSIONS_DIR=/model-cache/torch_extensions
 
-RUN mkdir -p /model-cache/amb3r /model-cache/lingbot /model-cache/speed3r_pi3 /model-cache/mast3r /model-cache/roma /opt/model-cache-seed/lingbot
+RUN mkdir -p /model-cache/lingbot /model-cache/speed3r_pi3 /model-cache/mast3r /model-cache/roma /opt/model-cache-seed/lingbot
 
 RUN --mount=type=cache,id=three-dgs-worker-apt-cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-apt-lists,target=/var/lib/apt/lists,sharing=locked \
@@ -106,9 +106,6 @@ ENV SPARK_SPZ_CLI=/opt/preview-tools/spark_transcode_spz.mjs
 
 FROM worker-common AS worker
 
-ARG LMRS_REPO_URL=https://github.com/hamzapehlivan/lm-rs.git
-ARG LMRS_REPO_COMMIT=cb40c7c06c2a60f8314ce095ad7b4513fbb33319
-ARG LMRS_RASTERIZER_COMMIT=c2529d3bb13bc38271710785c015a89d9d623237
 ARG ARTDECO_REPO_URL=https://github.com/InternRobotics/ARTDECO.git
 ARG ARTDECO_REPO_COMMIT=bb654395826e50ac9e4671682d901377115a24ce
 ARG SPEED3R_REPO_URL=https://github.com/Visual-AI/speed3r.git
@@ -117,20 +114,28 @@ ARG LINGBOT_MAP_REPO_URL=https://github.com/Robbyant/lingbot-map.git
 ARG LINGBOT_MAP_REPO_COMMIT=4cd986009b9adeded8a4e740919221940dedeffe
 
 ENV FINE_RECONSTRUCTION_ENABLED=true
-ENV LMRS_ROOT=/opt/lm-rs
 ENV ARTDECO_ROOT=/opt/artdeco-runtime
 ENV SPEED3R_ROOT=/opt/speed3r-runtime
-ENV PYTHONPATH=${ARTDECO_ROOT}/VSLAM/thirdparty/mast3r/dust3r/croco
+ENV PYTHONPATH=${ARTDECO_ROOT}/VSLAM/thirdparty/mast3r/dust3r/croco:${ARTDECO_ROOT}/VSLAM/thirdparty/in3d
 ENV MAX_JOBS=2
 ENV CUDA_PATH=/usr/local/cuda
 ENV NVTE_FRAMEWORK=pytorch
 
 COPY backend/requirements.txt /tmp/backend/requirements.txt
 COPY worker/requirements.txt /tmp/worker/requirements.txt
-COPY worker/patches/lmrs-fastgs-compact-box.patch /tmp/lmrs-fastgs-compact-box.patch
-COPY worker/patches/fastgs-cuda-metric-accumulation.patch /tmp/fastgs-cuda-metric-accumulation.patch
 RUN <<'EOF'
 set -eu
+torch_lib="$(
+python - <<'PY'
+from pathlib import Path
+import torch
+
+print(Path(torch.__file__).resolve().parent / "lib")
+PY
+)"
+test -f "$torch_lib/libc10.so"
+printf '%s\n' "$torch_lib" > /etc/ld.so.conf.d/pytorch.conf
+ldconfig
 command -v nvcc
 python - <<'PY'
 from pathlib import Path
@@ -228,30 +233,6 @@ while [ "$attempt" -le 5 ]; do
 done
 EOF
 
-RUN --mount=type=cache,id=three-dgs-worker-amb3r-pip-cache,target=/root/.cache/pip,sharing=locked <<'EOF'
-set -eu
-attempt=1
-while [ "$attempt" -le 5 ]; do
-  if python -m pip install --no-build-isolation --constraint /tmp/worker/constraints.txt \
-      'spconv-cu118==2.3.8' \
-      'torch-scatter==2.1.2' \
-      -f https://data.pyg.org/whl/torch-2.8.0+cu128.html; then
-    python - <<'PY'
-import spconv.pytorch as spconv
-import torch_scatter
-print("AMB3R sparse dependencies import ok")
-PY
-    exit 0
-  fi
-  if [ "$attempt" -eq 5 ]; then
-    exit 1
-  fi
-  echo "AMB3R sparse dependency install failed, retrying in $((attempt * 20)) seconds ($attempt/5)"
-  sleep $((attempt * 20))
-  attempt=$((attempt + 1))
-done
-EOF
-
 RUN --mount=type=cache,id=three-dgs-worker-pycolmap-pip-cache,target=/root/.cache/pip,sharing=locked <<'EOF'
 set -eu
 attempt=1
@@ -272,14 +253,15 @@ PY
 done
 EOF
 
-COPY backend/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/diff-gaussian-rasterization/third_party/glm \
-    ./app/fine/local_3dgs/vendor/gaussian_splatting/submodules/diff-gaussian-rasterization/third_party/glm
+COPY backend/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/diff-gaussian-rasterization \
+    ./app/fine/local_3dgs/vendor/gaussian_splatting/submodules/diff-gaussian-rasterization
+COPY backend/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/simple-knn \
+    ./app/fine/local_3dgs/vendor/gaussian_splatting/submodules/simple-knn
 COPY backend/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/fused-ssim \
     ./app/fine/local_3dgs/vendor/gaussian_splatting/submodules/fused-ssim
 
 RUN --mount=type=cache,id=three-dgs-worker-runtime-extension-pip-cache,target=/root/.cache/pip,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-extension-wheel-cache,target=/root/.cache/three-dgs-wheels,sharing=locked \
-    --mount=type=cache,id=three-dgs-worker-lmrs-git-cache,target=/repo-cache/lm-rs,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-artdeco-git-cache,target=/repo-cache/artdeco,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-lingbot-map-git-cache,target=/repo-cache/lingbot-map,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-speed3r-git-cache,target=/repo-cache/speed3r,sharing=locked <<'EOF'
@@ -349,7 +331,7 @@ PY
     python -m pip wheel --constraint /tmp/worker/constraints.txt --wheel-dir "$wheel_dir" "$@" "$source_dir"
     wheel="$(find "$wheel_dir" -maxdepth 1 -name '*.whl' -print -quit)"
   fi
-  retry_pip --no-deps "$wheel"
+  retry_pip --force-reinstall --no-deps "$wheel"
 }
 ensure_git_checkout() {
   repo_url="$1"
@@ -366,32 +348,7 @@ ensure_git_checkout() {
   retry_git -C "$repo_path" checkout "$repo_commit"
 }
 retry_pip 'faiss-cpu==1.12.0'
-CACHED_LMRS=/repo-cache/lm-rs/source
-ensure_git_checkout "$LMRS_REPO_URL" "$CACHED_LMRS" "$LMRS_REPO_COMMIT"
-retry_git -C "$CACHED_LMRS" submodule update --init --recursive submodules/simple-knn submodules/diff-gaussian-rasterization
-retry_git -C "$CACHED_LMRS/submodules/diff-gaussian-rasterization" checkout "$LMRS_RASTERIZER_COMMIT"
-retry_git -C "$CACHED_LMRS/submodules/diff-gaussian-rasterization" submodule update --init --recursive
-LMRS_GLM="$CACHED_LMRS/submodules/diff-gaussian-rasterization/third_party/glm"
-VENDORED_GLM=/app/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/diff-gaussian-rasterization/third_party/glm
-if [ ! -f "$LMRS_GLM/glm/glm.hpp" ]; then
-  rm -rf "$LMRS_GLM"
-  mkdir -p "$(dirname "$LMRS_GLM")"
-  cp -a "$VENDORED_GLM" "$LMRS_GLM"
-fi
-test -f "$LMRS_GLM/glm/glm.hpp"
-rm -rf "$LMRS_ROOT"
-mkdir -p "$(dirname "$LMRS_ROOT")"
-cp -a "$CACHED_LMRS" "$LMRS_ROOT"
-apply_rasterizer_patch() {
-  patch_file="$1"
-  if ! git -C "$LMRS_ROOT/submodules/diff-gaussian-rasterization" apply --reverse --check "$patch_file" >/dev/null 2>&1; then
-    git -C "$LMRS_ROOT/submodules/diff-gaussian-rasterization" apply "$patch_file"
-  fi
-}
-apply_rasterizer_patch /tmp/lmrs-fastgs-compact-box.patch
-apply_rasterizer_patch /tmp/fastgs-cuda-metric-accumulation.patch
-cached_wheel_install diff-gaussian-rasterization "$LMRS_ROOT/submodules/diff-gaussian-rasterization" --no-deps --no-build-isolation
-cached_wheel_install simple-knn "$LMRS_ROOT/submodules/simple-knn" --no-deps --no-build-isolation
+cached_wheel_install diff-gaussian-rasterization /app/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/diff-gaussian-rasterization --no-deps --no-build-isolation
 cached_wheel_install fused-ssim /app/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/fused-ssim --no-deps --no-build-isolation
 CACHED_LINGBOT_MAP=/repo-cache/lingbot-map/source
 ensure_git_checkout "$LINGBOT_MAP_REPO_URL" "$CACHED_LINGBOT_MAP" "$LINGBOT_MAP_REPO_COMMIT"
@@ -403,6 +360,16 @@ test -f /usr/include/eigen3/Eigen/Sparse
 rm -rf "$ARTDECO_ROOT"
 mkdir -p "$(dirname "$ARTDECO_ROOT")"
 cp -a "$CACHED_ARTDECO" "$ARTDECO_ROOT"
+cached_wheel_install simple-knn-artdeco "$ARTDECO_ROOT/Reconstruct/submodules/simple-knn" --no-deps --no-build-isolation
+python - <<'PY'
+import simple_knn._C as simple_knn_c
+
+missing = [name for name in ("distCUDA2", "distIndex2") if not hasattr(simple_knn_c, name)]
+if missing:
+    raise RuntimeError(f"ARTDECO simple-knn missing symbols: {', '.join(missing)}")
+print("ARTDECO simple-knn distIndex2 import ok")
+PY
+cached_wheel_install pyimgui "$ARTDECO_ROOT/VSLAM/thirdparty/in3d/thirdparty/pyimgui" --no-deps --no-build-isolation
 cached_wheel_install asmk "$ARTDECO_ROOT/VSLAM/thirdparty/mast3r/asmk" --no-deps --no-build-isolation
 cached_wheel_install curope "$ARTDECO_ROOT/VSLAM/thirdparty/mast3r/dust3r/croco/models/curope" --no-deps --no-build-isolation
 python - <<'PY'
@@ -421,12 +388,6 @@ patched = source.replace(
 if patched == source:
     raise RuntimeError(f"ARTDECO Pi3 RoPE2D patch did not apply: {pos_embed}")
 pos_embed.write_text(patched, encoding="utf-8")
-
-from models.curope import cuRoPE2D
-from VSLAM.thirdparty.Pi3.pi3.models.layers.pos_embed import RoPE2D
-
-assert RoPE2D is cuRoPE2D
-print("ARTDECO RoPE2D CUDA extension import ok")
 PY
 sed -i 's/if not (torch.cuda.is_available() and CUDA_HOME):/if not CUDA_HOME:/' "$ARTDECO_ROOT/VSLAM/setup.py"
 sed -i 's|str(ROOT / "thirdparty/eigen")|"/usr/include/eigen3"|' "$ARTDECO_ROOT/VSLAM/setup.py"
@@ -438,20 +399,6 @@ ensure_git_checkout "$SPEED3R_REPO_URL" "$CACHED_SPEED3R" "$SPEED3R_REPO_COMMIT"
 rm -rf "$SPEED3R_ROOT"
 mkdir -p "$(dirname "$SPEED3R_ROOT")"
 cp -a "$CACHED_SPEED3R" "$SPEED3R_ROOT"
-python - <<'PY'
-import sys
-
-sys.path.insert(0, "/opt/speed3r-runtime")
-sys.path.insert(0, "/opt/artdeco-runtime/VSLAM/thirdparty/mast3r/dust3r/croco")
-
-from models.curope import cuRoPE2D
-from pi3.models.layers.pos_embed import RoPE2D
-
-assert RoPE2D is cuRoPE2D
-print("Speed3R RoPE2D CUDA extension import ok")
-PY
-find "$LMRS_ROOT" -name .git -prune -exec rm -rf {} +
-find "$LMRS_ROOT" -name .git -type f -delete
 find "$ARTDECO_ROOT" -name .git -prune -exec rm -rf {} +
 find "$ARTDECO_ROOT" -name .git -type f -delete
 find "$SPEED3R_ROOT" -name .git -prune -exec rm -rf {} +

@@ -71,6 +71,10 @@ class ProjectCreatePayload(BaseModel):
     tags: list[str] = []
 
 
+class ProjectBulkDeletePayload(BaseModel):
+    project_ids: list[str]
+
+
 class TaskCreatePayload(BaseModel):
     options: dict[str, Any] = {}
 
@@ -215,6 +219,18 @@ def owned_project(db: Session, project_id: str, user: User, include_children: bo
     if user.role != "admin" and project.owner_id != user.id:
         raise HTTPException(status_code=403, detail="Project access denied")
     return project
+
+
+def delete_project_record(db: Session, project: Project) -> None:
+    for task in project.tasks:
+        if task.status in {"queued", "running"}:
+            request_worker_cancel(task)
+    for media in project.media:
+        storage.delete(media.object_uri)
+        storage.delete(media.thumbnail_uri)
+    for artifact in project.artifacts:
+        storage.delete(artifact.object_uri)
+    db.delete(project)
 
 
 def media_key(project: Project, media_id: str, file_name: str, kind: str) -> str:
@@ -594,17 +610,21 @@ def get_project(project_id: str, user: User = Depends(get_current_user), db: Ses
 @app.delete("/api/projects/{project_id}")
 def delete_project(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, bool]:
     project = owned_project(db, project_id, user, include_children=True)
-    for task in project.tasks:
-        if task.status in {"queued", "running"}:
-            request_worker_cancel(task)
-    for media in project.media:
-        storage.delete(media.object_uri)
-        storage.delete(media.thumbnail_uri)
-    for artifact in project.artifacts:
-        storage.delete(artifact.object_uri)
-    db.delete(project)
+    delete_project_record(db, project)
     db.commit()
     return {"deleted": True}
+
+
+@app.post("/api/projects/bulk-delete")
+def bulk_delete_projects(payload: ProjectBulkDeletePayload, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    project_ids = list(dict.fromkeys(item for item in payload.project_ids if item))
+    if not project_ids:
+        raise HTTPException(status_code=400, detail="project_ids is required")
+    projects = [owned_project(db, project_id, user, include_children=True) for project_id in project_ids]
+    for project in projects:
+        delete_project_record(db, project)
+    db.commit()
+    return {"deleted": len(projects), "project_ids": [project.id for project in projects]}
 
 
 @app.post("/api/projects/{project_id}/media")
@@ -933,17 +953,8 @@ def create_fine_task(
     fine_pipeline = "video_artdeco_speed3r" if project.input_type == "video" else "mobilegs_lmrs"
     eta_seconds = settings.fine_expected_seconds_video if project.input_type == "video" else settings.fine_expected_seconds_images
     payload_options = payload.options or {}
-    amb3r_defaults = (
-        {
-            "fine_amb3r_memory_device": "cuda:0",
-            "fine_amb3r_init_candidates": 1,
-        }
-        if project.input_type == "images"
-        else {}
-    )
 
     options = {
-        **amb3r_defaults,
         **payload_options,
         "fine_pipeline": fine_pipeline,
         "source_version": project.source_version,

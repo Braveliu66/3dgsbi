@@ -89,6 +89,7 @@ services:
       MODEL_CACHE_DIR: /model-cache
       MODEL_AUTO_DOWNLOAD: "true"
       MODEL_DOWNLOAD_PREFER_HF_MIRROR: "true"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
       TORCH_HOME: /model-cache/torch
       HF_HOME: /model-cache/huggingface
       HF_HUB_CACHE: /model-cache/huggingface/hub
@@ -114,6 +115,9 @@ services:
     image: 3dgsbi-worker:local
     pull_policy: never
     command: ["python", "-m", "app.fine_worker"]
+    shm_size: "4gb"
+    security_opt:
+      - seccomp=unconfined
     environment:
       DATABASE_URL: postgresql+psycopg://three_dgs:three_dgs@postgres:5432/three_dgs
       REDIS_URL: redis://redis:6379/0

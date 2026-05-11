@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import queue
 import os
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +19,10 @@ from app.fine.video.types import ArtdecoTrainingResult, CameraIntrinsics, Extrac
 
 ARTDECO_COMMIT = "bb654395826e50ac9e4671682d901377115a24ce"
 SPEED3R_COMMIT = "5460f7309c87e5daac36385ff6611627de7d7267"
+
+
+def _log(message: str) -> None:
+    print(f"[artdeco-trainer] {message}", flush=True)
 
 
 def run_artdeco_speed3r_training(
@@ -50,6 +57,21 @@ def run_artdeco_speed3r_training(
     env["ARTDECO_ROOT"] = str(artdeco_root)
     env["SPEED3R_ROOT"] = str(speed3r_root) if speed3r_root else env.get("SPEED3R_ROOT", "")
     env["PYTHONPATH"] = os.pathsep.join([str(Path(__file__).resolve().parents[3]), env.get("PYTHONPATH", "")])
+    _log(
+        "prepared runtime "
+        f"frames={frames.count} size={frames.width}x{frames.height} fps={frames.fps} "
+        f"dataset={frames.dataset_root} output={output_dir}"
+    )
+    _log(
+        "runtime paths "
+        f"artdeco_root={artdeco_root} speed3r_root={speed3r_root} models_dir={models_dir}"
+    )
+    _log(
+        "intrinsics "
+        f"source={intrinsics.source} fx={intrinsics.fx:.3f} fy={intrinsics.fy:.3f} "
+        f"cx={intrinsics.cx:.3f} cy={intrinsics.cy:.3f} optimize_focal={intrinsics.optimize_focal}"
+    )
+    _log("command " + " ".join(command))
     progress("artdeco_training", 34, "running ARTDECO VSLAM + h3dgsv3 mapper with Speed3R-Pi3", {"artdeco_root": str(artdeco_root)})
     process = subprocess.Popen(
         command,
@@ -60,16 +82,18 @@ def run_artdeco_speed3r_training(
         text=True,
         encoding="utf-8",
         errors="replace",
+        start_new_session=os.name == "posix",
     )
-    assert process.stdout is not None
-    for line in process.stdout:
-        print(line.rstrip(), flush=True)
-    return_code = process.wait()
+    _log(f"started child pid={process.pid}")
+    return_code = stream_artdeco_output(process)
+    _log(f"child exited code={return_code}")
     if return_code != 0:
+        terminate_artdeco_process_group(process)
         raise FineFailure("ARTDECO_TRAINING_FAILED", f"ARTDECO video trainer exited with code {return_code}")
 
     gs_ply = output_dir / "point_clouds" / "gs.ply"
     if not gs_ply.exists() or gs_ply.stat().st_size <= 0:
+        terminate_artdeco_process_group(process)
         raise FineFailure("ARTIFACT_NOT_FOUND", f"ARTDECO did not create non-empty point_clouds/gs.ply: {gs_ply}")
 
     metrics = read_artdeco_metrics(output_dir)
@@ -82,6 +106,72 @@ def run_artdeco_speed3r_training(
         }
     )
     return ArtdecoTrainingResult(output_dir=output_dir, gs_ply=gs_ply, metrics=metrics)
+
+
+def stream_artdeco_output(process: subprocess.Popen[str]) -> int:
+    assert process.stdout is not None
+    output: queue.Queue[str | None] = queue.Queue()
+    start = time.monotonic()
+    last_output = start
+    last_heartbeat = start
+
+    def read_stdout() -> None:
+        try:
+            for line in process.stdout:
+                output.put(line)
+        finally:
+            output.put(None)
+
+    threading.Thread(target=read_stdout, daemon=True).start()
+    stdout_done = False
+    while True:
+        try:
+            item = output.get(timeout=0.2)
+        except queue.Empty:
+            item = ""
+        if item is None:
+            stdout_done = True
+        elif item:
+            print(item.rstrip(), flush=True)
+            last_output = time.monotonic()
+
+        return_code = process.poll()
+        if return_code is not None:
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                try:
+                    item = output.get_nowait()
+                except queue.Empty:
+                    time.sleep(0.05)
+                    continue
+                if item is None:
+                    break
+                print(item.rstrip(), flush=True)
+            try:
+                process.stdout.close()
+            except Exception:
+                pass
+            return return_code
+        if stdout_done:
+            return process.wait()
+        now = time.monotonic()
+        if now - last_heartbeat >= 15:
+            _log(
+                f"child still running pid={process.pid} "
+                f"elapsed={now - start:.1f}s no_output_for={now - last_output:.1f}s"
+            )
+            last_heartbeat = now
+
+
+def terminate_artdeco_process_group(process: subprocess.Popen[str]) -> None:
+    if os.name != "posix":
+        return
+    try:
+        os.killpg(process.pid, 15)
+    except ProcessLookupError:
+        return
+    except Exception:
+        return
 
 
 def build_artdeco_command(
@@ -101,6 +191,10 @@ def build_artdeco_command(
     downsampling = read_float(options.get("fine_artdeco_downsampling"), 2.0, minimum=1.0, maximum=8.0)
     local_feat_dim = read_int(options.get("fine_artdeco_local_feat_dim"), 16, minimum=1, maximum=128)
     global_feat_dim = read_int(options.get("fine_artdeco_global_feat_dim"), 16, minimum=1, maximum=128)
+    sh_degree = read_int(options.get("fine_artdeco_sh_degree"), 3, minimum=0, maximum=3)
+    max_active_keyframes = read_int(options.get("fine_artdeco_max_active_keyframes"), 400, minimum=16, maximum=2_000)
+    visible_threshold = read_float(options.get("fine_artdeco_visible_threshold"), 0.0, minimum=0.0, maximum=1.0)
+    gs_add_ratio = read_float(options.get("fine_artdeco_gs_add_ratio"), 1.0, minimum=0.01, maximum=1.0)
     config_path = artdeco_root / "config" / "base.yaml"
     if not config_path.exists():
         raise FineFailure("ARTDECO_RUNTIME_UNAVAILABLE", f"ARTDECO config missing: {config_path}")
@@ -149,10 +243,14 @@ def build_artdeco_command(
         str(local_feat_dim),
         "--global_feat_dim",
         str(global_feat_dim),
+        "--sh_degree",
+        str(sh_degree),
+        "--max_active_keyframes",
+        str(max_active_keyframes),
         "--visible_threshold",
-        str(read_float(options.get("fine_artdeco_visible_threshold"), 0.0, minimum=0.0, maximum=1.0)),
+        str(visible_threshold),
         "--gs_add_ratio",
-        str(read_float(options.get("fine_artdeco_gs_add_ratio"), 1.0, minimum=0.01, maximum=1.0)),
+        str(gs_add_ratio),
         "--covariance_filter",
         "--point_fusion_frontend",
         "--accurate_loop_closure",

@@ -20,6 +20,7 @@ from app.preview.vendor.lingbot_runtime import (
     flashinfer_available,
     load_lingbot_model,
     resolve_keyframe_interval,
+    resolve_kv_cache_sliding_window,
     resolve_mode,
 )
 
@@ -92,6 +93,7 @@ def main() -> None:
         camera_iterations=args.camera_iterations,
         num_scale_frames=args.num_scale_frames,
         window_size=args.window_size,
+        kv_cache_sliding_window=resolve_kv_cache_sliding_window(args.window_size),
         enable_point=not args.depth_only,
     )
 

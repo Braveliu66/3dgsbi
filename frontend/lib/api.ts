@@ -484,6 +484,8 @@ export const api = {
   projects: () => request<{ projects: Project[] }>("/api/projects"),
   project: (id: string) => request<Project>(`/api/projects/${id}`),
   deleteProject: (id: string) => request<{ deleted: boolean }>(`/api/projects/${id}`, { method: "DELETE" }),
+  deleteProjects: (projectIds: string[]) =>
+    request<{ deleted: number; project_ids: string[] }>("/api/projects/bulk-delete", { method: "POST", body: JSON.stringify({ project_ids: projectIds }) }),
   createProject: (payload: { name: string; input_type: Project["input_type"]; tags: string[] }) =>
     request<Project>("/api/projects", { method: "POST", body: JSON.stringify(payload) }),
   uploadMedia: (projectId: string, file: File, onProgress?: TransferProgressCallback) => uploadMediaInChunks(projectId, file, onProgress),

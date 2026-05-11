@@ -209,13 +209,13 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(payload["options"]["fine_pipeline"], "mobilegs_lmrs")
             self.assertEqual(payload["options"]["source_version"], 3)
             self.assertEqual(payload["options"]["fine_iterations"], 1000)
-            self.assertEqual(payload["options"]["fine_amb3r_memory_device"], "cuda:0")
-            self.assertEqual(payload["options"]["fine_amb3r_init_candidates"], 1)
+            self.assertNotIn("fine_amb3r_memory_device", payload["options"])
+            self.assertNotIn("fine_amb3r_init_candidates", payload["options"])
 
-    def test_fine_task_preserves_explicit_amb3r_oom_options(self) -> None:
+    def test_fine_task_preserves_explicit_pycolmap_options(self) -> None:
         with TestClient(app) as client, patch("app.main.enqueue_fine_task", return_value=None):
             headers = auth_headers(client)
-            project_id = create_image_project(client, headers, "explicit amb3r options")
+            project_id = create_image_project(client, headers, "explicit pycolmap options")
             for index in range(3):
                 upload_response = client.post(
                     f"/api/projects/{project_id}/media",
@@ -226,14 +226,14 @@ class StorageResponseTests(unittest.TestCase):
 
             response = client.post(
                 f"/api/projects/{project_id}/tasks/fine",
-                json={"options": {"fine_amb3r_memory_device": "cpu", "fine_amb3r_init_candidates": 0}},
+                json={"options": {"fine_sfm_backend": "colmap", "fine_colmap_threads": 4}},
                 headers=headers,
             )
             response.raise_for_status()
             payload = response.json()
 
-            self.assertEqual(payload["options"]["fine_amb3r_memory_device"], "cpu")
-            self.assertEqual(payload["options"]["fine_amb3r_init_candidates"], 0)
+            self.assertEqual(payload["options"]["fine_sfm_backend"], "colmap")
+            self.assertEqual(payload["options"]["fine_colmap_threads"], 4)
 
     def test_preview_rejects_legacy_edgs_pipeline(self) -> None:
         with TestClient(app) as client:
@@ -385,6 +385,39 @@ class StorageResponseTests(unittest.TestCase):
 
             self.assertTrue(delete_response.json()["deleted"])
             self.assertIn(task_cancel_key(task_id), fake_redis.values)
+
+    def test_bulk_delete_projects_requests_active_task_cancel(self) -> None:
+        fake_redis = FakeRedis()
+        with TestClient(app) as client, patch("app.main.get_redis", return_value=fake_redis):
+            headers = auth_headers(client)
+            running_project_id = create_image_project(client, headers, "bulk delete cancels active task")
+            idle_project_id = create_image_project(client, headers, "bulk delete idle")
+            upload_response = client.post(
+                f"/api/projects/{running_project_id}/media",
+                files={"file": ("one.png", PNG_BYTES, "image/png")},
+                headers=headers,
+            )
+            upload_response.raise_for_status()
+            task_response = client.post(f"/api/projects/{running_project_id}/tasks/preview", json={"options": {}}, headers=headers)
+            task_response.raise_for_status()
+            task_id = task_response.json()["id"]
+
+            delete_response = client.post(
+                "/api/projects/bulk-delete",
+                json={"project_ids": [running_project_id, idle_project_id]},
+                headers=headers,
+            )
+            delete_response.raise_for_status()
+
+            payload = delete_response.json()
+            self.assertEqual(payload["deleted"], 2)
+            self.assertCountEqual(payload["project_ids"], [running_project_id, idle_project_id])
+            self.assertIn(task_cancel_key(task_id), fake_redis.values)
+            list_response = client.get("/api/projects", headers=headers)
+            list_response.raise_for_status()
+            remaining_ids = {item["id"] for item in list_response.json()["projects"]}
+            self.assertNotIn(running_project_id, remaining_ids)
+            self.assertNotIn(idle_project_id, remaining_ids)
 
     def test_viewer_config_prefers_fresh_final_spz(self) -> None:
         with TestClient(app) as client:

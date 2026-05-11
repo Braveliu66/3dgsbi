@@ -2,11 +2,11 @@
 
 ## Fine Pipeline Split
 
-`mobilegs_lmrs` is the image fine pipeline. It owns AMB3R-SfM, minimal EDGS/RoMA dense-correspondence Gaussian initialization, DeblurMLP-MobileGS training with warmup, optional LM-RS refinement, final PLY validation, and Spark SPZ conversion.
+`mobilegs_lmrs` is the image fine pipeline. It owns pycolmap SfM, minimal EDGS/RoMA dense-correspondence Gaussian initialization, DeblurMLP-MobileGS training with warmup, optional LM-RS refinement, final PLY validation, and Spark SPZ conversion.
 
 `video_artdeco_speed3r` is the video fine pipeline. It owns video frame extraction, ARTDECO `selfCaptured` calibration, ARTDECO VSLAM state/frontend/backend, ARTDECO Reconstruct h3dgsv3 SceneModel training, `point_clouds/gs.ply` validation, and Spark SPZ conversion.
 
-The video path must not call image fine modules such as `train_mobile_3dgs`, `build_scene`, AMB3R, MobileGS, LM-RS, or DeblurMLP.
+The video path must not call image fine modules such as `train_mobile_3dgs`, `build_scene`, MobileGS, LM-RS, or DeblurMLP.
 
 ## Speed3R-Pi3 Boundary
 
@@ -24,10 +24,10 @@ The project does not vendor or clone the full EDGS repository. Image fine only k
 
 The image fine order is:
 
-1. AMB3R-SfM writes the COLMAP-compatible `sparse/0` scene.
+1. pycolmap writes the COLMAP-compatible `sparse/0` scene.
 2. `EDGSDenseInit` runs after `Scene(...)` and before `gaussians.training_setup(opt)`.
 3. EDGS/RoMA creates the initial Gaussian set from dense correspondences.
 4. MobileGS trains with densification disabled by EDGS and keeps final prune behavior.
 5. DeblurMLP GTnet stays inactive during the default 3000-iteration warmup, then activates and scales xyz learning rate by `0.1`.
 
-Default EDGS options are `matches_per_ref=15000`, `nns_per_ref=3`, `num_refs=len(train cameras)`, and `roma_model=outdoor`. EDGS is enabled by default and can be disabled with `fine_edgs_enabled=false`, which falls back to the current AMB3R sparse initialization path.
+Default EDGS options are `matches_per_ref=15000`, `nns_per_ref=3`, `num_refs=len(train cameras)`, and `roma_model=outdoor`. EDGS is enabled by default and can be disabled with `fine_edgs_enabled=false`, which keeps the pycolmap sparse initialization path.

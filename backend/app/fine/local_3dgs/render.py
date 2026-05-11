@@ -67,8 +67,6 @@ def render_gaussians(
         scales=pc.get_scaling,
         rotations=pc.get_rotation,
         cov3D_precomp=None,
-        cgState=cg_state,
-        current_batch=current_batch,
     )
     image, radii, depth, accum_metric_counts = _unpack(output, fastgs_get_flag=fastgs_get_flag)
     result = {

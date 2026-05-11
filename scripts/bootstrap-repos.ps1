@@ -6,14 +6,11 @@ $ErrorActionPreference = "Stop"
 
 $repos = @(
   @{ Name = "LiteVGGT-repo"; Url = "https://github.com/GarlicBa/LiteVGGT-repo.git"; Commit = "4767c17f8b6f176bb751566e92f60eb885040033" },
-  @{ Name = "spark"; Url = "https://github.com/sparkjsdev/spark.git"; Commit = "3cf9fa15adb7ac7c47a1e962740db97b9e8a9fdf" },
-  @{ Name = "lm-rs"; Url = "https://github.com/hamzapehlivan/lm-rs.git"; Commit = "cb40c7c06c2a60f8314ce095ad7b4513fbb33319" }
+  @{ Name = "spark"; Url = "https://github.com/sparkjsdev/spark.git"; Commit = "3cf9fa15adb7ac7c47a1e962740db97b9e8a9fdf" }
 )
 
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $cache = Join-Path $root "repo-cache"
-$lmrsCompactBoxPatch = Join-Path $root "worker/patches/lmrs-fastgs-compact-box.patch"
-$fastgsMetricPatch = Join-Path $root "worker/patches/fastgs-cuda-metric-accumulation.patch"
 New-Item -ItemType Directory -Force -Path $cache | Out-Null
 
 foreach ($repo in $repos) {
@@ -23,20 +20,6 @@ foreach ($repo in $repos) {
   }
   git -C $path fetch --all --tags
   git -C $path checkout $repo.Commit
-  if ($repo.Name -eq "lm-rs") {
-    git -C $path submodule update --init --recursive submodules/simple-knn submodules/diff-gaussian-rasterization
-    $rasterizer = Join-Path $path "submodules/diff-gaussian-rasterization"
-    git -C $rasterizer checkout c2529d3bb13bc38271710785c015a89d9d623237
-    git -C $rasterizer submodule update --init --recursive
-    git -C $rasterizer apply --reverse --check $lmrsCompactBoxPatch 2>$null
-    if ($LASTEXITCODE -ne 0) {
-      git -C $rasterizer apply $lmrsCompactBoxPatch
-    }
-    git -C $rasterizer apply --reverse --check $fastgsMetricPatch 2>$null
-    if ($LASTEXITCODE -ne 0) {
-      git -C $rasterizer apply $fastgsMetricPatch
-    }
-  }
 }
 
 Write-Host "Optional repository cache is ready at $cache"

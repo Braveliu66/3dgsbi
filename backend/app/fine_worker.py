@@ -15,7 +15,6 @@ from sqlalchemy.orm import selectinload
 from app.config import get_settings
 from app.database import SessionLocal, initialize_database_schema
 from app.fine.edgs_init import ensure_roma_weights
-from app.fine.amb3r_sfm import ensure_amb3r_weight
 from app.fine.runner import PIPELINE_NAME, VIDEO_PIPELINE_NAME, normalize_fine_pipeline, run_fine_pipeline
 from app.fine.types import FineContext, FineFailure
 from app.fine.video.speed3r_pi3 import ensure_video_artdeco_weights
@@ -301,7 +300,7 @@ def prepare_fine_inputs(db, task: Task, project: Project, work_dir: Path, starte
             started,
             f"normalized {normalized.output_count} images to RGB JPEG, max side {normalized.max_side}px",
         )
-        return pipeline, normalized.output_dir, None, normalized.metrics(), "checking MobileGS AMB3R-SfM + LM-RS runtime"
+        return pipeline, normalized.output_dir, None, normalized.metrics(), "checking MobileGS pycolmap + LM-RS runtime"
 
     if project.input_type == "video":
         video_items = [media for media in project.media if media.kind == "video"]
@@ -343,7 +342,6 @@ def ensure_fine_weights(db, task: Task, project: Project, started: float, pipeli
         except ModelDownloadError as exc:
             raise FineFailure("MODEL_WEIGHT_DOWNLOAD_FAILED", str(exc)) from exc
     if pipeline == PIPELINE_NAME:
-        ensure_amb3r_weight(Path(settings.model_cache_dir))
         if read_bool((task.options or {}).get("fine_edgs_enabled"), True):
             ensure_roma_weights(Path(settings.model_cache_dir))
     elif pipeline == VIDEO_PIPELINE_NAME:

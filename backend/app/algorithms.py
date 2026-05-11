@@ -61,22 +61,21 @@ ALGORITHMS: list[dict[str, Any]] = [
         "notes": "Spark-readable SPZ conversion/validation.",
     },
     {
-        "name": "MobileGS Fine (AMB3R-SfM + EDGS/RoMA + DeblurMLP)",
-        "repo_url": "https://github.com/HengyiWang/amb3r",
-        "license": "Mixed upstream terms; AMB3R/VGGT/PTv3 + Deblur/LM-RS research use",
-        "commit_hash_setting": "amb3r_repo_commit",
+        "name": "MobileGS Fine (pycolmap + EDGS/RoMA + DeblurMLP)",
+        "repo_url": "https://github.com/colmap/pycolmap",
+        "license": "BSD-3-Clause plus local fine reconstruction integrations",
+        "commit_hash_setting": None,
         "local_path": FINE_ROOT / "runner.py",
         "enabled": True,
         "weight_paths": [
-            "amb3r/amb3r.pt",
             "roma/roma_outdoor.pth",
             "roma/roma_indoor.pth",
             "roma/dinov2_vitl14_pretrain.pth",
         ],
         "commands": {},
         "source_type": "system",
-        "license_notice": "Fine pipeline integrates the minimal AMB3R-SfM runtime from commit 7aae7fbb77a750651ffa236bb9c3212290c6fc78, Deblurring-3DGS GTnet ideas, and LM-RS matrix-free optimization. Preview still uses LiteVGGT.",
-        "notes": "Default image fine reconstruction pipeline: JPG/PNG normalization, AMB3R-SfM COLMAP-compatible no-EXIF sparse/0, EDGS/RoMA dense-correspondence Gaussian initialization, DeblurMLP-MobileGS warmup training, FastGS-style final pruning, patched LM-RS Compact Box rasterizer, optional LM-RS matrix-free Phase 2, and Spark SPZ conversion. pycolmap is explicit diagnostics only.",
+        "license_notice": "Image fine reconstruction uses pycolmap for COLMAP-compatible SfM and keeps Deblurring-3DGS GTnet ideas. Preview still uses LiteVGGT.",
+        "notes": "Default image fine reconstruction pipeline: JPG/PNG normalization, pycolmap COLMAP-compatible sparse/0, EDGS/RoMA dense-correspondence Gaussian initialization, DeblurMLP-MobileGS warmup training, FastGS-style final pruning, and Spark SPZ conversion.",
     },
     {
         "name": "Video Fine ARTDECO + Speed3R-Pi3",
@@ -95,7 +94,7 @@ ALGORITHMS: list[dict[str, Any]] = [
         "commands": {},
         "source_type": "adapted_module",
         "license_notice": "Video fine integrates ARTDECO VSLAM/Reconstruct at commit bb654395826e50ac9e4671682d901377115a24ce and replaces Pi3 loop-closure inference with Speed3R-Pi3 from commit 5460f7309c87e5daac36385ff6611627de7d7267. Speed3R-Pi3 weights are CC BY-NC 4.0.",
-        "notes": "Canonical video pipeline video_artdeco_speed3r. It accepts exactly one video, extracts frames, writes pinhole intrinsics when absent, runs ARTDECO h3dgsv3 training, validates point_clouds/gs.ply, and only then converts final.ply to Spark SPZ. It does not call AMB3R, MobileGS, LM-RS, or DeblurMLP.",
+        "notes": "Canonical video pipeline video_artdeco_speed3r. It accepts exactly one video, extracts frames, writes pinhole intrinsics when absent, runs ARTDECO h3dgsv3 training, validates point_clouds/gs.ply, and only then converts final.ply to Spark SPZ. It does not call the image fine stack.",
     },
     {
         "name": "Deblurring-3DGS GTnet",
@@ -205,7 +204,7 @@ def runtime_preflight(db: Session, settings: Settings | None = None) -> dict[str
                     weights_ready = False
             if not module_status.get("available", True):
                 issues.append(f"bundled module import failed: {module_status.get('error')}")
-            if item.name == "MobileGS Fine (AMB3R-SfM + EDGS/RoMA + DeblurMLP)":
+            if item.name == "MobileGS Fine (pycolmap + EDGS/RoMA + DeblurMLP)":
                 fine_runtime = fine_runtime_status()
                 extensions_ready = bool(fine_runtime["available"] or fine_workers["available"])
                 if not extensions_ready:
@@ -341,7 +340,7 @@ def bundled_module_status(name: str) -> dict[str, Any]:
     modules = {
         "LiteVGGT": "app.preview.vendor.litevggt_runtime",
         "LingBot-Map Video Preview": "app.preview.adapters.lingbot",
-        "MobileGS Fine (AMB3R-SfM + EDGS/RoMA + DeblurMLP)": "app.fine.runner",
+        "MobileGS Fine (pycolmap + EDGS/RoMA + DeblurMLP)": "app.fine.runner",
         "Video Fine ARTDECO + Speed3R-Pi3": "app.fine.video.pipeline",
         "Deblurring-3DGS GTnet": "app.fine.deblur_mlp",
         "Spark SPZ": "app.preview.io.spz",
@@ -368,11 +367,7 @@ def fine_runtime_status() -> dict[str, Any]:
     torch_status = torch_info()
     spark_status = spark_converter_status()
     modules = {
-        "amb3r": import_check("app.fine.amb3r_sfm"),
-        "omegaconf": import_check("omegaconf"),
-        "spconv": import_check("spconv.pytorch"),
-        "torch_scatter": import_check("torch_scatter"),
-        "timm": import_check("timm"),
+        "pycolmap": import_check("pycolmap"),
         "romatch": import_check("romatch"),
         "sklearn": import_check("sklearn"),
         "deblur_mlp": import_check("app.fine.deblur_mlp"),
@@ -380,11 +375,6 @@ def fine_runtime_status() -> dict[str, Any]:
         "simple_knn": import_check("simple_knn"),
         "fused_ssim": import_check("fused_ssim"),
     }
-    optional_modules = {
-        "pycolmap_diagnostic": import_check("pycolmap"),
-    }
-    modules["lmrs_matrix_free"] = lmrs_matrix_free_status(modules["diff_gaussian_rasterization"])
-    modules["compact_box"] = compact_box_status(modules["diff_gaussian_rasterization"])
     available = bool(
         torch_status.get("available")
         and torch_status.get("cuda_available")
@@ -396,8 +386,7 @@ def fine_runtime_status() -> dict[str, Any]:
         "torch_cuda": torch_status,
         "spark_spz": spark_status,
         **modules,
-        **optional_modules,
-        "error": None if available else "CUDA torch/Spark SPZ/AMB3R-SfM/EDGS-RoMA/DeblurMLP/LM-RS rasterizer/Compact Box/simple_knn/fused_ssim check failed",
+        "error": None if available else "CUDA torch/Spark SPZ/pycolmap/EDGS-RoMA/DeblurMLP/diff_gaussian_rasterization/simple_knn/fused_ssim check failed",
     }
 
 
@@ -415,7 +404,7 @@ def lingbot_preview_runtime_status() -> dict[str, Any]:
     unavailable_required = [
         name
         for name, status in modules.items()
-        if name != "flashinfer" and not status.get("available")
+        if not status.get("available")
     ]
     available = bool(
         torch_status.get("available")
@@ -428,6 +417,8 @@ def lingbot_preview_runtime_status() -> dict[str, Any]:
         "torch_cuda": torch_status,
         "spark_spz": spark_status,
         **modules,
+        "flashinfer_required": True,
+        "sdpa_fallback_requires_option": True,
         "sdpa_fallback": not modules["flashinfer"].get("available"),
         "error": None if available else "CUDA torch/Spark SPZ/LingBot-Map core runtime check failed",
     }
@@ -486,32 +477,6 @@ def litevggt_runtime_status() -> dict[str, Any]:
             from vggt.models.vggt import VGGT
 
         return {"available": True, "symbol": VGGT.__name__}
-    except Exception as exc:
-        return {"available": False, "error": str(exc)}
-
-
-def lmrs_matrix_free_status(raster_status: dict[str, Any]) -> dict[str, Any]:
-    if not raster_status.get("available"):
-        return {"available": False, "error": "diff_gaussian_rasterization import failed"}
-    try:
-        module = __import__("diff_gaussian_rasterization")
-        extension = getattr(module, "_C", None)
-        missing = [name for name in ("get_JTv", "get_Diag", "get_JTJv") if not hasattr(extension, name)]
-        if missing:
-            return {"available": False, "error": f"missing LM-RS matrix-free symbols: {', '.join(missing)}"}
-        return {"available": True, "symbols": ["get_JTv", "get_Diag", "get_JTJv"]}
-    except Exception as exc:
-        return {"available": False, "error": str(exc)}
-
-
-def compact_box_status(raster_status: dict[str, Any]) -> dict[str, Any]:
-    if not raster_status.get("available"):
-        return {"available": False, "error": "diff_gaussian_rasterization import failed"}
-    try:
-        module = __import__("diff_gaussian_rasterization")
-        if bool(getattr(module, "MOBILEGS_COMPACT_BOX", False)):
-            return {"available": True, "backend": "fastgs_compact_box_on_lmrs"}
-        return {"available": False, "error": "missing MOBILEGS_COMPACT_BOX marker"}
     except Exception as exc:
         return {"available": False, "error": str(exc)}
 

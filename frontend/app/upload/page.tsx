@@ -337,7 +337,7 @@ export default function UploadPage() {
           <div className="panel-body scrollable" style={{ padding: 0 }}>
             {viewer?.stale ? <div className="notice-box preview-stale">{viewer.message}</div> : null}
             {viewer?.status === "ready" ? (
-              <SplatViewer modelUrl={viewer.model_url} />
+              <SplatViewer modelUrl={viewer.model_url} format={viewer.format} />
             ) : (
               <div className="preview-stage">
                 <div className="preview-placeholder">

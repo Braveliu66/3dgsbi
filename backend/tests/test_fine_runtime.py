@@ -15,13 +15,11 @@ from app.fine.types import FineContext, FineFailure  # noqa: E402
 
 def import_fine_runtime():
     try:
-        from app.fine.amb3r_sfm import amb3r_weight_path
         from app.fine.preprocess import BlurScore, SceneBuildResult, summarize_blur_scores
         from app.fine.runner import build_scene, deblur_mlp_enabled_by_default, normalize_fine_pipeline
     except Exception as exc:
         raise unittest.SkipTest(f"fine runtime dependencies unavailable: {exc}") from exc
     return (
-        amb3r_weight_path,
         BlurScore,
         SceneBuildResult,
         summarize_blur_scores,
@@ -32,13 +30,14 @@ def import_fine_runtime():
 
 
 class FineRuntimeTests(unittest.TestCase):
-    def test_fine_runtime_registers_amb3r_edgs_runtime(self) -> None:
+    def test_fine_runtime_registers_pycolmap_edgs_runtime(self) -> None:
         algorithms_source = (BACKEND_ROOT / "app" / "algorithms.py").read_text(encoding="utf-8")
         fine_status_block = algorithms_source.split("def fine_runtime_status", 1)[1].split("def ", 1)[0]
 
-        self.assertIn("amb3r", fine_status_block)
+        self.assertIn("pycolmap", fine_status_block)
         self.assertIn("romatch", fine_status_block)
         self.assertIn("sklearn", fine_status_block)
+        self.assertNotIn("amb3r", fine_status_block)
         self.assertNotIn("transformer_engine", fine_status_block)
 
     def test_trainer_uses_local_runtime_not_lmrs_repo_training(self) -> None:
@@ -69,20 +68,23 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn('"active": False', trainer_source)
         self.assertIn("LM-RS temporarily isolated due to unstable local backend", trainer_source)
 
-    def test_compact_box_patch_is_build_input(self) -> None:
-        patch_source = (BACKEND_ROOT.parent / "worker" / "patches" / "lmrs-fastgs-compact-box.patch").read_text(encoding="utf-8")
-        metric_patch = (BACKEND_ROOT.parent / "worker" / "patches" / "fastgs-cuda-metric-accumulation.patch").read_text(encoding="utf-8")
-
-        self.assertIn("duplicateToTilesTouched", patch_source)
-        self.assertIn("MOBILEGS_COMPACT_BOX", patch_source)
-        self.assertIn("fastgs_accumulate_metrics", metric_patch)
-        self.assertIn("MOBILEGS_FASTGS_METRIC", metric_patch)
+    def test_worker_builds_vendored_3dgs_extensions_without_lmrs(self) -> None:
         dockerfile = (BACKEND_ROOT.parent / "worker" / "Dockerfile").read_text(encoding="utf-8")
-        self.assertIn("get_JTv", metric_patch)
-        self.assertIn("fastgs_accumulate_metrics", dockerfile)
-        self.assertIn("fastgs-cuda-metric-accumulation.patch", dockerfile)
+
+        self.assertNotIn("lm-rs", dockerfile.lower())
+        self.assertNotIn("LMRS_ROOT", dockerfile)
+        self.assertNotIn("lmrs-fastgs-compact-box.patch", dockerfile)
+        self.assertNotIn("fastgs-cuda-metric-accumulation.patch", dockerfile)
+        self.assertIn("backend/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/diff-gaussian-rasterization", dockerfile)
+        self.assertIn("backend/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/simple-knn", dockerfile)
+        self.assertIn("cached_wheel_install diff-gaussian-rasterization /app/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/diff-gaussian-rasterization", dockerfile)
+        self.assertNotIn("cached_wheel_install simple-knn-local", dockerfile)
+        self.assertIn("cached_wheel_install simple-knn-artdeco", dockerfile)
+        self.assertIn("retry_pip --force-reinstall --no-deps \"$wheel\"", dockerfile)
+        self.assertIn("ARTDECO simple-knn distIndex2 import ok", dockerfile)
+        self.assertIn("libc10.so", dockerfile)
+        self.assertIn("/etc/ld.so.conf.d/pytorch.conf", dockerfile)
         self.assertIn("retry_git", dockerfile)
-        self.assertIn("submodule update --init --recursive", dockerfile)
         self.assertIn("libeigen3-dev", dockerfile)
         self.assertIn("test -f /usr/include/eigen3/Eigen/Sparse", dockerfile)
         self.assertIn('"/usr/include/eigen3"', dockerfile)
@@ -94,12 +96,21 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("three-dgs-worker-lingbot-map-git-cache", dockerfile)
         self.assertIn("CACHED_LINGBOT_MAP", dockerfile)
         self.assertNotIn('retry_pip --no-deps "git+$LINGBOT_MAP_REPO_URL@$LINGBOT_MAP_REPO_COMMIT"', dockerfile)
-        self.assertIn("LMRS_GLM", dockerfile)
-        self.assertIn("glm/glm.hpp", dockerfile)
-        self.assertIn("VENDORED_GLM", dockerfile)
         self.assertNotIn("source.trainer", dockerfile)
-        self.assertIn("fastgs-cuda-metric-accumulation.patch", (BACKEND_ROOT.parent / "scripts" / "bootstrap-repos.sh").read_text(encoding="utf-8"))
-        self.assertIn("fastgs-cuda-metric-accumulation.patch", (BACKEND_ROOT.parent / "scripts" / "bootstrap-repos.ps1").read_text(encoding="utf-8"))
+        self.assertNotIn("lm-rs", (BACKEND_ROOT.parent / "scripts" / "bootstrap-repos.sh").read_text(encoding="utf-8").lower())
+        self.assertNotIn("lm-rs", (BACKEND_ROOT.parent / "scripts" / "bootstrap-repos.ps1").read_text(encoding="utf-8").lower())
+
+    def test_artdeco_command_uses_official_quality_defaults_without_gaussian_cap(self) -> None:
+        trainer_source = (BACKEND_ROOT / "app" / "fine" / "video" / "artdeco_trainer.py").read_text(encoding="utf-8")
+        entrypoint_source = (BACKEND_ROOT / "app" / "fine" / "video" / "artdeco_entrypoint.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("ARTDECO_MAX_GAUSSIANS", trainer_source)
+        self.assertNotIn("gaussian cap pruned", entrypoint_source)
+        self.assertIn("gaussian_total_cap=disabled", entrypoint_source)
+        self.assertIn('options.get("fine_artdeco_gs_add_ratio"), 1.0', trainer_source)
+        self.assertIn('options.get("fine_artdeco_visible_threshold"), 0.0', trainer_source)
+        self.assertIn('options.get("fine_artdeco_sh_degree"), 3', trainer_source)
+        self.assertIn('options.get("fine_artdeco_max_active_keyframes"), 400', trainer_source)
 
     def test_fine_code_is_split_by_integration_boundary(self) -> None:
         fine_root = BACKEND_ROOT / "app" / "fine"
@@ -115,8 +126,8 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertTrue((fine_root / "local_3dgs" / "render.py").exists())
         self.assertTrue((fine_root / "lmrs_runtime.py").exists())
         self.assertTrue((fine_root / "option_utils.py").exists())
-        self.assertTrue((fine_root / "amb3r_sfm.py").exists())
-        self.assertTrue((fine_root / "amb3r_runtime").exists())
+        self.assertFalse((fine_root / "amb3r_sfm.py").exists())
+        self.assertFalse((fine_root / "amb3r_runtime").exists())
         self.assertTrue((fine_root / "edgs_init.py").exists())
         self.assertTrue((fine_root / "edgs_runtime" / "corr_init.py").exists())
 
@@ -218,7 +229,7 @@ class FineRuntimeTests(unittest.TestCase):
             self.assertEqual(result.metrics["artdeco_metric"], 1)
 
     def test_blur_summary_reports_kept_images(self) -> None:
-        _, BlurScore, _, summarize_blur_scores, *_ = import_fine_runtime()
+        BlurScore, _, summarize_blur_scores, *_ = import_fine_runtime()
         scores = [
             BlurScore(path=Path(f"{index}.jpg"), laplacian=140.0, gradient=50.0, fft_high_ratio=0.1)
             for index in range(10)
@@ -230,7 +241,7 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertEqual(summary.kept_images, 8)
 
     def test_any_blurry_training_image_triggers_deblur(self) -> None:
-        _, BlurScore, _, summarize_blur_scores, _, deblur_mlp_enabled_by_default, _ = import_fine_runtime()
+        BlurScore, _, summarize_blur_scores, _, deblur_mlp_enabled_by_default, _ = import_fine_runtime()
         scores = [
             BlurScore(path=Path(f"sharp_{index}.jpg"), laplacian=180.0, gradient=55.0, fft_high_ratio=0.12)
             for index in range(9)
@@ -245,7 +256,7 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertEqual(summary.deblur_trigger_reason, "training_blur:mixed")
 
     def test_rejected_blurry_image_does_not_trigger_deblur(self) -> None:
-        _, BlurScore, _, summarize_blur_scores, _, deblur_mlp_enabled_by_default, _ = import_fine_runtime()
+        BlurScore, _, summarize_blur_scores, _, deblur_mlp_enabled_by_default, _ = import_fine_runtime()
         scores = [
             BlurScore(path=Path(f"sharp_{index}.jpg"), laplacian=180.0, gradient=55.0, fft_high_ratio=0.12)
             for index in range(9)
@@ -259,315 +270,60 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertEqual(summary.mode, "sharp")
         self.assertFalse(deblur_mlp_enabled_by_default(summary.mode, {}))
 
-    def test_sfm_defaults_to_amb3r(self) -> None:
-        _, _, SceneBuildResult, _, build_scene, *_ = import_fine_runtime()
-        expected = SceneBuildResult(Path("scene"), "amb3r_sfm_colmap_no_exif", 8, 8, 100, {"sfm_backend": "amb3r_sfm_colmap_no_exif"})
+    def test_sfm_defaults_to_pycolmap(self) -> None:
+        _, SceneBuildResult, _, build_scene, *_ = import_fine_runtime()
+        expected = SceneBuildResult(Path("scene"), "pycolmap", 8, 8, 100, {"sfm_backend": "pycolmap"})
         ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={}, progress=None)
-        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_amb3r_colmap_scene", return_value=expected) as amb3r, patch(
-            "app.fine.runner.build_pycolmap_scene"
-        ) as pycolmap:
-            result = build_scene(ctx, Path(tmp), Path(tmp) / "scene", 8192, 1600, 8)
-
-        self.assertEqual(result.backend, "amb3r_sfm_colmap_no_exif")
-        amb3r.assert_called_once()
-        pycolmap.assert_not_called()
-
-    def test_sfm_does_not_auto_fallback_to_pycolmap(self) -> None:
-        _, _, _, _, build_scene, *_ = import_fine_runtime()
-        ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={}, progress=None)
-        with tempfile.TemporaryDirectory() as tmp, patch(
-            "app.fine.runner.build_amb3r_colmap_scene",
-            side_effect=FineFailure("AMB3R_WEIGHT_MISSING", "missing"),
-        ), patch("app.fine.runner.build_pycolmap_scene") as pycolmap:
-            with self.assertRaises(FineFailure) as raised:
-                build_scene(ctx, Path(tmp), Path(tmp) / "scene", 8192, 1600, 8)
-
-        self.assertEqual(raised.exception.code, "AMB3R_WEIGHT_MISSING")
-        pycolmap.assert_not_called()
-
-    def test_explicit_pycolmap_backend_is_diagnostic_only(self) -> None:
-        _, _, SceneBuildResult, _, build_scene, *_ = import_fine_runtime()
-        expected = SceneBuildResult(Path("scene"), "pycolmap", 3, 3, 42, {"sfm_backend": "pycolmap"})
-        ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={"fine_sfm_backend": "pycolmap"}, progress=None)
-        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_amb3r_colmap_scene") as amb3r, patch(
-            "app.fine.runner.build_pycolmap_scene", return_value=expected
-        ) as pycolmap:
+        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_pycolmap_scene", return_value=expected) as pycolmap:
             result = build_scene(ctx, Path(tmp), Path(tmp) / "scene", 8192, 1600, 8)
 
         self.assertEqual(result.backend, "pycolmap")
-        self.assertEqual(result.metrics["sfm_backend_requested"], "pycolmap_diagnostic")
-        amb3r.assert_not_called()
         pycolmap.assert_called_once()
 
-    def test_litevggt_fine_backend_alias_maps_to_amb3r(self) -> None:
-        _, _, SceneBuildResult, _, build_scene, *_ = import_fine_runtime()
-        expected = SceneBuildResult(Path("scene"), "amb3r_sfm_colmap_no_exif", 3, 3, 42, {"sfm_backend": "amb3r_sfm_colmap_no_exif"})
-        ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={"fine_sfm_backend": "litevggt"}, progress=None)
-        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_amb3r_colmap_scene", return_value=expected) as amb3r:
+    def test_explicit_pycolmap_backend_uses_same_default_path(self) -> None:
+        _, SceneBuildResult, _, build_scene, *_ = import_fine_runtime()
+        expected = SceneBuildResult(Path("scene"), "pycolmap", 3, 3, 42, {"sfm_backend": "pycolmap"})
+        ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={"fine_sfm_backend": "pycolmap"}, progress=None)
+        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_pycolmap_scene", return_value=expected) as pycolmap:
             result = build_scene(ctx, Path(tmp), Path(tmp) / "scene", 8192, 1600, 8)
 
-        self.assertEqual(result.backend, "amb3r_sfm_colmap_no_exif")
-        self.assertEqual(result.metrics["sfm_backend_requested_alias"], "litevggt_deprecated_maps_to_amb3r")
-        amb3r.assert_called_once()
-        runner_source = (BACKEND_ROOT / "app" / "fine" / "runner.py").read_text(encoding="utf-8")
-        self.assertIn("fine_amb3r_keep_ratio", runner_source)
-        self.assertIn("0.12", runner_source)
+        self.assertEqual(result.backend, "pycolmap")
+        self.assertNotIn("sfm_backend_requested", result.metrics)
+        pycolmap.assert_called_once()
 
-    def test_amb3r_weight_directory_and_auto_download_registration(self) -> None:
-        self.assertTrue((BACKEND_ROOT.parent / "model-cache" / "amb3r").exists())
+    def test_colmap_backend_alias_maps_to_pycolmap(self) -> None:
+        _, SceneBuildResult, _, build_scene, *_ = import_fine_runtime()
+        expected = SceneBuildResult(Path("scene"), "pycolmap", 3, 3, 42, {"sfm_backend": "pycolmap"})
+        ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={"fine_sfm_backend": "colmap"}, progress=None)
+        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_pycolmap_scene", return_value=expected) as pycolmap:
+            result = build_scene(ctx, Path(tmp), Path(tmp) / "scene", 8192, 1600, 8)
+
+        self.assertEqual(result.backend, "pycolmap")
+        self.assertEqual(result.metrics["sfm_backend_requested_alias"], "colmap_maps_to_pycolmap")
+        pycolmap.assert_called_once()
+
+    def test_removed_fine_sfm_backends_are_unsupported(self) -> None:
+        *_, build_scene, _, _ = import_fine_runtime()
+        ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={"fine_sfm_backend": "litevggt"}, progress=None)
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(FineFailure) as raised:
+                build_scene(ctx, Path(tmp), Path(tmp) / "scene", 8192, 1600, 8)
+
+        self.assertEqual(raised.exception.code, "UNSUPPORTED_FINE_SFM_BACKEND")
+
+    def test_pycolmap_weight_registration_uses_only_edgs_weights(self) -> None:
         fine_worker_source = (BACKEND_ROOT / "app" / "fine_worker.py").read_text(encoding="utf-8")
-        self.assertIn("ensure_amb3r_weight", fine_worker_source)
         self.assertIn("download_model_weights", fine_worker_source)
         self.assertIn("weights_for_pipeline", fine_worker_source)
-        try:
-            from app.fine.amb3r_sfm import amb3r_weight_path, build_amb3r_colmap_scene
-        except Exception as exc:
-            raise unittest.SkipTest(f"AMB3R lightweight import unavailable: {exc}") from exc
+        self.assertIn("ensure_roma_weights", fine_worker_source)
+        self.assertNotIn("ensure_amb3r_weight", fine_worker_source)
 
-        with tempfile.TemporaryDirectory() as tmp:
-            weight = amb3r_weight_path(Path(tmp))
-            self.assertTrue(weight.parent.exists())
-            self.assertEqual(weight.name, "amb3r.pt")
-            with self.assertRaises(FineFailure) as raised:
-                build_amb3r_colmap_scene(
-                    Path(tmp),
-                    Path(tmp) / "scene",
-                    checkpoint_path=weight,
-                    keep_ratio=0.12,
-                    max_points=10000,
-                    progress=lambda *_: None,
-                )
-
-        self.assertEqual(raised.exception.code, "AMB3R_WEIGHT_MISSING")
-
-    def test_amb3r_colmap_writer_creates_sparse_outputs(self) -> None:
-        try:
-            import numpy as np
-        except Exception as exc:
-            raise unittest.SkipTest(f"numpy unavailable: {exc}") from exc
-        from app.fine.amb3r_sfm import ProcessedAmb3rImage, write_colmap_model, write_gaussian_splatting_ply
-
-        with tempfile.TemporaryDirectory() as tmp:
-            sparse_dir = Path(tmp) / "sparse" / "0"
-            sparse_dir.mkdir(parents=True)
-            images = [
-                ProcessedAmb3rImage(Path(f"{index}.jpg"), 640, 480, 518, 392, 0, 0, 640, 480, np.zeros((392, 518, 3), dtype=np.float32))
-                for index in range(3)
-            ]
-            poses = np.tile(np.eye(4, dtype=np.float32), (3, 1, 1))
-            poses[:, 0, 3] = np.arange(3, dtype=np.float32)
-            intrinsics = np.tile(np.eye(3, dtype=np.float32), (3, 1, 1))
-            intrinsics[:, 0, 0] = 500.0
-            intrinsics[:, 1, 1] = 510.0
-            intrinsics[:, 0, 2] = 259.0
-            intrinsics[:, 1, 2] = 196.0
-            points = np.array([[0.0, 0.0, 1.0], [0.1, 0.2, 1.2]], dtype=np.float32)
-            colors = np.array([[255, 0, 0], [0, 255, 0]], dtype=np.uint8)
-
-            write_gaussian_splatting_ply(sparse_dir / "points3D.ply", points, colors)
-            write_colmap_model(sparse_dir, images, [0, 1, 2], poses, intrinsics, points, colors)
-
-            self.assertTrue((sparse_dir / "cameras.bin").exists())
-            self.assertTrue((sparse_dir / "images.bin").exists())
-            self.assertTrue((sparse_dir / "points3D.bin").exists())
-            self.assertTrue((sparse_dir / "points3D.ply").stat().st_size > 0)
-
-    def test_amb3r_auto_resolution_preserves_aspect_and_patch_multiple(self) -> None:
-        try:
-            from PIL import Image
-            from app.fine.amb3r_sfm import AMB3R_PATCH_SIZE, prepare_amb3r_images, resolve_amb3r_resolution
-        except Exception as exc:
-            raise unittest.SkipTest(f"AMB3R helpers unavailable: {exc}") from exc
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            files = []
-            for index in range(4):
-                path = root / f"{index}.jpg"
-                Image.new("RGB", (1600, 1066), color=(index, index, index)).save(path)
-                files.append(path)
-
-            plan = resolve_amb3r_resolution(files, {"fine_amb3r_token_budget": 4000})
-            images_dir = root / "images"
-            images_dir.mkdir()
-            processed = prepare_amb3r_images(files, images_dir, width=plan.selected_width, height=plan.selected_height, target_aspect=plan.target_aspect)
-
-        self.assertEqual(plan.selected_width % AMB3R_PATCH_SIZE, 0)
-        self.assertEqual(plan.selected_height % AMB3R_PATCH_SIZE, 0)
-        self.assertLess(abs((plan.selected_width / plan.selected_height) - (1600 / 1066)), 0.05)
-        self.assertEqual(processed[0].processed_width, plan.selected_width)
-        self.assertEqual(processed[0].processed_height, plan.selected_height)
-
-    def test_amb3r_pose_alignment_accepts_bfloat16_numpy_boundary(self) -> None:
-        try:
-            import torch
-            from app.fine.amb3r_runtime.amb3r.tools.pose_align import average_transforms_with_weights
-        except Exception as exc:
-            raise unittest.SkipTest(f"AMB3R pose alignment dependencies unavailable: {exc}") from exc
-
-        transforms = torch.eye(4, dtype=torch.bfloat16).repeat(3, 1, 1)
-        transforms[:, 0, 3] = torch.tensor([0.0, 1.0, 2.0], dtype=torch.bfloat16)
-        weights = torch.ones(3, dtype=torch.bfloat16)
-
-        averaged = average_transforms_with_weights(transforms, weights)
-
-        self.assertEqual(averaged.dtype, torch.bfloat16)
-        self.assertTrue(torch.isfinite(averaged.float()).all())
-
-    def test_amb3r_to_numpy_casts_bfloat16_to_float32(self) -> None:
-        try:
-            import numpy as np
-            import torch
-            from app.fine.amb3r_sfm import to_numpy
-        except Exception as exc:
-            raise unittest.SkipTest(f"AMB3R numpy conversion dependencies unavailable: {exc}") from exc
-
-        value = torch.tensor([[1.0, 2.0]], dtype=torch.bfloat16)
-
-        converted = to_numpy(value)
-
-        self.assertEqual(converted.dtype, np.float32)
-        self.assertEqual(converted.shape, (1, 2))
-
-    def test_amb3r_window_planning_uses_overlap_and_tail_window(self) -> None:
-        try:
-            from app.fine.amb3r_sfm import plan_amb3r_windows
-        except Exception as exc:
-            raise unittest.SkipTest(f"AMB3R window helpers unavailable: {exc}") from exc
-
-        windows = plan_amb3r_windows(
-            150,
-            {
-                "fine_amb3r_windowed": "true",
-                "fine_amb3r_window_size": 64,
-                "fine_amb3r_window_overlap": 12,
-            },
-        )
-
-        self.assertEqual([(window.start, window.end) for window in windows], [(0, 64), (52, 116), (104, 150)])
-
-    def test_amb3r_window_planning_keeps_small_sets_full_scene(self) -> None:
-        try:
-            from app.fine.amb3r_sfm import plan_amb3r_windows
-        except Exception as exc:
-            raise unittest.SkipTest(f"AMB3R window helpers unavailable: {exc}") from exc
-
-        windows = plan_amb3r_windows(94, {})
-
-        self.assertEqual([(window.start, window.end) for window in windows], [(0, 94)])
-
-    def test_amb3r_similarity_transform_aligns_window_centers(self) -> None:
-        try:
-            import numpy as np
-            from app.fine.amb3r_sfm import apply_similarity_to_points, estimate_similarity_transform
-        except Exception as exc:
-            raise unittest.SkipTest(f"AMB3R similarity helpers unavailable: {exc}") from exc
-
-        source = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 2.0, 0.0]], dtype=np.float32)
-        target = source * 2.0 + np.array([3.0, -1.0, 0.5], dtype=np.float32)
-
-        transform = estimate_similarity_transform(source, target)
-        aligned = apply_similarity_to_points(source, transform)
-
-        np.testing.assert_allclose(aligned, target, rtol=1e-5, atol=1e-5)
-
-    def test_amb3r_materialize_result_clones_inference_tensors(self) -> None:
-        try:
-            import torch
-            from app.fine.amb3r_runtime.sfm.pipeline import materialize_result
-        except Exception as exc:
-            raise unittest.SkipTest(f"AMB3R materialize helper unavailable: {exc}") from exc
-
-        with torch.inference_mode():
-            result = {"pose": torch.eye(4)}
-
-        materialized = materialize_result(result)
-        materialized["pose"][0, 3] = 1.0
-
-        self.assertEqual(float(materialized["pose"][0, 3]), 1.0)
-
-    def test_amb3r_sfm_memory_device_option_does_not_move_model(self) -> None:
-        try:
-            from app.fine.amb3r_runtime.sfm.pipeline import AMB3R_SfM
-        except Exception as exc:
-            raise unittest.SkipTest(f"AMB3R SfM pipeline unavailable: {exc}") from exc
-
-        class DummyModel:
-            def __init__(self) -> None:
-                self.to_device = None
-                self.device = None
-
-            def to(self, device):
-                self.to_device = str(device)
-                return self
-
-        with tempfile.TemporaryDirectory() as tmp:
-            cfg_path = Path(tmp) / "sfm.yaml"
-            cfg_path.write_text("device: 'cuda:0'\n", encoding="utf-8")
-            model = DummyModel()
-            with patch("torch.cuda.is_available", return_value=True):
-                pipeline = AMB3R_SfM(model, cfg_path=cfg_path, options={"fine_amb3r_memory_device": "cpu"})
-
-        self.assertEqual(model.to_device, "cuda:0")
-        self.assertEqual(model.device, "cuda:0")
-        self.assertEqual(str(pipeline.device), "cuda:0")
-        self.assertEqual(str(pipeline.memory_device), "cpu")
-        self.assertEqual(str(pipeline.cfg.device), "cpu")
-        self.assertEqual(pipeline.metrics()["amb3r_sfm_config_memory_device"], "cpu")
-
-    def test_amb3r_initialize_map_limits_extra_candidate_runs(self) -> None:
-        try:
-            import torch
-            from app.fine.amb3r_runtime.sfm.pipeline import AMB3R_SfM
-        except Exception as exc:
-            raise unittest.SkipTest(f"AMB3R SfM pipeline unavailable: {exc}") from exc
-
-        class DummyModel:
-            def to(self, device):
-                return self
-
-        class DummyMemory:
-            def __init__(self) -> None:
-                self.best_kf_idx = None
-                self.cluster_pred_all = None
-
-            def initialize(self, cluster_pred_all, best_kf_idx):
-                self.cluster_pred_all = cluster_pred_all
-                self.best_kf_idx = best_kf_idx
-
-        with tempfile.TemporaryDirectory() as tmp:
-            cfg_path = Path(tmp) / "sfm.yaml"
-            cfg_path.write_text("device: 'cpu'\n", encoding="utf-8")
-            pipeline = AMB3R_SfM(DummyModel(), cfg_path=cfg_path, options={"fine_amb3r_init_candidates": 2})
-
-        calls = []
-
-        def local_mapping(views_to_map, cfg):
-            ids = [int(value) for value in views_to_map["images"][0, :, 0, 0, 0].tolist()]
-            calls.append(ids)
-            return {"score": len(calls)}
-
-        def build_prediction_dict(res, idx_to_use):
-            return {"conf": torch.tensor([[float(res["score"])]])}
-
-        memory = DummyMemory()
-        pipeline.keyframe_memory = memory
-        pipeline.local_mapping = local_mapping
-        pipeline.build_prediction_dict = build_prediction_dict
-
-        images = torch.arange(5, dtype=torch.float32).view(1, 5, 1, 1, 1)
-        pipeline.initialize_map(images, 0, [1, 2, 3, 4])
-
-        self.assertEqual(calls, [[0, 1, 2, 3, 4], [1, 2, 3, 4, 0], [2, 1, 3, 4, 0]])
-        self.assertEqual(memory.best_kf_idx, 2)
-        self.assertEqual(set(memory.cluster_pred_all), {0, 1, 2})
-
-    def test_preview_litevggt_and_fine_amb3r_imports_are_isolated(self) -> None:
+    def test_preview_litevggt_and_fine_runner_imports_are_isolated(self) -> None:
         sys.modules.pop("vggt", None)
 
         try:
             import app.preview.vendor.litevggt_runtime  # noqa: F401
-            import app.fine.amb3r_sfm  # noqa: F401
+            import app.fine.runner  # noqa: F401
         except Exception as exc:
             raise unittest.SkipTest(f"preview/fine lightweight imports unavailable: {exc}") from exc
 
@@ -623,15 +379,23 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertNotIn("pycolmap", requirements)
         self.assertIn("transformer-engine[pytorch]==2.4.0", dockerfile)
         self.assertIn("pycolmap==3.12.6", dockerfile)
-        self.assertIn("spconv-cu118==2.3.8", dockerfile)
-        self.assertIn("torch-scatter==2.1.2", dockerfile)
+        self.assertNotIn("spconv-cu118==2.3.8", dockerfile)
+        self.assertNotIn("torch-scatter==2.1.2", dockerfile)
+        self.assertIn("cython==0.29.37", requirements)
         self.assertIn("romatch==0.1.2", requirements)
         self.assertIn("scikit-learn==1.6.1", requirements)
         self.assertIn("seaborn==0.13.2", requirements)
+        self.assertIn("evo==1.36.4", requirements)
+        self.assertIn("cupy-cuda12x==13.6.0", requirements)
+        self.assertIn("moderngl==5.12.0", requirements)
+        self.assertIn("moderngl-window==2.4.6", requirements)
+        self.assertIn("glfw", requirements)
+        self.assertIn("pyglm", requirements)
+        self.assertIn("msgpack", requirements)
+        self.assertIn("trimesh[easy]", requirements)
         self.assertIn("hf_endpoint", dockerfile)
         self.assertIn("https://hf-mirror.com", dockerfile)
-        self.assertIn("/model-cache/roma/roma_outdoor.pth", dockerfile)
-        self.assertIn("/model-cache/roma/dinov2_vitl14_pretrain.pth", dockerfile)
+        self.assertIn("/model-cache/roma", dockerfile)
         self.assertNotIn("compvis/edgs", dockerfile)
         constraints = (worker_root / "constraints.txt").read_text(encoding="utf-8").lower()
         self.assertIn("torch==2.8.0", constraints)
@@ -646,18 +410,31 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("safetensors==0.7.0", requirements)
         self.assertIn("pypose==0.7.3", requirements)
         self.assertIn("natsort==8.4.0", requirements)
-        self.assertIn("mkdir -p /model-cache/amb3r", dockerfile)
+        self.assertNotIn("/model-cache/amb3r", dockerfile)
         self.assertIn("/model-cache/speed3r_pi3", dockerfile)
         self.assertIn("/model-cache/mast3r", dockerfile)
         self.assertIn("artdeco_repo_commit", dockerfile)
         self.assertIn("speed3r_repo_commit", dockerfile)
         self.assertIn("env pythonpath=${artdeco_root}/vslam/thirdparty/mast3r/dust3r/croco", dockerfile)
         self.assertIn("three-dgs-worker-extension-wheel-cache", dockerfile)
+        self.assertNotIn("three-dgs-worker-lmrs-git-cache", dockerfile)
+        self.assertNotIn("lmrs_repo_url", dockerfile)
+        self.assertNotIn("lmrs_root", dockerfile)
+        self.assertNotIn("cached_wheel_install simple-knn-local", dockerfile)
+        self.assertIn("retry_pip --force-reinstall --no-deps \"$wheel\"", dockerfile)
+        self.assertIn("libc10.so", dockerfile)
+        self.assertIn("/etc/ld.so.conf.d/pytorch.conf", dockerfile)
+        self.assertNotIn("copy backend/app/fine/video/artdeco_optimizer_compat.py /tmp", dockerfile)
+        self.assertIn("cached_wheel_install simple-knn-artdeco", dockerfile)
+        self.assertIn("cached_wheel_install pyimgui", dockerfile)
         self.assertIn("cached_wheel_install curope", dockerfile)
-        self.assertIn("artdeco rope2d cuda extension import ok", dockerfile)
-        self.assertIn("speed3r rope2d cuda extension import ok", dockerfile)
+        self.assertIn("artdeco pi3 rope2d patch did not apply", dockerfile)
+        self.assertIn("artdeco simple-knn distindex2 import ok", dockerfile)
+        self.assertNotIn("artdeco vslam visualization dependencies import ok", dockerfile)
+        self.assertNotIn("artdeco mapping entrypoint imports ok", dockerfile)
+        self.assertNotIn("artdeco rope2d cuda extension import ok", dockerfile)
+        self.assertNotIn("speed3r rope2d cuda extension import ok", dockerfile)
         self.assertIn("cached_wheel_install artdeco-vslam \"$artdeco_root/vslam\"", dockerfile)
-        self.assertIn("three-dgs-worker-weight-download-cache", dockerfile)
         self.assertLess(
             dockerfile.index("copy backend/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/fused-ssim"),
             dockerfile.index("cached_wheel_install fused-ssim"),

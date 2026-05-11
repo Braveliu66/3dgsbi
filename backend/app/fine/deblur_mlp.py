@@ -262,8 +262,6 @@ def render_with_deblur_mlp(viewpoint_camera: Any, pc: Any, pipe: Any, bg_color: 
             scales=scales * scale_delta,
             rotations=rotations * rotation_delta,
             cov3D_precomp=None,
-            cgState=None,
-            current_batch=-1,
         )
         return {"render": image, "viewspace_points": screen, "visibility_filter": radii > 0, "radii": radii}
 
@@ -295,8 +293,6 @@ def render_with_deblur_mlp(viewpoint_camera: Any, pc: Any, pipe: Any, bg_color: 
             scales=scales * scale_delta[..., delta_index],
             rotations=rotations * rotation_delta[..., delta_index],
             cov3D_precomp=None,
-            cgState=None,
-            current_batch=-1,
         )
         renders.append(image)
         radii_accum = radii if radii_accum is None else torch.maximum(radii_accum, radii)
@@ -314,25 +310,30 @@ def render_with_deblur_mlp(viewpoint_camera: Any, pc: Any, pipe: Any, bg_color: 
 def _raster_settings(viewpoint_camera: Any, pc: Any, pipe: Any, bg_color: torch.Tensor) -> Any:
     from diff_gaussian_rasterization import GaussianRasterizationSettings
 
-    return GaussianRasterizationSettings(
-        image_height=int(viewpoint_camera.image_height),
-        image_width=int(viewpoint_camera.image_width),
-        tanfovx=math.tan(viewpoint_camera.FoVx * 0.5),
-        tanfovy=math.tan(viewpoint_camera.FoVy * 0.5),
-        bg=bg_color,
-        scale_modifier=1.0,
-        viewmatrix=viewpoint_camera.world_view_transform,
-        projmatrix=viewpoint_camera.full_proj_transform,
-        sh_degree=pc.active_sh_degree,
-        campos=viewpoint_camera.camera_center,
-        prefiltered=False,
-        debug=bool(getattr(pipe, "debug", False)),
-        isbatched=False,
-        end_transmittance=0.0001,
-        enable_timer=bool(getattr(pipe, "enable_timer", False)),
-        return_matvec_kernels=bool(getattr(pipe, "return_matvec_kernels", False)),
-        enable_error_check=bool(getattr(pipe, "enable_error_check", False)),
-    )
+    values = {
+        "image_height": int(viewpoint_camera.image_height),
+        "image_width": int(viewpoint_camera.image_width),
+        "tanfovx": math.tan(viewpoint_camera.FoVx * 0.5),
+        "tanfovy": math.tan(viewpoint_camera.FoVy * 0.5),
+        "bg": bg_color,
+        "scale_modifier": 1.0,
+        "viewmatrix": viewpoint_camera.world_view_transform,
+        "projmatrix": viewpoint_camera.full_proj_transform,
+        "sh_degree": pc.active_sh_degree,
+        "campos": viewpoint_camera.camera_center,
+        "prefiltered": False,
+        "debug": bool(getattr(pipe, "debug", False)),
+        "antialiasing": bool(getattr(pipe, "antialiasing", False)),
+        "isbatched": False,
+        "end_transmittance": 0.0001,
+        "enable_timer": bool(getattr(pipe, "enable_timer", False)),
+        "return_matvec_kernels": bool(getattr(pipe, "return_matvec_kernels", False)),
+        "enable_error_check": bool(getattr(pipe, "enable_error_check", False)),
+    }
+    fields = getattr(GaussianRasterizationSettings, "_fields", ())
+    if fields:
+        values = {key: value for key, value in values.items() if key in fields}
+    return GaussianRasterizationSettings(**values)
 
 
 def _screen_space_points(points: torch.Tensor) -> torch.Tensor:

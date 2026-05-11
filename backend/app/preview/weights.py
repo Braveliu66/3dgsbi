@@ -34,10 +34,6 @@ LINGBOT_MAP_LONG_WEIGHT = ModelWeight(
     "lingbot/lingbot-map-long.pt",
     "https://huggingface.co/robbyant/lingbot-map/resolve/main/lingbot-map-long.pt",
 )
-AMB3R_WEIGHT = ModelWeight(
-    "amb3r/amb3r.pt",
-    "https://drive.google.com/file/d/14x0WW2rUE_he2hUEouP6ywSRnlJDeLel/view?usp=sharing",
-)
 ROMA_OUTDOOR_WEIGHT = ModelWeight(
     "roma/roma_outdoor.pth",
     "https://huggingface.co/xmanifold/roma/resolve/main/roma_outdoor.pth",
@@ -74,7 +70,6 @@ MAST3R_RETRIEVAL_CODEBOOK = ModelWeight(
 MODEL_WEIGHTS: tuple[ModelWeight, ...] = (
     LITEVGGT_WEIGHT,
     LINGBOT_MAP_LONG_WEIGHT,
-    AMB3R_WEIGHT,
     ROMA_OUTDOOR_WEIGHT,
     ROMA_INDOOR_WEIGHT,
     ROMA_DINOV2_WEIGHT,
@@ -90,7 +85,6 @@ PIPELINE_WEIGHT_PATHS: dict[str, tuple[str, ...]] = {
     "litevggt_spz": ("litevggt/te_dict.pt",),
     "lingbot_map_spz": ("lingbot/lingbot-map-long.pt",),
     "mobilegs_lmrs": (
-        "amb3r/amb3r.pt",
         "roma/roma_outdoor.pth",
         "roma/roma_indoor.pth",
         "roma/dinov2_vitl14_pretrain.pth",

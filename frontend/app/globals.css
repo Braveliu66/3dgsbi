@@ -436,6 +436,14 @@ p { line-height: 1.55; }
   border-bottom: 0;
 }
 
+.project-toolbar {
+  flex-wrap: wrap;
+}
+
+.project-search {
+  flex: 1 1 320px;
+}
+
 .panel-body {
   min-height: 0;
   padding: 16px;
@@ -450,6 +458,23 @@ p { line-height: 1.55; }
 .row { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .row.between { justify-content: space-between; }
 .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+
+.checkbox-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 760;
+  white-space: nowrap;
+}
+
+.project-checkbox {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
 
 .button,
 .ghost-button,
@@ -972,6 +997,14 @@ p { line-height: 1.55; }
   font-weight: 820;
 }
 
+.project-list-title {
+  gap: 4px;
+}
+
+.list-title-link {
+  color: var(--ink);
+}
+
 .project-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
@@ -980,9 +1013,7 @@ p { line-height: 1.55; }
 }
 
 .project-card {
-  display: grid;
-  grid-template-rows: 114px auto auto auto;
-  gap: 12px;
+  position: relative;
   min-width: 0;
   padding: 14px;
   background: var(--surface);
@@ -993,6 +1024,34 @@ p { line-height: 1.55; }
   transform: translateY(-2px);
   border-color: rgba(31, 111, 88, 0.34);
   box-shadow: var(--shadow);
+}
+
+.project-card.selected {
+  border-color: rgba(31, 111, 88, 0.44);
+  box-shadow: 0 0 0 2px rgba(31, 111, 88, 0.12);
+}
+
+.project-card-link {
+  display: grid;
+  grid-template-rows: 114px auto auto auto;
+  gap: 12px;
+  min-width: 0;
+  color: inherit;
+}
+
+.project-card-select {
+  position: absolute;
+  top: 22px;
+  left: 22px;
+  z-index: 4;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(217, 207, 192, 0.88);
+  border-radius: 6px;
+  background: rgba(255, 253, 247, 0.92);
+  box-shadow: 0 8px 18px rgba(0,0,0,0.14);
 }
 
 .preview-tile {
@@ -1148,6 +1207,12 @@ p { line-height: 1.55; }
   color: #d5c7ad;
   font-size: 12px;
   white-space: nowrap;
+}
+
+.viewer-progress {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 6px;
 }
 
 .preview-stage {

@@ -4,10 +4,11 @@ import { Focus, Maximize2, RotateCcw, RotateCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { Box3, Object3D, PerspectiveCamera, Vector3, WebGLRenderer } from "three";
 import type { OrbitControls as OrbitControlsType } from "three/examples/jsm/controls/OrbitControls.js";
-import { artifactUrl } from "@/lib/api";
+import { artifactUrl, formatBytes } from "@/lib/api";
 
 type ViewerState = "idle" | "loading" | "ready" | "error";
 type AxisView = "x-positive" | "x-negative" | "y-positive" | "y-negative" | "z-positive" | "z-negative";
+type ModelFormat = "spz" | "rad";
 
 interface ViewerControlApi {
   resetCamera: () => void;
@@ -31,6 +32,14 @@ interface SplatMeshLike extends Object3D {
   getBoundingBox?: (centersOnly?: boolean) => Box3;
 }
 
+interface SplatMeshOptionsLike {
+  url?: string;
+  fileBytes?: Uint8Array | ArrayBuffer;
+  fileName?: string;
+  lod?: boolean | "quality";
+  lodAbove?: number;
+}
+
 interface QualityLevel {
   label: string;
   pixelRatio: number;
@@ -38,6 +47,17 @@ interface QualityLevel {
   meshLodScale: number;
   maxStdDev: number;
   maxPixelRadius: number;
+}
+
+interface ModelLoadProgress {
+  loadedBytes: number;
+  totalBytes: number;
+  percent: number;
+}
+
+interface LoadedModel {
+  fileBytes: Uint8Array;
+  fileName: string;
 }
 
 const QUALITY_LEVELS: QualityLevel[] = [
@@ -56,7 +76,7 @@ const MAX_RENDER_SPLATS = readNumber(process.env.VIEWER_MAX_SPLATS, 5_000_000);
 const DEFAULT_FIT_RADIUS = 1;
 const FIT_PADDING = 1.35;
 
-export function SplatViewer({ modelUrl }: { modelUrl?: string | null }) {
+export function SplatViewer({ modelUrl, format = "spz" }: { modelUrl?: string | null; format?: ModelFormat | null }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewerApiRef = useRef<ViewerControlApi | null>(null);
   const [state, setState] = useState<ViewerState>("idle");
@@ -65,6 +85,7 @@ export function SplatViewer({ modelUrl }: { modelUrl?: string | null }) {
   const [fps, setFps] = useState(0);
   const [qualityIndex, setQualityIndex] = useState(1);
   const [splatCount, setSplatCount] = useState<number | null>(null);
+  const [modelLoadProgress, setModelLoadProgress] = useState<ModelLoadProgress | null>(null);
 
   useEffect(() => {
     const urls = modelUrl ? [modelUrl] : [];
@@ -75,27 +96,40 @@ export function SplatViewer({ modelUrl }: { modelUrl?: string | null }) {
       setMessage("真实 preview_spz 产物会加载在这里。");
       setFps(0);
       setSplatCount(null);
+      setModelLoadProgress(null);
       return;
     }
 
     let cancelled = false;
+    const abortController = new AbortController();
     let animationFrame = 0;
     let resizeObserver: ResizeObserver | undefined;
     let cleanup: (() => void) | undefined;
     let controls: OrbitControlsType | undefined;
+    const modelFormat = format ?? "spz";
     const qualityRef = { current: qualityIndex };
     const fpsWindow = { startedAt: performance.now(), frames: 0, highStreak: 0, lowStreak: 0 };
     viewerApiRef.current = null;
     setViewerReady(false);
+    setModelLoadProgress(null);
 
     async function mountViewer() {
       try {
         setState("loading");
+        setMessage(`正在加载 ${modelFormat.toUpperCase()} 模型`);
+        const loadedModels: LoadedModel[] = [];
+        for (const url of urls) {
+          const loadedModel = await fetchModelBytes(url, modelFormat, abortController.signal, (progress) => {
+            if (!cancelled) setModelLoadProgress(progress);
+          });
+          loadedModels.push(loadedModel);
+        }
+        if (cancelled) return;
         setMessage("正在初始化 Spark Viewer");
         const THREE = await import("three");
         const { OrbitControls } = await import("three/examples/jsm/controls/OrbitControls.js");
         const Spark = (await import("@sparkjsdev/spark") as unknown) as {
-          SplatMesh?: new (options: { url: string; lod?: boolean | "quality"; lodAbove?: number }) => SplatMeshLike;
+          SplatMesh?: new (options: SplatMeshOptionsLike) => SplatMeshLike;
           SparkRenderer?: new (options: Record<string, unknown>) => SparkRendererLike;
         };
         const SplatMesh = Spark.SplatMesh;
@@ -154,9 +188,10 @@ export function SplatViewer({ modelUrl }: { modelUrl?: string | null }) {
         modelPivot.add(splatGroup);
 
         const weakNetwork = isWeakNetwork();
-        const splats = urls.map((url, index) => {
+        const splats = loadedModels.map((model, index) => {
           const splat = new SplatMesh({
-            url: artifactUrl(url),
+            fileBytes: model.fileBytes,
+            fileName: model.fileName,
             lod: true,
             lodAbove: weakNetwork || index < urls.length - 1 ? 50000 : 100000
           });
@@ -245,23 +280,26 @@ export function SplatViewer({ modelUrl }: { modelUrl?: string | null }) {
         animationFrame = requestAnimationFrame(render);
 
         setState("ready");
-        setMessage("Spark Viewer 已加载真实 SPZ 产物。");
+        setMessage(`Spark Viewer 已加载真实 ${modelFormat.toUpperCase()} 产物。`);
+        setModelLoadProgress(null);
       } catch (error) {
         cleanup?.();
         if (cancelled) return;
         setState("error");
         setMessage(error instanceof Error ? error.message : "Spark Viewer 加载失败");
+        setModelLoadProgress(null);
       }
     }
 
     void mountViewer();
     return () => {
       cancelled = true;
+      abortController.abort();
       viewerApiRef.current = null;
       setViewerReady(false);
       cleanup?.();
     };
-  }, [modelUrl]);
+  }, [modelUrl, format]);
 
   const quality = QUALITY_LEVELS[qualityIndex] ?? QUALITY_LEVELS[0];
   return (
@@ -297,9 +335,82 @@ export function SplatViewer({ modelUrl }: { modelUrl?: string | null }) {
         <button className="icon-button" type="button" onClick={() => hostRef.current?.requestFullscreen?.()} aria-label="Fullscreen">
           <Maximize2 size={17} />
         </button>
+        {modelLoadProgress ? <ViewerLoadProgress progress={modelLoadProgress} format={format ?? "spz"} /> : null}
       </div>
     </section>
   );
+}
+
+function ViewerLoadProgress({ progress, format }: { progress: ModelLoadProgress; format: ModelFormat }) {
+  return (
+    <div className="viewer-progress">
+      <div className="row between small">
+        <span>{format.toUpperCase()} 模型加载</span>
+        <span>{progress.percent}%</span>
+      </div>
+      <div className="progress-track" aria-label="SPZ 模型加载进度">
+        <span style={{ width: `${progress.percent}%` }} />
+      </div>
+      <div className="muted small">
+        {formatBytes(progress.loadedBytes)} / {progress.totalBytes ? formatBytes(progress.totalBytes) : "计算中"}
+      </div>
+    </div>
+  );
+}
+
+async function fetchModelBytes(url: string, format: ModelFormat, signal: AbortSignal, onProgress: (progress: ModelLoadProgress) => void): Promise<LoadedModel> {
+  const response = await fetch(artifactUrl(url), { cache: "no-store", signal });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `${response.status} ${response.statusText}`);
+  }
+  const totalBytes = Number(response.headers.get("Content-Length") || 0);
+  onProgress(modelProgress(0, totalBytes));
+  if (!response.body) {
+    const blob = await response.blob();
+    onProgress(modelProgress(blob.size, blob.size));
+    return { fileBytes: new Uint8Array(await blob.arrayBuffer()), fileName: modelFileName(format) };
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let loadedBytes = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    const chunk = new Uint8Array(value.byteLength);
+    chunk.set(value);
+    chunks.push(chunk);
+    loadedBytes += value.byteLength;
+    onProgress(modelProgress(loadedBytes, totalBytes));
+  }
+  onProgress(modelProgress(totalBytes || loadedBytes, totalBytes || loadedBytes));
+  return { fileBytes: concatChunks(chunks, loadedBytes), fileName: modelFileName(format) };
+}
+
+function modelProgress(loadedBytes: number, totalBytes: number): ModelLoadProgress {
+  const total = Math.max(0, totalBytes);
+  const loaded = Math.max(0, Math.min(loadedBytes, total || loadedBytes));
+  return {
+    loadedBytes: loaded,
+    totalBytes: total,
+    percent: total > 0 ? Math.max(0, Math.min(100, Math.round((loaded / total) * 100))) : 0
+  };
+}
+
+function concatChunks(chunks: Uint8Array[], totalBytes: number): Uint8Array {
+  const result = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result;
+}
+
+function modelFileName(format: ModelFormat): string {
+  return `model.${format}`;
 }
 
 function fitCameraToSplats(THREE: typeof import("three"), camera: PerspectiveCamera, splats: SplatMeshLike[]): { center: Vector3; radius: number; distance: number } {

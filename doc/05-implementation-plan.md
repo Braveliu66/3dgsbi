@@ -117,7 +117,7 @@
 交付内容：
 
 - 图片项目精细重建任务入口，可直接从上传素材启动，不要求先完成极速预览。
-- 默认精细管线 `mobilegs_lmrs`：使用 AMB3R-SfM 生成无 EXIF 依赖的 COLMAP 兼容 SfM，接入 DeblurMLP-MobileGS，pycolmap 仅显式诊断；预览链路仍使用 LiteVGGT。
+- 默认精细管线 `mobilegs_lmrs`：使用 pycolmap 生成 COLMAP 兼容 SfM，接入 DeblurMLP-MobileGS；预览链路仍使用 LiteVGGT。
 - `worker-preview` 与 `worker-fine` 复用同一个统一 CUDA worker 镜像和同一个 `model-cache`，不创建第二套 conda/CUDA 11.x 环境。
 - FastGS 官方仓库只登记为后续可选参考；当前不整仓 vendoring，只把关键算法思想转化为本系统参数调度和训练流程。
 - DeblurMLP 已作为训练期模糊观测模型接入；FreeSplatter 仍作为后续条件启用接口。LM-RS Phase 2 已接入 matrix-free wrapper，runtime 会先检测 `get_JTv/get_Diag/get_JTJv` 和 Compact Box patch marker，缺失时失败而不是记录伪成功 fallback。
@@ -189,9 +189,9 @@
 
 ## 7. 2026-05-07 Implementation Update
 
-- M6 fine pipeline is now AMB3R-SfM-first and production-only: no automatic `pycolmap` fallback. `pycolmap` is an explicit diagnostic option.
-- Fine input contract is JPG/PNG images. Missing EXIF camera metadata is normal; AMB3R estimates camera/intrinsics/depth/point cloud from pixels.
-- Preview LiteVGGT remains separate from fine AMB3R-SfM and keeps its own runtime/package namespace.
+- M6 fine pipeline now uses pycolmap as the default production SfM frontend.
+- Fine input contract is JPG/PNG images. Missing EXIF camera metadata is normal; pycolmap estimates camera/intrinsics and sparse points from images.
+- Preview LiteVGGT remains separate from fine pycolmap and keeps its own runtime/package namespace.
 - DeblurMLP is implemented as a compact local integration of Deblurring-3DGS GTnet (`e63366b8581c0fde2fda0ab1aea99518da2e2f10`): Fourier embedding, scale/rotation branch, and optional position-moment branch. No Deblurring-3DGS repository environment is vendored.
 - GTnet parameters are added to the same Gaussian optimizer. Topology updates skip the `GTnet` parameter group so LM-RS/MobileGS densify and prune operations keep working.
 - Worker dependency goal: one PyTorch 2.7.1/cu128 baseline, system cuDNN headers, one Transformer Engine build, one patched LM-RS rasterizer, one `simple_knn`, and one `fused_ssim`. Do not add FlashInfer, Kaolin, Open3D, Gradio, duplicate torch/CUDA, or pip cuDNN.
@@ -201,7 +201,7 @@
 
 - M6 now has separate fine routes. Image projects keep `mobilegs_lmrs`; video projects use `video_artdeco_speed3r` and require exactly one uploaded video asset.
 - The video worker reuses system services only: task queue, storage download/upload, model cache downloader, progress updates, final PLY validation, metrics, and Spark SPZ conversion.
-- Video reconstruction does not reuse the image AMB3R/MobileGS/LM-RS/DeblurMLP training path. It runs ARTDECO's native VSLAM state/frontend/backend plus Reconstruct h3dgsv3 SceneModel and optimizer flow.
+- Video reconstruction does not reuse the image MobileGS/LM-RS/DeblurMLP training path. It runs ARTDECO's native VSLAM state/frontend/backend plus Reconstruct h3dgsv3 SceneModel and optimizer flow.
 - Speed3R-Pi3 is mounted as an ARTDECO Pi3 adapter using `model-cache/speed3r_pi3/config.json` and `model-cache/speed3r_pi3/model.safetensors`.
 - ARTDECO/MASt3R assets are cached under `model-cache/mast3r/`. Downloads are task-specific and retain `.part`, `.lock`, Range resume, and skip-if-existing behavior.
 - The worker image keeps the existing PyTorch/CUDA/cuDNN stack. It adds `gsplat`, `safetensors`, `pypose`, and `natsort`, compiles ARTDECO `mast3r_slam_backends`, and patches Python-visible `adamUpdate/adamUpdateBasic` symbols onto the existing rasterizer instead of installing a second rasterizer.
@@ -209,7 +209,7 @@
 
 ## 9. 2026-05-10 Image Fine EDGS/RoMA Implementation Update
 
-- `mobilegs_lmrs` now keeps AMB3R-SfM as the frontend and adds local EDGS/RoMA dense-correspondence Gaussian initialization before `training_setup`.
+- `mobilegs_lmrs` now keeps pycolmap as the frontend and adds local EDGS/RoMA dense-correspondence Gaussian initialization before `training_setup`.
 - Only the key EDGS initialization runtime is present under `backend/app/fine/edgs_runtime/`; the full EDGS repo, UI, Gradio app, training scripts, and broad config tree are intentionally excluded.
 - `backend/app/fine/edgs_init.py` provides `EDGSDenseInit`, `make_edgs_cfg`, and RoMA weight helpers. Missing runtime dependencies fail with `EDGS_RUNTIME_UNAVAILABLE`; missing weights fail explicitly.
 - Default EDGS settings are `matches_per_ref=15000`, `nns_per_ref=3`, `num_refs=len(train cameras)`, and `roma_model=outdoor`.

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import gc
 import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import numpy as np
 
@@ -33,6 +34,28 @@ _BATCHED_NDIMS = {
     "chunk_transforms": 4,
     "images": 5,
 }
+DEFAULT_LINGBOT_MODEL_IMAGE_SIZE = 518
+DEFAULT_LINGBOT_MIN_INFERENCE_FPS = 3.0
+OOM_FALLBACK_IMAGE_SIZE = 448
+OOM_FALLBACK_MAX_FRAMES = 96
+OOM_FALLBACK_WINDOW_SIZE = 32
+OOM_FALLBACK_KEYFRAME_INTERVAL = 2
+DEFAULT_KV_CACHE_SLIDING_WINDOW = 16
+OOM_FALLBACK_KV_CACHE_SLIDING_WINDOW = 8
+
+
+@dataclass(frozen=True, slots=True)
+class LingBotInferenceProfile:
+    image_size: int
+    max_frames: int
+    mode: str
+    keyframe_interval: int | None
+    camera_iterations: int
+    num_scale_frames: int
+    window_size: int
+    kv_cache_sliding_window: int
+    overlap_keyframes: int
+    oom_fallback: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +91,9 @@ def run_lingbot_video_preview(
     save_predictions: bool,
     compile_model: bool,
     progress: Progress,
+    keyframes_only_points: bool = False,
+    allow_sdpa_fallback: bool = False,
+    min_inference_fps: float = DEFAULT_LINGBOT_MIN_INFERENCE_FPS,
 ) -> dict[str, Any]:
     if not model_path.exists() or model_path.stat().st_size <= 0:
         raise PreviewFailure("LINGBOT_WEIGHT_MISSING", f"LingBot-Map weight not found: {model_path}")
@@ -91,91 +117,84 @@ def run_lingbot_video_preview(
     if len(frame_paths) < 2:
         raise PreviewFailure("LINGBOT_NOT_ENOUGH_FRAMES", "LingBot-Map preview requires at least 2 sampled frames")
 
-    progress("lingbot_preprocess", 34, f"preprocessing {len(frame_paths)} frames at image size {image_size}")
-    try:
-        images = load_and_preprocess_images(
-            [str(path) for path in frame_paths],
-            mode="crop",
-            image_size=image_size,
-            patch_size=14,
-        )
-    except Exception as exc:
-        raise PreviewFailure("LINGBOT_PREPROCESS_FAILED", f"LingBot-Map preprocessing failed: {exc}") from exc
-
     device = torch.device("cuda:0")
-    use_sdpa = not flashinfer_available()
-    resolved_mode = resolve_mode(mode, int(images.shape[0]))
-    resolved_keyframe_interval = resolve_keyframe_interval(keyframe_interval, resolved_mode, int(images.shape[0]))
-    compile_requested = bool(compile_model)
-    compile_active = False
-    compile_fallback = False
-    model = load_lingbot_model(
-        model_path,
-        device,
-        mode=resolved_mode,
+    use_sdpa, flashinfer_found = resolve_lingbot_attention_backend(
+        allow_sdpa_fallback=allow_sdpa_fallback,
+    )
+    dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+    profile = LingBotInferenceProfile(
         image_size=image_size,
-        use_sdpa=use_sdpa,
+        max_frames=max_frames,
+        mode=mode,
+        keyframe_interval=keyframe_interval,
         camera_iterations=camera_iterations,
         num_scale_frames=num_scale_frames,
         window_size=window_size,
+        kv_cache_sliding_window=resolve_kv_cache_sliding_window(window_size),
+        overlap_keyframes=overlap_keyframes,
     )
-    if compile_requested:
-        model = compile_lingbot_model(model)
-        compile_active = True
 
-    dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
-    output_device = torch.device("cpu")
-    torch.cuda.reset_peak_memory_stats()
-    progress("lingbot_inference", 42, f"running LingBot-Map {resolved_mode} inference")
     try:
-        with torch.no_grad(), torch.amp.autocast("cuda", dtype=dtype):
-            predictions = run_lingbot_inference(
-                model,
-                images,
-                resolved_mode=resolved_mode,
-                window_size=window_size,
-                overlap_keyframes=overlap_keyframes,
-                num_scale_frames=num_scale_frames,
-                keyframe_interval=resolved_keyframe_interval,
-                output_device=output_device,
-                torch_module=torch,
-            )
+        predictions, images, inference_metrics = run_lingbot_inference_profile(
+            frame_paths=frame_paths,
+            model_path=model_path,
+            device=device,
+            profile=profile,
+            use_sdpa=use_sdpa,
+            flashinfer_found=flashinfer_found,
+            allow_sdpa_fallback=allow_sdpa_fallback,
+            dtype=dtype,
+            compile_requested=bool(compile_model),
+            min_inference_fps=min_inference_fps,
+            load_and_preprocess_images=load_and_preprocess_images,
+            torch_module=torch,
+            progress=progress,
+        )
+    except PreviewFailure:
+        raise
     except Exception as exc:
-        if not compile_active or not is_cudagraph_overwrite_error(exc):
+        if not is_cuda_out_of_memory(exc, torch_module=torch):
             raise PreviewFailure("LINGBOT_INFERENCE_FAILED", f"LingBot-Map inference failed: {exc}") from exc
-        compile_active = False
-        compile_fallback = True
-        progress("lingbot_inference_retry", 48, "torch.compile CUDA Graph conflict; retrying without compile")
+        release_cuda_exception(exc, torch_module=torch)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        model = load_lingbot_model(
-            model_path,
-            device,
-            mode=resolved_mode,
-            image_size=image_size,
-            use_sdpa=use_sdpa,
-            camera_iterations=camera_iterations,
-            num_scale_frames=num_scale_frames,
-            window_size=window_size,
+        fallback_profile = make_lingbot_oom_fallback_profile(profile)
+        progress(
+            "lingbot_inference_retry",
+            46,
+            (
+                "CUDA out of memory; retrying LingBot-Map with "
+                f"image_size={fallback_profile.image_size}, "
+                f"max_frames={fallback_profile.max_frames}, "
+                f"window_size={fallback_profile.window_size}, "
+                f"keyframe_interval={fallback_profile.keyframe_interval}"
+            ),
         )
         try:
-            with torch.no_grad(), torch.amp.autocast("cuda", dtype=dtype):
-                predictions = run_lingbot_inference(
-                    model,
-                    images,
-                    resolved_mode=resolved_mode,
-                    window_size=window_size,
-                    overlap_keyframes=overlap_keyframes,
-                    num_scale_frames=num_scale_frames,
-                    keyframe_interval=resolved_keyframe_interval,
-                    output_device=output_device,
-                    torch_module=torch,
-                )
+            predictions, images, inference_metrics = run_lingbot_inference_profile(
+                frame_paths=frame_paths,
+                model_path=model_path,
+                device=device,
+                profile=fallback_profile,
+                use_sdpa=use_sdpa,
+                flashinfer_found=flashinfer_found,
+                allow_sdpa_fallback=allow_sdpa_fallback,
+                dtype=dtype,
+                compile_requested=False,
+                min_inference_fps=min_inference_fps,
+                load_and_preprocess_images=load_and_preprocess_images,
+                torch_module=torch,
+                progress=progress,
+            )
+        except PreviewFailure:
+            raise
         except Exception as retry_exc:
-            raise PreviewFailure("LINGBOT_INFERENCE_FAILED", f"LingBot-Map inference failed after compile fallback: {retry_exc}") from retry_exc
-    finally:
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            if is_cuda_out_of_memory(retry_exc, torch_module=torch):
+                raise PreviewFailure(
+                    "LINGBOT_CUDA_OOM",
+                    "LingBot-Map inference still ran out of CUDA memory after the safe fallback profile",
+                ) from retry_exc
+            raise PreviewFailure("LINGBOT_INFERENCE_FAILED", f"LingBot-Map inference failed after OOM fallback: {retry_exc}") from retry_exc
 
     progress("lingbot_predictions", 66, "preparing LingBot-Map per-frame predictions")
     pred_np = predictions_to_visualization_np(
@@ -191,8 +210,8 @@ def run_lingbot_video_preview(
     )
     pred_np["is_keyframe"] = build_keyframe_mask(
         int(images.shape[0]),
-        num_scale_frames=num_scale_frames,
-        keyframe_interval=resolved_keyframe_interval,
+        num_scale_frames=int(inference_metrics["lingbot_num_scale_frames"]),
+        keyframe_interval=int(inference_metrics["lingbot_keyframe_interval"]),
     )
 
     predictions_dir = save_predictions_npz(pred_np, work_dir / "predictions") if save_predictions else None
@@ -206,6 +225,7 @@ def run_lingbot_video_preview(
             conf_percentile=conf_percentile,
             min_conf=min_conf,
             max_points=max_points,
+            keyframes_only_points=keyframes_only_points,
         )
     else:
         point_metrics = write_spark_plain_ply_from_arrays(
@@ -216,6 +236,7 @@ def run_lingbot_video_preview(
             conf_percentile=conf_percentile,
             min_conf=min_conf,
             max_points=max_points,
+            keyframes_only_points=keyframes_only_points,
         )
     point_count = int(point_metrics["point_count"])
 
@@ -224,7 +245,6 @@ def run_lingbot_video_preview(
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    peak_mb = float(torch.cuda.max_memory_allocated() / 1024 / 1024) if torch.cuda.is_available() else 0.0
     return {
         "adapter": "lingbot_map_spz",
         "lingbot_commit": LINGBOT_MAP_COMMIT,
@@ -234,28 +254,16 @@ def run_lingbot_video_preview(
         "lingbot_sampled_fps": frames.sampled_fps,
         "lingbot_frame_width": frames.width,
         "lingbot_frame_height": frames.height,
-        "lingbot_image_size": int(image_size),
-        "lingbot_inference_mode": resolved_mode,
-        "lingbot_keyframe_interval": resolved_keyframe_interval,
-        "lingbot_camera_iterations": int(camera_iterations),
-        "lingbot_num_scale_frames": int(num_scale_frames),
-        "lingbot_window_size": int(window_size) if resolved_mode == "windowed" else None,
-        "lingbot_overlap_keyframes": int(overlap_keyframes) if resolved_mode == "windowed" else None,
-        "lingbot_use_sdpa": bool(use_sdpa),
-        "lingbot_compile": bool(compile_active),
-        "lingbot_compile_requested": compile_requested,
-        "lingbot_compile_cudagraphs": False,
-        "lingbot_compile_fallback": compile_fallback,
-        "lingbot_max_frames": int(max_frames),
+        **inference_metrics,
         "lingbot_frame_stride": int(frame_stride),
         "lingbot_pixel_stride": int(pixel_stride),
         "lingbot_conf_percentile": float(conf_percentile),
         "lingbot_min_conf": float(min_conf),
         "lingbot_max_points": int(max_points),
         "lingbot_save_predictions": bool(save_predictions),
+        "lingbot_keyframes_only_points": bool(keyframes_only_points),
         "lingbot_predictions_dir": str(predictions_dir) if predictions_dir else None,
         "point_count": point_count,
-        "cuda_memory_peak_mb": round(peak_mb, 2),
         "lingbot_duration_seconds": round(time.monotonic() - started, 3),
         **point_metrics,
     }
@@ -336,6 +344,299 @@ def resolve_keyframe_interval(value: int | None, mode: str, frame_count: int) ->
     return 1
 
 
+def select_lingbot_frame_paths(frame_paths: list[Path], max_frames: int) -> list[Path]:
+    if max_frames <= 0 or len(frame_paths) <= max_frames:
+        return frame_paths
+    indices = np.linspace(0, len(frame_paths) - 1, max_frames, dtype=np.int64)
+    return [frame_paths[int(index)] for index in indices]
+
+
+def make_lingbot_oom_fallback_profile(profile: LingBotInferenceProfile) -> LingBotInferenceProfile:
+    fallback_max_frames = OOM_FALLBACK_MAX_FRAMES if profile.max_frames <= 0 else min(profile.max_frames, OOM_FALLBACK_MAX_FRAMES)
+    fallback_keyframe_interval = max(profile.keyframe_interval or 0, OOM_FALLBACK_KEYFRAME_INTERVAL)
+    return LingBotInferenceProfile(
+        image_size=min(profile.image_size, OOM_FALLBACK_IMAGE_SIZE),
+        max_frames=fallback_max_frames,
+        mode=profile.mode,
+        keyframe_interval=fallback_keyframe_interval,
+        camera_iterations=1,
+        num_scale_frames=min(profile.num_scale_frames, 2),
+        window_size=min(profile.window_size, OOM_FALLBACK_WINDOW_SIZE),
+        kv_cache_sliding_window=min(profile.kv_cache_sliding_window, OOM_FALLBACK_KV_CACHE_SLIDING_WINDOW),
+        overlap_keyframes=min(profile.overlap_keyframes, 4),
+        oom_fallback=True,
+    )
+
+
+def resolve_kv_cache_sliding_window(window_size: int) -> int:
+    return max(4, min(int(window_size), DEFAULT_KV_CACHE_SLIDING_WINDOW))
+
+
+def resolve_lingbot_attention_backend(
+    *,
+    allow_sdpa_fallback: bool,
+    flashinfer_probe: Callable[[], bool] = flashinfer_available,
+) -> tuple[bool, bool]:
+    flashinfer_found = flashinfer_probe()
+    if not flashinfer_found and not allow_sdpa_fallback:
+        raise PreviewFailure(
+            "LINGBOT_FLASHINFER_UNAVAILABLE",
+            "LingBot-Map fast preview requires FlashInfer; install flashinfer-python or explicitly enable SDPA fallback",
+        )
+    return (not flashinfer_found), flashinfer_found
+
+
+def run_lingbot_inference_profile(
+    *,
+    frame_paths: list[Path],
+    model_path: Path,
+    device: Any,
+    profile: LingBotInferenceProfile,
+    use_sdpa: bool,
+    flashinfer_found: bool,
+    allow_sdpa_fallback: bool,
+    dtype: Any,
+    compile_requested: bool,
+    min_inference_fps: float,
+    load_and_preprocess_images: Any,
+    torch_module: Any,
+    progress: Progress,
+) -> tuple[dict[str, Any], Any, dict[str, Any]]:
+    selected_frame_paths = select_lingbot_frame_paths(frame_paths, profile.max_frames)
+    progress(
+        "lingbot_preprocess",
+        34,
+        f"preprocessing {len(selected_frame_paths)} frames at image size {profile.image_size}",
+    )
+    try:
+        images = load_and_preprocess_images(
+            [str(path) for path in selected_frame_paths],
+            mode="crop",
+            image_size=profile.image_size,
+            patch_size=14,
+        )
+    except Exception as exc:
+        raise PreviewFailure("LINGBOT_PREPROCESS_FAILED", f"LingBot-Map preprocessing failed: {exc}") from exc
+
+    frame_count = int(images.shape[0])
+    resolved_mode = resolve_mode(profile.mode, frame_count)
+    resolved_keyframe_interval = resolve_keyframe_interval(profile.keyframe_interval, resolved_mode, frame_count)
+    model = load_lingbot_model(
+        model_path,
+        device,
+        mode=resolved_mode,
+        image_size=profile.image_size,
+        use_sdpa=use_sdpa,
+        camera_iterations=profile.camera_iterations,
+        num_scale_frames=profile.num_scale_frames,
+        window_size=profile.window_size,
+        kv_cache_sliding_window=profile.kv_cache_sliding_window,
+        enable_point=False,
+    )
+    model_image_size = int(getattr(model, "_lingbot_model_image_size", DEFAULT_LINGBOT_MODEL_IMAGE_SIZE))
+    aggregator_dtype = cast_lingbot_aggregator_for_inference(model, dtype)
+    compile_active = False
+    compile_fallback = False
+    if compile_requested:
+        model = compile_lingbot_model(model)
+        compile_active = True
+
+    def _infer_once() -> tuple[dict[str, Any], float, float, float]:
+        output_device = torch_module.device("cpu")
+        if compile_active:
+            warm_lingbot_model_once(
+                model,
+                images,
+                num_scale_frames=profile.num_scale_frames,
+                keyframe_interval=resolved_keyframe_interval,
+                output_device=output_device,
+                dtype=dtype,
+                torch_module=torch_module,
+                progress=progress,
+            )
+        torch_module.cuda.reset_peak_memory_stats()
+        progress("lingbot_inference", 42, f"running LingBot-Map {resolved_mode} inference")
+        inference_started = time.perf_counter()
+        with torch_module.no_grad(), torch_module.amp.autocast("cuda", dtype=dtype):
+            predictions = run_lingbot_inference(
+                model,
+                images,
+                resolved_mode=resolved_mode,
+                window_size=profile.window_size,
+                overlap_keyframes=profile.overlap_keyframes,
+                num_scale_frames=profile.num_scale_frames,
+                keyframe_interval=resolved_keyframe_interval,
+                output_device=output_device,
+                torch_module=torch_module,
+            )
+        if torch_module.cuda.is_available():
+            torch_module.cuda.synchronize()
+        inference_seconds = time.perf_counter() - inference_started
+        inference_fps = frame_count / max(inference_seconds, 1e-6)
+        validate_lingbot_inference_fps(inference_fps, min_inference_fps)
+        peak_mb = float(torch_module.cuda.max_memory_allocated() / 1024 / 1024) if torch_module.cuda.is_available() else 0.0
+        return predictions, inference_seconds, inference_fps, peak_mb
+
+    try:
+        predictions, inference_seconds, inference_fps, peak_mb = _infer_once()
+    except Exception as exc:
+        if not compile_active or not is_cudagraph_overwrite_error(exc):
+            raise
+        compile_active = False
+        compile_fallback = True
+        progress("lingbot_inference_retry", 48, "torch.compile CUDA Graph conflict; retrying without compile")
+        if torch_module.cuda.is_available():
+            torch_module.cuda.empty_cache()
+        model = load_lingbot_model(
+            model_path,
+            device,
+            mode=resolved_mode,
+            image_size=profile.image_size,
+            use_sdpa=use_sdpa,
+            camera_iterations=profile.camera_iterations,
+            num_scale_frames=profile.num_scale_frames,
+            window_size=profile.window_size,
+            kv_cache_sliding_window=profile.kv_cache_sliding_window,
+            enable_point=False,
+        )
+        model_image_size = int(getattr(model, "_lingbot_model_image_size", DEFAULT_LINGBOT_MODEL_IMAGE_SIZE))
+        aggregator_dtype = cast_lingbot_aggregator_for_inference(model, dtype)
+        predictions, inference_seconds, inference_fps, peak_mb = _infer_once()
+    finally:
+        if torch_module.cuda.is_available():
+            torch_module.cuda.empty_cache()
+
+    metrics = {
+        "lingbot_image_size": int(profile.image_size),
+        "lingbot_model_image_size": model_image_size,
+        "lingbot_inference_frames": frame_count,
+        "lingbot_inference_mode": resolved_mode,
+        "lingbot_keyframe_interval": int(resolved_keyframe_interval),
+        "lingbot_camera_iterations": int(profile.camera_iterations),
+        "lingbot_num_scale_frames": int(profile.num_scale_frames),
+        "lingbot_window_size": int(profile.window_size) if resolved_mode == "windowed" else None,
+        "lingbot_kv_cache_sliding_window": int(profile.kv_cache_sliding_window),
+        "lingbot_overlap_keyframes": int(profile.overlap_keyframes) if resolved_mode == "windowed" else None,
+        "lingbot_use_sdpa": bool(use_sdpa),
+        "lingbot_flashinfer_available": bool(flashinfer_found),
+        "lingbot_allow_sdpa_fallback": bool(allow_sdpa_fallback),
+        "lingbot_sdpa_fallback_active": bool(use_sdpa),
+        "lingbot_enable_point": False,
+        "lingbot_aggregator_dtype": str(aggregator_dtype).replace("torch.", ""),
+        "lingbot_compile": bool(compile_active),
+        "lingbot_compile_requested": bool(compile_requested),
+        "lingbot_compile_cudagraphs": False,
+        "lingbot_compile_fallback": compile_fallback,
+        "lingbot_max_frames": int(profile.max_frames),
+        "lingbot_oom_fallback": bool(profile.oom_fallback),
+        "lingbot_inference_seconds": round(inference_seconds, 3),
+        "lingbot_inference_fps": round(inference_fps, 3),
+        "cuda_memory_peak_mb": round(peak_mb, 2),
+    }
+    return predictions, images, metrics
+
+
+def infer_lingbot_model_image_size_from_state_dict(
+    state_dict: dict[str, Any],
+    *,
+    patch_size: int = 14,
+    fallback: int = DEFAULT_LINGBOT_MODEL_IMAGE_SIZE,
+) -> int:
+    for key in ("aggregator.patch_embed.pos_embed", "module.aggregator.patch_embed.pos_embed"):
+        value = state_dict.get(key)
+        shape = getattr(value, "shape", None)
+        if not shape or len(shape) < 2:
+            continue
+        token_count = int(shape[1])
+        for special_tokens in (1, 0):
+            patch_tokens = token_count - special_tokens
+            if patch_tokens <= 0:
+                continue
+            patch_side = math.isqrt(patch_tokens)
+            if patch_side * patch_side == patch_tokens:
+                return int(patch_side * patch_size)
+    return int(fallback)
+
+
+def warm_lingbot_model_once(
+    model: Any,
+    images: Any,
+    *,
+    num_scale_frames: int,
+    keyframe_interval: int,
+    output_device: Any,
+    dtype: Any,
+    torch_module: Any,
+    progress: Progress,
+) -> None:
+    frame_count = int(images.shape[0])
+    warm_count = min(frame_count, max(2, min(num_scale_frames + 1, 4)))
+    if warm_count < 2:
+        return
+    warm_scale_frames = min(max(1, int(num_scale_frames)), warm_count)
+    if warm_scale_frames >= warm_count:
+        warm_scale_frames = max(1, warm_count - 1)
+    progress("lingbot_warmup", 38, "warming LingBot-Map kernels before timed inference")
+    try:
+        if hasattr(model, "clean_kv_cache"):
+            model.clean_kv_cache()
+        with torch_module.no_grad(), torch_module.amp.autocast("cuda", dtype=dtype):
+            warm_predictions = model.inference_streaming(
+                images[:warm_count],
+                num_scale_frames=warm_scale_frames,
+                keyframe_interval=max(int(keyframe_interval), 1),
+                output_device=output_device,
+            )
+        del warm_predictions
+    finally:
+        if hasattr(model, "clean_kv_cache"):
+            model.clean_kv_cache()
+        if torch_module.cuda.is_available():
+            torch_module.cuda.synchronize()
+            torch_module.cuda.empty_cache()
+
+
+def cast_lingbot_aggregator_for_inference(model: Any, dtype: Any) -> Any:
+    try:
+        import torch
+    except Exception:
+        torch = None
+    if torch is not None and dtype == torch.float32:
+        return dtype
+    aggregator = getattr(model, "aggregator", None)
+    if aggregator is not None:
+        model.aggregator = aggregator.to(dtype=dtype)
+    return dtype
+
+
+def validate_lingbot_inference_fps(inference_fps: float, min_inference_fps: float) -> None:
+    if min_inference_fps > 0 and inference_fps < min_inference_fps:
+        raise PreviewFailure(
+            "LINGBOT_INFERENCE_FPS_BELOW_TARGET",
+            (
+                "LingBot-Map model inference was "
+                f"{inference_fps:.2f} FPS, below the {min_inference_fps:.2f} FPS target for 12GB Ampere+ GPUs"
+            ),
+        )
+
+
+def is_cuda_out_of_memory(error: Exception, *, torch_module: Any) -> bool:
+    oom_type = getattr(getattr(torch_module, "cuda", None), "OutOfMemoryError", None)
+    if oom_type is not None and isinstance(error, oom_type):
+        return True
+    message = str(error).lower()
+    return "cuda" in message and "out of memory" in message
+
+
+def release_cuda_exception(error: Exception, *, torch_module: Any) -> None:
+    error.__traceback__ = None
+    error.__context__ = None
+    error.__cause__ = None
+    gc.collect()
+    if torch_module.cuda.is_available():
+        torch_module.cuda.empty_cache()
+
+
 def load_lingbot_model(
     model_path: Path,
     device,
@@ -346,7 +647,8 @@ def load_lingbot_model(
     camera_iterations: int,
     num_scale_frames: int,
     window_size: int,
-    enable_point: bool = True,
+    kv_cache_sliding_window: int,
+    enable_point: bool = False,
 ):
     try:
         import torch
@@ -357,26 +659,28 @@ def load_lingbot_model(
     except Exception as exc:
         raise PreviewFailure("LINGBOT_RUNTIME_UNAVAILABLE", f"LingBot-Map model import failed: {exc}") from exc
 
-    model = GCTStream(
-        img_size=image_size,
-        patch_size=14,
-        enable_3d_rope=True,
-        max_frame_num=max(1024, window_size * 16),
-        kv_cache_sliding_window=64,
-        kv_cache_scale_frames=num_scale_frames,
-        kv_cache_cross_frame_special=True,
-        kv_cache_include_scale_frames=True,
-        use_sdpa=use_sdpa,
-        camera_num_iterations=camera_iterations,
-        enable_point=enable_point,
-        enable_depth=True,
-    )
     try:
         checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
         state_dict = checkpoint.get("model", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+        model_image_size = infer_lingbot_model_image_size_from_state_dict(state_dict if isinstance(state_dict, dict) else {})
+        model = GCTStream(
+            img_size=model_image_size,
+            patch_size=14,
+            enable_3d_rope=True,
+            max_frame_num=max(1024, window_size * 16),
+            kv_cache_sliding_window=kv_cache_sliding_window,
+            kv_cache_scale_frames=num_scale_frames,
+            kv_cache_cross_frame_special=True,
+            kv_cache_include_scale_frames=True,
+            use_sdpa=use_sdpa,
+            camera_num_iterations=camera_iterations,
+            enable_point=enable_point,
+            enable_depth=True,
+        )
         model.load_state_dict(state_dict, strict=False)
     except Exception as exc:
         raise PreviewFailure("LINGBOT_WEIGHT_LOAD_FAILED", f"Could not load LingBot-Map checkpoint: {exc}") from exc
+    setattr(model, "_lingbot_model_image_size", model_image_size)
     return model.to(device).eval()
 
 
@@ -575,6 +879,58 @@ def prediction_frame_count(predictions: dict[str, np.ndarray]) -> int | None:
     return None
 
 
+def iter_prediction_frames(
+    predictions: dict[str, np.ndarray],
+    frame_indices: list[int],
+) -> Iterator[tuple[int, dict[str, Any]]]:
+    frame_count = prediction_frame_count(predictions)
+    if frame_count is None:
+        if not frame_indices or 0 in frame_indices:
+            yield 0, predictions
+        return
+
+    sequence_keys = [
+        key
+        for key, value in predictions.items()
+        if isinstance(value, np.ndarray) and value.ndim >= 1 and value.shape[0] == frame_count
+    ]
+    metadata = {
+        key: value
+        for key, value in predictions.items()
+        if isinstance(value, np.ndarray) and key not in sequence_keys
+    }
+    for frame_index in frame_indices:
+        frame = dict(metadata)
+        frame.update({key: predictions[key][frame_index] for key in sequence_keys})
+        yield frame_index, frame
+
+
+def prediction_frame_keys(data: Any) -> tuple[str, ...]:
+    return tuple(data.files if hasattr(data, "files") else data.keys())
+
+
+def prediction_frame_is_keyframe(data: Any) -> bool | None:
+    if "is_keyframe" not in prediction_frame_keys(data):
+        return None
+    marker = np.asarray(data["is_keyframe"], dtype=np.bool_).reshape(-1)
+    if marker.size == 0:
+        return False
+    return bool(marker[0])
+
+
+def should_export_prediction_frame(data: Any, *, keyframes_only_points: bool) -> bool:
+    if not keyframes_only_points:
+        return True
+    is_keyframe = prediction_frame_is_keyframe(data)
+    return True if is_keyframe is None else is_keyframe
+
+
+def strided_frame_indices(frame_count: int | None, frame_stride: int) -> list[int]:
+    if frame_count is None:
+        return [0]
+    return list(range(0, frame_count, max(1, int(frame_stride))))
+
+
 def write_spark_plain_ply_from_arrays(
     predictions: dict[str, np.ndarray],
     output_ply: Path,
@@ -584,17 +940,53 @@ def write_spark_plain_ply_from_arrays(
     conf_percentile: float,
     min_conf: float,
     max_points: int,
+    keyframes_only_points: bool = False,
 ) -> dict[str, Any]:
-    predictions_dir = save_predictions_npz(predictions, output_ply.parent / "_predictions_for_ply")
-    return write_spark_plain_ply_from_npz(
-        predictions_dir,
+    frame_indices = strided_frame_indices(prediction_frame_count(predictions), frame_stride)
+    selected_indices = []
+    total_points = 0
+    point_source = None
+    for frame_index, frame in iter_prediction_frames(predictions, frame_indices):
+        if not should_export_prediction_frame(frame, keyframes_only_points=keyframes_only_points):
+            continue
+        points, _, source = extract_frame_points(
+            frame,
+            pixel_stride=pixel_stride,
+            conf_percentile=conf_percentile,
+            min_conf=min_conf,
+            source_name=f"in-memory frame {frame_index}",
+        )
+        total_points += int(points.shape[0])
+        point_source = point_source or source
+        selected_indices.append(frame_index)
+
+    if not selected_indices:
+        raise PreviewFailure("LINGBOT_PREDICTIONS_MISSING", "No LingBot-Map frames selected for point export")
+    if total_points <= 0:
+        raise PreviewFailure("LINGBOT_EMPTY_POINT_CLOUD", "LingBot-Map produced no valid 3D points")
+
+    target_points = total_points if max_points <= 0 else min(total_points, int(max_points))
+    written = write_spark_plain_ply_records(
+        selected_indices,
         output_ply,
-        frame_stride=frame_stride,
-        pixel_stride=pixel_stride,
-        conf_percentile=conf_percentile,
-        min_conf=min_conf,
-        max_points=max_points,
+        total_points=total_points,
+        target_points=target_points,
+        extract_points=lambda frame_index: extract_prediction_frame_points(
+            predictions,
+            frame_index,
+            pixel_stride=pixel_stride,
+            conf_percentile=conf_percentile,
+            min_conf=min_conf,
+        ),
     )
+    return {
+        "point_count": int(written),
+        "lingbot_point_source": point_source,
+        "lingbot_ply_format": "gaussian_splat",
+        "lingbot_points_before_downsample": int(total_points),
+        "lingbot_points_after_downsample": int(written),
+        "lingbot_point_frame_count": len(selected_indices),
+    }
 
 
 def write_spark_plain_ply_from_npz(
@@ -606,66 +998,68 @@ def write_spark_plain_ply_from_npz(
     conf_percentile: float,
     min_conf: float,
     max_points: int,
+    keyframes_only_points: bool = False,
 ) -> dict[str, Any]:
     files = sorted(predictions_dir.glob("frame_*.npz"))
     files = files[:: max(1, int(frame_stride))]
     if not files:
         raise PreviewFailure("LINGBOT_PREDICTIONS_MISSING", f"No frame_*.npz found in {predictions_dir}")
 
+    selected_files = []
     total_points = 0
     point_source = None
     for path in files:
-        points, _, source = extract_npz_frame_points(
-            path,
-            pixel_stride=pixel_stride,
-            conf_percentile=conf_percentile,
-            min_conf=min_conf,
-        )
+        with np.load(path, allow_pickle=False) as data:
+            if not should_export_prediction_frame(data, keyframes_only_points=keyframes_only_points):
+                continue
+            points, _, source = extract_frame_points(
+                data,
+                pixel_stride=pixel_stride,
+                conf_percentile=conf_percentile,
+                min_conf=min_conf,
+                source_name=str(path),
+            )
         total_points += int(points.shape[0])
         point_source = point_source or source
+        selected_files.append(path)
+    if not selected_files:
+        raise PreviewFailure("LINGBOT_PREDICTIONS_MISSING", f"No frame_*.npz selected in {predictions_dir}")
     if total_points <= 0:
         raise PreviewFailure("LINGBOT_EMPTY_POINT_CLOUD", "LingBot-Map produced no valid 3D points")
 
     target_points = total_points if max_points <= 0 else min(total_points, int(max_points))
     written = write_spark_plain_ply_records(
-        files,
+        selected_files,
         output_ply,
         total_points=total_points,
         target_points=target_points,
-        pixel_stride=pixel_stride,
-        conf_percentile=conf_percentile,
-        min_conf=min_conf,
+        extract_points=lambda path: extract_npz_frame_points(
+            path,
+            pixel_stride=pixel_stride,
+            conf_percentile=conf_percentile,
+            min_conf=min_conf,
+        ),
     )
     return {
         "point_count": int(written),
         "lingbot_point_source": point_source,
-        "lingbot_ply_format": "plain_xyz_rgb",
+        "lingbot_ply_format": "gaussian_splat",
         "lingbot_points_before_downsample": int(total_points),
         "lingbot_points_after_downsample": int(written),
+        "lingbot_point_frame_count": len(selected_files),
     }
 
 
 def write_spark_plain_ply_records(
-    files: list[Path],
+    frame_sources: list[Any],
     output_ply: Path,
     *,
     total_points: int,
     target_points: int,
-    pixel_stride: int,
-    conf_percentile: float,
-    min_conf: float,
+    extract_points: Callable[[Any], tuple[np.ndarray, np.ndarray, str]],
 ) -> int:
     output_ply.parent.mkdir(parents=True, exist_ok=True)
-    dtype = np.dtype(
-        [
-            ("x", "<f4"),
-            ("y", "<f4"),
-            ("z", "<f4"),
-            ("red", "u1"),
-            ("green", "u1"),
-            ("blue", "u1"),
-        ]
-    )
+    dtype = gaussian_splat_record_dtype()
     header = (
         "ply\n"
         "format binary_little_endian 1.0\n"
@@ -673,9 +1067,21 @@ def write_spark_plain_ply_records(
         "property float x\n"
         "property float y\n"
         "property float z\n"
-        "property uchar red\n"
-        "property uchar green\n"
-        "property uchar blue\n"
+        "property float nx\n"
+        "property float ny\n"
+        "property float nz\n"
+        "property float f_dc_0\n"
+        "property float f_dc_1\n"
+        "property float f_dc_2\n"
+        + "".join(f"property float f_rest_{index}\n" for index in range(45))
+        + "property float opacity\n"
+        "property float scale_0\n"
+        "property float scale_1\n"
+        "property float scale_2\n"
+        "property float rot_0\n"
+        "property float rot_1\n"
+        "property float rot_2\n"
+        "property float rot_3\n"
         "end_header\n"
     ).encode("ascii")
 
@@ -683,13 +1089,8 @@ def write_spark_plain_ply_records(
     global_start = 0
     with output_ply.open("wb") as handle:
         handle.write(header)
-        for path in files:
-            points, colors, _ = extract_npz_frame_points(
-                path,
-                pixel_stride=pixel_stride,
-                conf_percentile=conf_percentile,
-                min_conf=min_conf,
-            )
+        for source in frame_sources:
+            points, colors, _ = extract_points(source)
             count = int(points.shape[0])
             if target_points < total_points:
                 keep = uniform_chunk_indices(global_start, count, total_points, target_points)
@@ -699,19 +1100,79 @@ def write_spark_plain_ply_records(
             if points.shape[0] == 0:
                 continue
 
-            records = np.empty(points.shape[0], dtype=dtype)
-            records["x"] = points[:, 0]
-            records["y"] = points[:, 1]
-            records["z"] = points[:, 2]
-            records["red"] = colors[:, 0]
-            records["green"] = colors[:, 1]
-            records["blue"] = colors[:, 2]
+            records = gaussian_splat_records(points, colors, dtype=dtype)
             records.tofile(handle)
             written += int(points.shape[0])
 
     if written != target_points:
         raise PreviewFailure("LINGBOT_PLY_WRITE_MISMATCH", f"wrote {written} points, expected {target_points}")
     return written
+
+
+def gaussian_splat_record_dtype() -> np.dtype:
+    fields: list[tuple[str, str]] = [
+        ("x", "<f4"),
+        ("y", "<f4"),
+        ("z", "<f4"),
+        ("nx", "<f4"),
+        ("ny", "<f4"),
+        ("nz", "<f4"),
+        ("f_dc_0", "<f4"),
+        ("f_dc_1", "<f4"),
+        ("f_dc_2", "<f4"),
+    ]
+    fields.extend((f"f_rest_{index}", "<f4") for index in range(45))
+    fields.extend(
+        [
+            ("opacity", "<f4"),
+            ("scale_0", "<f4"),
+            ("scale_1", "<f4"),
+            ("scale_2", "<f4"),
+            ("rot_0", "<f4"),
+            ("rot_1", "<f4"),
+            ("rot_2", "<f4"),
+            ("rot_3", "<f4"),
+        ]
+    )
+    return np.dtype(fields)
+
+
+def gaussian_splat_records(points: np.ndarray, colors: np.ndarray, *, dtype: np.dtype) -> np.ndarray:
+    records = np.zeros(points.shape[0], dtype=dtype)
+    records["x"] = points[:, 0]
+    records["y"] = points[:, 1]
+    records["z"] = points[:, 2]
+    sh_c0 = np.float32(0.28209479177387814)
+    sh_dc = (colors.astype(np.float32) / 255.0 - 0.5) / sh_c0
+    records["f_dc_0"] = sh_dc[:, 0]
+    records["f_dc_1"] = sh_dc[:, 1]
+    records["f_dc_2"] = sh_dc[:, 2]
+    log_scale = np.float32(np.log(0.002))
+    records["opacity"] = np.float32(-2.0)
+    records["scale_0"] = log_scale
+    records["scale_1"] = log_scale
+    records["scale_2"] = log_scale
+    records["rot_0"] = np.float32(1.0)
+    return records
+
+
+def extract_prediction_frame_points(
+    predictions: dict[str, np.ndarray],
+    frame_index: int,
+    *,
+    pixel_stride: int,
+    conf_percentile: float,
+    min_conf: float,
+) -> tuple[np.ndarray, np.ndarray, str]:
+    for _, frame in iter_prediction_frames(predictions, [frame_index]):
+        return extract_frame_points(
+            frame,
+            pixel_stride=pixel_stride,
+            conf_percentile=conf_percentile,
+            min_conf=min_conf,
+            source_name=f"in-memory frame {frame_index}",
+        )
+    raise PreviewFailure("LINGBOT_PREDICTIONS_MISSING", f"No in-memory frame {frame_index}")
 
 
 def uniform_chunk_indices(start: int, count: int, total: int, target: int) -> np.ndarray:

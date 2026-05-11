@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 from app.config import get_settings
-from app.fine.amb3r_sfm import AMB3R_COMMIT, amb3r_weight_path, build_amb3r_colmap_scene
 from app.fine.local_3dgs.scene_quality import assess_sfm_scene_quality
 from app.fine.local_3dgs.sparse_compensation import compensate_sparse_point_cloud
 from app.fine.option_utils import read_float, read_int
@@ -24,7 +23,7 @@ from app.preview.utils import image_files
 PIPELINE_NAME = "mobilegs_lmrs"
 
 SOURCE_COMMITS_FINE = {
-    "AMB3R": AMB3R_COMMIT,
+    "PyCOLMAP": "3.12.6",
     "Spark": SOURCE_COMMITS["Spark"],
     "LM-RS": "cb40c7c06c2a60f8314ce095ad7b4513fbb33319",
     "LM-RS Rasterizer": "c2529d3bb13bc38271710785c015a89d9d623237",
@@ -66,8 +65,8 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
     scene_dir = ctx.work_dir / "fine_scene"
     output_dir = ctx.work_dir / "fine_mobilegs"
     scene_result = build_scene(ctx, train_input_dir, scene_dir, colmap_features, colmap_max_size, colmap_threads)
-    if scene_result.backend == "amb3r_sfm_colmap_no_exif":
-        scene_result.metrics.update(assess_sfm_scene_quality(scene_result.scene_dir, prefix="amb3r").metrics)
+    if scene_result.backend == "pycolmap":
+        scene_result.metrics.update(assess_sfm_scene_quality(scene_result.scene_dir, prefix="pycolmap").metrics)
     if read_bool(ctx.options.get("fine_edgs_enabled"), True):
         scene_result.metrics.update(
             {
@@ -111,7 +110,7 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
 
     metrics = {
         "pipeline": PIPELINE_NAME,
-        "algorithm": "mobilegs_amb3r_deblurmlp_lmrs",
+        "algorithm": "mobilegs_pycolmap_deblurmlp_lmrs",
         "source_version": ctx.source_version,
         "source_commits": SOURCE_COMMITS_FINE,
         "input_images": image_count,
@@ -149,21 +148,8 @@ def build_scene(
     colmap_max_size: int,
     colmap_threads: int,
 ):
-    sfm_backend = str(ctx.options.get("fine_sfm_backend") or "amb3r").strip().lower()
-    if sfm_backend in {"amb3r", "amb3r_sfm", "litevggt"}:
-        result = build_amb3r_colmap_scene(
-            input_dir,
-            scene_dir,
-            checkpoint_path=amb3r_weight_path(ctx.model_cache_dir),
-            keep_ratio=read_float(ctx.options.get("fine_amb3r_keep_ratio", ctx.options.get("fine_litevggt_keep_ratio")), 0.12, minimum=0.001, maximum=1.0),
-            max_points=read_int(ctx.options.get("fine_amb3r_max_points", ctx.options.get("fine_litevggt_max_points")), 1_000_000, minimum=10_000, maximum=15_000_000),
-            progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
-            options=ctx.options,
-        )
-        if sfm_backend == "litevggt":
-            result.metrics["sfm_backend_requested_alias"] = "litevggt_deprecated_maps_to_amb3r"
-        return result
-    if sfm_backend != "pycolmap":
+    sfm_backend = str(ctx.options.get("fine_sfm_backend") or "pycolmap").strip().lower()
+    if sfm_backend not in {"pycolmap", "colmap"}:
         raise FineFailure("UNSUPPORTED_FINE_SFM_BACKEND", f"Unsupported fine SfM backend: {sfm_backend}")
 
     result = build_pycolmap_scene(
@@ -175,7 +161,8 @@ def build_scene(
         num_threads=colmap_threads,
         progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
     )
-    result.metrics["sfm_backend_requested"] = "pycolmap_diagnostic"
+    if sfm_backend == "colmap":
+        result.metrics["sfm_backend_requested_alias"] = "colmap_maps_to_pycolmap"
     return result
 
 

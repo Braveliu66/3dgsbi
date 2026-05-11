@@ -337,7 +337,7 @@ Worker 返回结果：
 
 Fine tasks accept uploaded JPG/PNG images without EXIF camera metadata. Valid task options include:
 
-- `fine_sfm_backend=amb3r` by default. `fine_sfm_backend=pycolmap` is explicit development diagnostics only. The deprecated fine value `litevggt` maps to AMB3R; preview still uses LiteVGGT.
+- `fine_sfm_backend=pycolmap` by default. `fine_sfm_backend=colmap` is accepted as an alias. The deprecated fine value `litevggt` is unsupported; preview still uses LiteVGGT.
 - `fine_deblur_enabled=auto|true|false`. `auto` enables DeblurMLP for `motion`、`defocus`、`mixed` blur modes and disables it for `sharp`.
 - `fine_deblur_mode=motion|defocus|mixed|sharp` can override blur analysis.
 - `fine_deblur_num_moments` controls the DeblurMLP motion branch moment count.
@@ -347,10 +347,8 @@ Fine `metrics.json` now includes:
 
 ```json
 {
-  "sfm_backend": "amb3r_sfm_colmap_no_exif",
-  "amb3r_registered_images": 6,
-  "amb3r_unmapped_images": 0,
-  "amb3r_resolution": "518x392",
+  "sfm_backend": "pycolmap",
+  "sfm_registered_images": 6,
   "sfm_sparse_points": 250000,
   "deblur_mlp_enabled": true,
   "deblur_algorithm": "Deblurring-3DGS_GTnet",
@@ -369,7 +367,7 @@ Image fine keeps `mobilegs_lmrs` as the default pipeline and adds EDGS/RoMA dens
 
 Additional task options:
 
-- `fine_edgs_enabled=true|false`, default `true`. `false` falls back to AMB3R sparse initialization.
+- `fine_edgs_enabled=true|false`, default `true`. `false` keeps pycolmap sparse initialization and sparse point compensation.
 - `fine_edgs_matches_per_ref`, default `15000`.
 - `fine_edgs_nns_per_ref`, default `3`.
 - `fine_edgs_num_refs`, default all train cameras.

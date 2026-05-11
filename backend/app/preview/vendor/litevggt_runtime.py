@@ -13,7 +13,7 @@ from typing import Callable
 import numpy as np
 from PIL import Image
 
-from app.preview.io.ply import write_point_cloud_ply
+from app.preview.io.ply import write_gaussian_splat_ply
 from app.preview.types import PreviewFailure
 from app.preview.utils import VENDOR_ROOT, image_files, prepend_sys_path
 
@@ -691,7 +691,7 @@ def run_litevggt_pointcloud(
         selection_strategy=selection_strategy,
         progress=progress,
     )
-    point_count = write_point_cloud_ply(
+    point_count = write_gaussian_splat_ply(
         reconstruction.points,
         reconstruction.colors,
         output_ply,

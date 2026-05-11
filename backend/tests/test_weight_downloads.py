@@ -143,7 +143,6 @@ class WeightDownloadTests(unittest.TestCase):
         self.assertEqual(
             [item.relative_path for item in weights_for_pipeline("mobilegs_lmrs")],
             [
-                "amb3r/amb3r.pt",
                 "roma/roma_outdoor.pth",
                 "roma/roma_indoor.pth",
                 "roma/dinov2_vitl14_pretrain.pth",

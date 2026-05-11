@@ -29,13 +29,13 @@
 - 前端不暴露算法选择，用户只选择操作意图，后端按规则自动选择管线。
 - 代码实现算法流程未接入真实实现前，必须明确返回不可用或失败。
 - 后端算法能力不能用占位函数、假文件、固定假结果冒充通过；未接入真实算法时必须返回明确的不可用状态。
-- 所有模型权重都先放入项目根目录 `model-cache/<model-name>/...`；worker 启动预检必须优先使用本地缓存，缺失时通过 `.part` 和任务级下载流程写入共享缓存。fine AMB3R 权重路径为 `model-cache/amb3r/amb3r.pt`，RoMA/EDGS 初始化权重路径为 `model-cache/roma/roma_outdoor.pth`、`model-cache/roma/roma_indoor.pth`、`model-cache/roma/dinov2_vitl14_pretrain.pth`，支持自动下载或手动预置。
+- 所有模型权重都先放入项目根目录 `model-cache/<model-name>/...`；worker 启动预检必须优先使用本地缓存，缺失时通过 `.part` 和任务级下载流程写入共享缓存。fine SfM 使用 pycolmap，不再需要 AMB3R checkpoint；RoMA/EDGS 初始化权重路径为 `model-cache/roma/roma_outdoor.pth`、`model-cache/roma/roma_indoor.pth`、`model-cache/roma/dinov2_vitl14_pretrain.pth`，支持自动下载或手动预置。
 - 所有第三方算法源码都先放入项目根目录 `repo-cache/<repo-name>`；Docker 构建必须优先复用本地缓存，缺失时先尝试国内镜像源再回退官方源。
 - 源码、配置和文档统一使用 UTF-8 编码；Windows PowerShell 若显示乱码，应先切换终端编码或使用 UTF-8 读取。
 
 ## 2026-05-10 Image Fine EDGS/RoMA Notes
 
-- Image fine `mobilegs_lmrs` now runs AMB3R-SfM, then local EDGS/RoMA dense-correspondence Gaussian initialization, then DeblurMLP-MobileGS training.
+- Image fine `mobilegs_lmrs` now runs pycolmap SfM, then local EDGS/RoMA dense-correspondence Gaussian initialization, then DeblurMLP-MobileGS training.
 - The project does not copy or clone the full EDGS repository. Only the minimal runtime under `backend/app/fine/edgs_runtime/` is part of this codebase.
 - EDGS defaults are enabled with `fine_edgs_enabled=true`, `matches_per_ref=15000`, `nns_per_ref=3`, `num_refs=len(train cameras)`, and `roma_model=outdoor`.
 - EDGS mode disables densification by setting `densify_until_iter=0`; final prune behavior remains.

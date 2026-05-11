@@ -265,7 +265,7 @@ def train_mobile_3dgs(
                 "lmrs_last_loss": lm_last_loss,
                 "lmrs_cg_iter": read_int(options.get("fine_lmrs_cg_iter"), 8, minimum=1, maximum=64) if lm_iterations else None,
                 "fastergs_backend": "compact_box_cuda_if_available",
-                "requested_algorithms": ["AMB3R", "Deblurring-3DGS", "FastGS", "FasterGS", "LM-RS"],
+                "requested_algorithms": ["PyCOLMAP", "Deblurring-3DGS", "FastGS", "FasterGS", "LM-RS"],
                 "effective_algorithms": effective_algorithms(deblur_state.enabled, lm_iterations, policy),
                 **policy.metrics(),
             },
@@ -443,15 +443,11 @@ def resolve_local_lm_status(
             "start_iter": lm_start_iter,
             "reason": "LM-RS temporarily isolated due to unstable local backend",
         }
-    if lm_start_iter >= iterations:
-        return {"active": False, "start_iter": lm_start_iter, "reason": "LM phase disabled because start_iter >= iterations"}
-    if deblur_enabled or blur_mode in {"motion", "defocus", "mixed"}:
-        return {
-            "active": False,
-            "start_iter": lm_start_iter,
-            "reason": "LM-RS disabled for blur/deblur scenes until Deblur-aware residual and Jacobian are implemented locally",
-        }
-    return {"active": True, "backend": "lmrs_local_matrix_free", "start_iter": lm_start_iter, "reason": None}
+    return {
+        "active": False,
+        "start_iter": lm_start_iter,
+        "reason": "LM-RS temporarily isolated due to unstable local backend",
+    }
 
 
 def read_bool(value: Any, fallback: bool) -> bool:
@@ -487,7 +483,7 @@ def build_lmrs_options(options: dict[str, Any]) -> SimpleNamespace:
 
 def effective_algorithms(deblur_enabled: bool, lm_iterations: int, policy: FastGSPolicy) -> list[str]:
     algorithms = [
-        "AMB3R",
+        "PyCOLMAP",
         "Deblurring-3DGS_GTnet" if deblur_enabled else "Deblurring-3DGS_disabled",
         "FastGS_official_metric_map" if policy.official_metric_calls > 0 else "FastGS_local_multiview_score",
     ]
