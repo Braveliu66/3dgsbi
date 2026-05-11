@@ -251,22 +251,28 @@ PY
 done
 EOF
 
-RUN <<'EOF'
+RUN --mount=type=cache,id=three-dgs-worker-weight-download-cache,target=/root/.cache/three-dgs-downloads,sharing=locked <<'EOF'
 set -eu
 download_weight() {
   url="$1"
   target="$2"
+  cached="/root/.cache/three-dgs-downloads/$(basename "$target")"
   if [ -s "$target" ]; then
     return 0
   fi
-  tmp="${target}.part"
+  mkdir -p "$(dirname "$target")" "$(dirname "$cached")"
+  if [ -s "$cached" ]; then
+    cp "$cached" "$target"
+    return 0
+  fi
+  tmp="${cached}.part"
   attempt=1
   while [ "$attempt" -le 5 ]; do
-    if curl -fL --retry 5 --retry-delay 10 "$url" -o "$tmp"; then
-      mv "$tmp" "$target"
+    if curl -fL -C - --retry 5 --retry-delay 10 "$url" -o "$tmp" || curl -fL --retry 5 --retry-delay 10 "$url" -o "$tmp"; then
+      mv "$tmp" "$cached"
+      cp "$cached" "$target"
       return 0
     fi
-    rm -f "$tmp"
     if [ "$attempt" -eq 5 ]; then
       return 1
     fi
@@ -303,6 +309,7 @@ EOF
 COPY backend/app ./app
 
 RUN --mount=type=cache,id=three-dgs-worker-runtime-extension-pip-cache,target=/root/.cache/pip,sharing=locked \
+    --mount=type=cache,id=three-dgs-worker-extension-wheel-cache,target=/root/.cache/three-dgs-wheels,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-lmrs-git-cache,target=/repo-cache/lm-rs,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-artdeco-git-cache,target=/repo-cache/artdeco,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-lingbot-map-git-cache,target=/repo-cache/lingbot-map,sharing=locked \
@@ -335,6 +342,45 @@ retry_git() {
     sleep $((attempt * 20))
     attempt=$((attempt + 1))
   done
+}
+fingerprint_source() {
+  source_dir="$1"
+  (
+    cd "$source_dir"
+    find . \( -path './.git' -o -name build -o -name dist -o -name '*.egg-info' -o -name __pycache__ \) -prune -o -type f -print0 \
+      | sort -z \
+      | xargs -0 -r sha256sum
+  ) | sha256sum | awk '{print $1}'
+}
+cached_wheel_install() {
+  cache_name="$1"
+  source_dir="$2"
+  shift 2
+  fingerprint="$(
+    {
+      fingerprint_source "$source_dir"
+      printf '%s\n' "$*"
+      sha256sum /tmp/worker/constraints.txt
+      python - <<'PY'
+import sys
+import torch
+
+print(sys.version)
+print(torch.__version__)
+print(torch.version.cuda)
+PY
+      nvcc --version
+      printf '%s\n' "${TORCH_CUDA_ARCH_LIST:-}"
+    } | sha256sum | awk '{print $1}'
+  )"
+  wheel_dir="/root/.cache/three-dgs-wheels/${cache_name}/${fingerprint}"
+  wheel="$(find "$wheel_dir" -maxdepth 1 -name '*.whl' -print -quit 2>/dev/null || true)"
+  if [ -z "$wheel" ]; then
+    mkdir -p "$wheel_dir"
+    python -m pip wheel --constraint /tmp/worker/constraints.txt --wheel-dir "$wheel_dir" "$@" "$source_dir"
+    wheel="$(find "$wheel_dir" -maxdepth 1 -name '*.whl' -print -quit)"
+  fi
+  retry_pip --no-deps "$wheel"
 }
 ensure_git_checkout() {
   repo_url="$1"
@@ -374,12 +420,12 @@ apply_rasterizer_patch() {
 }
 apply_rasterizer_patch /tmp/lmrs-fastgs-compact-box.patch
 apply_rasterizer_patch /tmp/fastgs-cuda-metric-accumulation.patch
-retry_pip --no-build-isolation "$LMRS_ROOT/submodules/diff-gaussian-rasterization"
-retry_pip --no-build-isolation "$LMRS_ROOT/submodules/simple-knn"
-retry_pip --no-build-isolation /app/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/fused-ssim
+cached_wheel_install diff-gaussian-rasterization "$LMRS_ROOT/submodules/diff-gaussian-rasterization" --no-deps --no-build-isolation
+cached_wheel_install simple-knn "$LMRS_ROOT/submodules/simple-knn" --no-deps --no-build-isolation
+cached_wheel_install fused-ssim /app/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/fused-ssim --no-deps --no-build-isolation
 CACHED_LINGBOT_MAP=/repo-cache/lingbot-map/source
 ensure_git_checkout "$LINGBOT_MAP_REPO_URL" "$CACHED_LINGBOT_MAP" "$LINGBOT_MAP_REPO_COMMIT"
-retry_pip --no-deps "$CACHED_LINGBOT_MAP"
+cached_wheel_install lingbot-map "$CACHED_LINGBOT_MAP" --no-deps
 CACHED_ARTDECO=/repo-cache/artdeco/source
 export GIT_LFS_SKIP_SMUDGE=1
 ensure_git_checkout "$ARTDECO_REPO_URL" "$CACHED_ARTDECO" "$ARTDECO_REPO_COMMIT"
@@ -391,7 +437,7 @@ sed -i 's/if not (torch.cuda.is_available() and CUDA_HOME):/if not CUDA_HOME:/' 
 sed -i 's|str(ROOT / "thirdparty/eigen")|"/usr/include/eigen3"|' "$ARTDECO_ROOT/VSLAM/setup.py"
 sed -i 's/D11.type()/D11.scalar_type()/' "$ARTDECO_ROOT/VSLAM/backend/src/matching_kernels.cu"
 sed -i 's|torch::linalg::linalg_norm(dx, std::optional<c10::Scalar>(), {}, false, {})|dx.pow(2).sum().sqrt()|g' "$ARTDECO_ROOT/VSLAM/backend/src/gn_kernels.cu"
-retry_pip --no-deps --no-build-isolation "$ARTDECO_ROOT/VSLAM"
+cached_wheel_install artdeco-vslam "$ARTDECO_ROOT/VSLAM" --no-deps --no-build-isolation
 CACHED_SPEED3R=/repo-cache/speed3r/source
 ensure_git_checkout "$SPEED3R_REPO_URL" "$CACHED_SPEED3R" "$SPEED3R_REPO_COMMIT"
 rm -rf "$SPEED3R_ROOT"

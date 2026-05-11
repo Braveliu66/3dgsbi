@@ -574,7 +574,9 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("/model-cache/mast3r", dockerfile)
         self.assertIn("artdeco_repo_commit", dockerfile)
         self.assertIn("speed3r_repo_commit", dockerfile)
-        self.assertIn("retry_pip --no-deps --no-build-isolation \"$artdeco_root/vslam\"", dockerfile)
+        self.assertIn("three-dgs-worker-extension-wheel-cache", dockerfile)
+        self.assertIn("cached_wheel_install artdeco-vslam \"$artdeco_root/vslam\"", dockerfile)
+        self.assertIn("three-dgs-worker-weight-download-cache", dockerfile)
         self.assertIn("import pycolmap", dockerfile)
         self.assertIn("'einops==0.8.0' 'transformer-engine[pytorch]==2.4.0'", dockerfile)
         self.assertLess(
