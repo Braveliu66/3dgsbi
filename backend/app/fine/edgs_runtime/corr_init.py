@@ -27,7 +27,19 @@ class CorrInitResult:
         }
 
 
-def instantiate_roma(device: str, model_name: str = "outdoor") -> Any:
+def instantiate_roma(
+    device: str,
+    model_name: str = "outdoor",
+    *,
+    coarse_res: int | tuple[int, int] = 560,
+    upsample_res: int | tuple[int, int] = 864,
+    sample_thresh: float = 0.05,
+    sample_mode: str = "threshold_balanced",
+    symmetric: bool = True,
+    use_custom_corr: bool = True,
+    upsample_preds: bool = True,
+    with_padding: bool = False,
+) -> Any:
     try:
         import torch
         from romatch import roma_indoor, roma_outdoor
@@ -37,9 +49,21 @@ def instantiate_roma(device: str, model_name: str = "outdoor") -> Any:
     torch.set_float32_matmul_precision("highest")
     normalized = str(model_name or "outdoor").lower()
     weights, dinov2_weights = _load_cached_roma_weights(torch, normalized, device)
-    if normalized == "indoor":
-        return roma_indoor(device=device, weights=weights, dinov2_weights=dinov2_weights)
-    return roma_outdoor(device=device, weights=weights, dinov2_weights=dinov2_weights)
+    kwargs = {
+        "device": device,
+        "weights": weights,
+        "dinov2_weights": dinov2_weights,
+        "coarse_res": coarse_res,
+        "upsample_res": upsample_res,
+        "symmetric": bool(symmetric),
+        "use_custom_corr": bool(use_custom_corr),
+        "upsample_preds": bool(upsample_preds),
+        "with_padding": bool(with_padding),
+    }
+    roma = roma_indoor(**kwargs) if normalized == "indoor" else roma_outdoor(**kwargs)
+    roma.sample_thresh = float(sample_thresh)
+    roma.sample_mode = str(sample_mode or "threshold_balanced")
+    return roma
 
 
 def _load_cached_roma_weights(torch: Any, model_name: str, device: str) -> tuple[Any | None, Any | None]:
@@ -73,7 +97,18 @@ def init_gaussians_with_corr(
     reproj_error = float(getattr(cfg, "reprojection_error", 4.0))
     roma_name = str(getattr(cfg, "roma_model", "outdoor"))
 
-    roma = roma_model if roma_model is not None else instantiate_roma(device, roma_name)
+    roma = roma_model if roma_model is not None else instantiate_roma(
+        device,
+        roma_name,
+        coarse_res=getattr(cfg, "roma_coarse_res", 560),
+        upsample_res=getattr(cfg, "roma_upsample_res", 864),
+        sample_thresh=float(getattr(cfg, "roma_sample_thresh", 0.05)),
+        sample_mode=str(getattr(cfg, "roma_sample_mode", "threshold_balanced")),
+        symmetric=bool(getattr(cfg, "roma_symmetric", True)),
+        use_custom_corr=bool(getattr(cfg, "roma_use_custom_corr", True)),
+        upsample_preds=bool(getattr(cfg, "roma_upsample_preds", True)),
+        with_padding=bool(getattr(cfg, "roma_with_padding", False)),
+    )
     centers = np.stack([_camera_center(camera) for camera in cameras], axis=0)
     reference_indices = _farthest_indices(centers, num_refs)
     neighbors = _neighbor_indices(centers, nns_per_ref)
@@ -83,6 +118,9 @@ def init_gaussians_with_corr(
     rgb_chunks: list[np.ndarray] = []
     score_chunks: list[np.ndarray] = []
     pair_count = 0
+    match_failures = 0
+    insufficient_matches = 0
+    no_valid_triangulations = 0
 
     with tempfile.TemporaryDirectory(prefix="edgs_roma_") as tmp:
         image_paths = _write_camera_images(cameras, Path(tmp))
@@ -103,12 +141,15 @@ def init_gaussians_with_corr(
                         device,
                     )
                 except Exception:
+                    match_failures += 1
                     continue
                 if kpts_ref.shape[0] < 8:
+                    insufficient_matches += 1
                     continue
 
                 points, valid = _triangulate_matches(ref_camera, cameras[nn_idx], kpts_ref, kpts_nn, reproj_error)
                 if not bool(valid.any().item()):
+                    no_valid_triangulations += 1
                     continue
                 points_np = points[valid].detach().cpu().numpy().astype(np.float32)
                 colors_np = _sample_camera_colors(ref_camera, kpts_ref[valid]).astype(np.float32)
@@ -118,7 +159,13 @@ def init_gaussians_with_corr(
                 score_chunks.append(scores_np)
 
     if not xyz_chunks:
-        raise RuntimeError("EDGS/RoMA did not produce valid triangulated correspondences")
+        raise RuntimeError(
+            "EDGS/RoMA did not produce valid triangulated correspondences "
+            f"(pairs={pair_count}, match_failures={match_failures}, "
+            f"insufficient_matches={insufficient_matches}, "
+            f"no_valid_triangulation={no_valid_triangulations}, "
+            f"reprojection_error={reproj_error})"
+        )
 
     xyz = np.concatenate(xyz_chunks, axis=0)
     rgb = np.concatenate(rgb_chunks, axis=0)

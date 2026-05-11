@@ -39,7 +39,15 @@ class AMB3R_SfM():
         device = torch.device(str(self.cfg.device))
         if device.type == "cuda" and not torch.cuda.is_available():
             device = torch.device("cpu")
-            self.cfg.device = "cpu"
+
+        memory_device = str(self.options.get("fine_amb3r_memory_device") or str(device)).strip()
+        if not memory_device or memory_device.lower() == "auto":
+            memory_device = str(device)
+        if memory_device.lower().startswith("cuda") and not torch.cuda.is_available():
+            memory_device = "cpu"
+        self.cfg.device = memory_device
+        self.memory_device = torch.device(memory_device)
+
         self.model = model.to(device)
         self.model.device = str(device)
         self.device = device
@@ -136,7 +144,9 @@ class AMB3R_SfM():
         return profile
 
     def metrics(self):
-        return dict(self.profile_metrics)
+        metrics = dict(self.profile_metrics)
+        metrics["amb3r_sfm_config_memory_device"] = str(self.memory_device)
+        return metrics
 
 
     def extract_features(self, images, chunk_size=128):
@@ -381,9 +391,18 @@ class AMB3R_SfM():
             'idx': [cluster_kf_idx] + cluster_member_indices
         }
 
-        # Find the best first keyframe to start with
-        for member_idx in cluster_member_indices:
+        try:
+            max_init_candidates = int(self.options.get("fine_amb3r_init_candidates", 2))
+        except (TypeError, ValueError):
+            max_init_candidates = 2
 
+        if max_init_candidates <= 0:
+            candidate_members = []
+        else:
+            candidate_members = list(cluster_member_indices)[:max_init_candidates]
+
+        # Find the best first keyframe to start with
+        for member_idx in candidate_members:
             idx_to_use = [member_idx] + [i for i in cluster_member_indices if i != member_idx] + [cluster_kf_idx]
             views_to_map = {
                 'images': images[:, idx_to_use].to(self.model.device),

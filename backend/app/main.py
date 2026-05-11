@@ -932,12 +932,22 @@ def create_fine_task(
 
     fine_pipeline = "video_artdeco_speed3r" if project.input_type == "video" else "mobilegs_lmrs"
     eta_seconds = settings.fine_expected_seconds_video if project.input_type == "video" else settings.fine_expected_seconds_images
+    payload_options = payload.options or {}
+    amb3r_defaults = (
+        {
+            "fine_amb3r_memory_device": "cuda:0",
+            "fine_amb3r_init_candidates": 1,
+        }
+        if project.input_type == "images"
+        else {}
+    )
 
     options = {
-        **(payload.options or {}),
+        **amb3r_defaults,
+        **payload_options,
         "fine_pipeline": fine_pipeline,
         "source_version": project.source_version,
-        "fine_iterations": int((payload.options or {}).get("fine_iterations") or settings.fine_iterations),
+        "fine_iterations": int(payload_options.get("fine_iterations") or settings.fine_iterations),
     }
     task = Task(
         project_id=project.id,

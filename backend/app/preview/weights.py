@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import time
 from html import unescape
 from contextlib import contextmanager
@@ -133,6 +134,34 @@ def download_model_weights(
         results.append(result)
         if log:
             log(_format_result(result))
+    return results
+
+
+def seed_model_weights(
+    model_root: Path,
+    seed_root: Path,
+    specs: Iterable[ModelWeight],
+    *,
+    log: Callable[[str], None] | None = None,
+) -> list[dict[str, Any]]:
+    results = []
+    for spec in specs:
+        target = safe_weight_path(model_root, spec.relative_path)
+        source = safe_weight_path(seed_root, spec.relative_path)
+        if target.exists() and target.is_file() and target.stat().st_size > 0:
+            results.append({"relative_path": spec.relative_path, "status": "exists", "size_bytes": target.stat().st_size})
+            continue
+        if not source.exists() or not source.is_file() or source.stat().st_size <= 0:
+            results.append({"relative_path": spec.relative_path, "status": "seed_missing", "size_bytes": 0})
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        part_path(target).unlink(missing_ok=True)
+        lock_path(target).unlink(missing_ok=True)
+        result = {"relative_path": spec.relative_path, "status": "seeded", "size_bytes": target.stat().st_size}
+        results.append(result)
+        if log:
+            log(f"[weights] {spec.relative_path}: seeded from image cache ({result['size_bytes']} bytes)")
     return results
 
 

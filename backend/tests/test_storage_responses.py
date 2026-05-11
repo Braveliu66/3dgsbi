@@ -209,6 +209,31 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(payload["options"]["fine_pipeline"], "mobilegs_lmrs")
             self.assertEqual(payload["options"]["source_version"], 3)
             self.assertEqual(payload["options"]["fine_iterations"], 1000)
+            self.assertEqual(payload["options"]["fine_amb3r_memory_device"], "cuda:0")
+            self.assertEqual(payload["options"]["fine_amb3r_init_candidates"], 1)
+
+    def test_fine_task_preserves_explicit_amb3r_oom_options(self) -> None:
+        with TestClient(app) as client, patch("app.main.enqueue_fine_task", return_value=None):
+            headers = auth_headers(client)
+            project_id = create_image_project(client, headers, "explicit amb3r options")
+            for index in range(3):
+                upload_response = client.post(
+                    f"/api/projects/{project_id}/media",
+                    files={"file": (f"{index}.png", PNG_BYTES, "image/png")},
+                    headers=headers,
+                )
+                upload_response.raise_for_status()
+
+            response = client.post(
+                f"/api/projects/{project_id}/tasks/fine",
+                json={"options": {"fine_amb3r_memory_device": "cpu", "fine_amb3r_init_candidates": 0}},
+                headers=headers,
+            )
+            response.raise_for_status()
+            payload = response.json()
+
+            self.assertEqual(payload["options"]["fine_amb3r_memory_device"], "cpu")
+            self.assertEqual(payload["options"]["fine_amb3r_init_candidates"], 0)
 
     def test_preview_rejects_legacy_edgs_pipeline(self) -> None:
         with TestClient(app) as client:
@@ -261,6 +286,8 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(payload["status"], "queued")
             self.assertEqual(payload["options"]["fine_pipeline"], "video_artdeco_speed3r")
             self.assertEqual(payload["options"]["source_version"], 1)
+            self.assertNotIn("fine_amb3r_memory_device", payload["options"])
+            self.assertNotIn("fine_amb3r_init_candidates", payload["options"])
 
     def test_video_preview_task_uses_lingbot_pipeline(self) -> None:
         fake_redis = FakeRedis()

@@ -19,9 +19,9 @@ except Exception as exc:
     HTTPX_IMPORT_ERROR = exc
 
 if HTTPX_IMPORT_ERROR is None:
-    from app.preview.weights import ModelDownloadError, ModelWeight, download_model_weight, part_path, weights_for_pipeline  # noqa: E402
+    from app.preview.weights import ModelDownloadError, ModelWeight, download_model_weight, part_path, seed_model_weights, weights_for_pipeline  # noqa: E402
 else:
-    ModelDownloadError = ModelWeight = download_model_weight = part_path = weights_for_pipeline = None
+    ModelDownloadError = ModelWeight = download_model_weight = part_path = seed_model_weights = weights_for_pipeline = None
 
 
 PAYLOAD = b"0123456789abcdefghijklmnopqrstuvwxyz"
@@ -159,6 +159,28 @@ class WeightDownloadTests(unittest.TestCase):
                 "mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl",
             ],
         )
+
+    def test_seed_model_weights_copies_missing_weight_from_image_seed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seed = root / "seed"
+            model_root = root / "model-cache"
+            source = seed / "lingbot" / "lingbot-map-long.pt"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"weight")
+            stale_part = model_root / "lingbot" / "lingbot-map-long.pt.part"
+            stale_lock = model_root / "lingbot" / "lingbot-map-long.pt.lock"
+            stale_part.parent.mkdir(parents=True)
+            stale_part.write_bytes(b"partial")
+            stale_lock.write_text("stale", encoding="utf-8")
+
+            results = seed_model_weights(model_root, seed, (ModelWeight("lingbot/lingbot-map-long.pt", "https://example.test/w"),))
+
+            target = model_root / "lingbot" / "lingbot-map-long.pt"
+            self.assertEqual(target.read_bytes(), b"weight")
+            self.assertEqual(results[0]["status"], "seeded")
+            self.assertFalse(stale_part.exists())
+            self.assertFalse(stale_lock.exists())
 
 
 @contextlib.contextmanager

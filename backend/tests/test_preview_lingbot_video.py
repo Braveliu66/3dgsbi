@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
+
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_ROOT))
@@ -58,6 +60,21 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             )
 
             def fake_runtime(**kwargs):
+                self.assertEqual(kwargs["fps"], 3)
+                self.assertEqual(kwargs["max_frames"], 0)
+                self.assertEqual(kwargs["mode"], "windowed")
+                self.assertEqual(kwargs["camera_iterations"], 1)
+                self.assertEqual(kwargs["keyframe_interval"], 6)
+                self.assertEqual(kwargs["window_size"], 64)
+                self.assertEqual(kwargs["overlap_keyframes"], 4)
+                self.assertEqual(kwargs["num_scale_frames"], 2)
+                self.assertEqual(kwargs["max_points"], 0)
+                self.assertEqual(kwargs["frame_stride"], 1)
+                self.assertEqual(kwargs["pixel_stride"], 4)
+                self.assertEqual(kwargs["conf_percentile"], 5.0)
+                self.assertEqual(kwargs["min_conf"], 1e-5)
+                self.assertTrue(kwargs["compile_model"])
+                self.assertTrue(kwargs["save_predictions"])
                 kwargs["output_ply"].parent.mkdir(parents=True, exist_ok=True)
                 kwargs["output_ply"].write_bytes(b"ply\nformat binary_little_endian 1.0\nend_header\n")
                 return {
@@ -83,6 +100,83 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             self.assertEqual(result.metrics["adapter"], "lingbot_map_spz")
             self.assertEqual(result.metrics["lingbot_sampled_frames"], 8)
             self.assertEqual(result.source_commits["LingBot-Map"], "4cd986009b9adeded8a4e740919221940dedeffe")
+
+    def test_lingbot_npz_to_spark_plain_ply_prefers_depth_points(self) -> None:
+        from app.preview.vendor.lingbot_runtime import write_spark_plain_ply_from_npz
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            predictions = root / "predictions"
+            predictions.mkdir()
+            world_points_from_depth = np.array(
+                [
+                    [[1, 1, 1], [2, 2, 2]],
+                    [[3, 3, 3], [4, 4, 4]],
+                ],
+                dtype=np.float32,
+            )
+            world_points = np.full((2, 2, 3), 99, dtype=np.float32)
+            image = np.array(
+                [
+                    [[10, 20], [30, 40]],
+                    [[50, 60], [70, 80]],
+                    [[90, 100], [110, 120]],
+                ],
+                dtype=np.uint8,
+            )
+            depth_conf = np.array([[0.1, 0.2], [0.3, 0.4]], dtype=np.float32)
+            np.savez(
+                predictions / "frame_000000.npz",
+                world_points_from_depth=world_points_from_depth,
+                world_points=world_points,
+                images=image,
+                depth_conf=depth_conf,
+            )
+
+            output_ply = root / "preview.ply"
+            metrics = write_spark_plain_ply_from_npz(
+                predictions,
+                output_ply,
+                frame_stride=1,
+                pixel_stride=1,
+                conf_percentile=0,
+                min_conf=0.25,
+                max_points=0,
+            )
+
+            payload = output_ply.read_bytes()
+            header, body = payload.split(b"end_header\n", 1)
+            self.assertIn(b"element vertex 2", header)
+            self.assertIn(b"property uchar blue", header)
+            self.assertNotIn(b"property uchar alpha", header)
+            self.assertEqual(metrics["point_count"], 2)
+            self.assertEqual(metrics["lingbot_point_source"], "world_points_from_depth")
+
+            records = np.frombuffer(
+                body,
+                dtype=np.dtype(
+                    [
+                        ("x", "<f4"),
+                        ("y", "<f4"),
+                        ("z", "<f4"),
+                        ("red", "u1"),
+                        ("green", "u1"),
+                        ("blue", "u1"),
+                    ]
+                ),
+            )
+            self.assertEqual(records.shape[0], 2)
+            np.testing.assert_allclose(records["x"], np.array([3, 4], dtype=np.float32))
+            np.testing.assert_array_equal(records["red"], np.array([30, 40], dtype=np.uint8))
+            np.testing.assert_array_equal(records["green"], np.array([70, 80], dtype=np.uint8))
+            np.testing.assert_array_equal(records["blue"], np.array([110, 120], dtype=np.uint8))
+
+    def test_lingbot_detects_torch_compile_cudagraph_overwrite(self) -> None:
+        from app.preview.vendor.lingbot_runtime import is_cudagraph_overwrite_error
+
+        error = RuntimeError("accessing tensor output of CUDAGraphs that has been overwritten by a subsequent run")
+        self.assertTrue(is_cudagraph_overwrite_error(error))
+        self.assertFalse(is_cudagraph_overwrite_error(RuntimeError("out of memory")))
 
 
 if __name__ == "__main__":

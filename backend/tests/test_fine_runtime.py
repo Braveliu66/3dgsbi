@@ -486,6 +486,82 @@ class FineRuntimeTests(unittest.TestCase):
 
         self.assertEqual(float(materialized["pose"][0, 3]), 1.0)
 
+    def test_amb3r_sfm_memory_device_option_does_not_move_model(self) -> None:
+        try:
+            from app.fine.amb3r_runtime.sfm.pipeline import AMB3R_SfM
+        except Exception as exc:
+            raise unittest.SkipTest(f"AMB3R SfM pipeline unavailable: {exc}") from exc
+
+        class DummyModel:
+            def __init__(self) -> None:
+                self.to_device = None
+                self.device = None
+
+            def to(self, device):
+                self.to_device = str(device)
+                return self
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "sfm.yaml"
+            cfg_path.write_text("device: 'cuda:0'\n", encoding="utf-8")
+            model = DummyModel()
+            with patch("torch.cuda.is_available", return_value=True):
+                pipeline = AMB3R_SfM(model, cfg_path=cfg_path, options={"fine_amb3r_memory_device": "cpu"})
+
+        self.assertEqual(model.to_device, "cuda:0")
+        self.assertEqual(model.device, "cuda:0")
+        self.assertEqual(str(pipeline.device), "cuda:0")
+        self.assertEqual(str(pipeline.memory_device), "cpu")
+        self.assertEqual(str(pipeline.cfg.device), "cpu")
+        self.assertEqual(pipeline.metrics()["amb3r_sfm_config_memory_device"], "cpu")
+
+    def test_amb3r_initialize_map_limits_extra_candidate_runs(self) -> None:
+        try:
+            import torch
+            from app.fine.amb3r_runtime.sfm.pipeline import AMB3R_SfM
+        except Exception as exc:
+            raise unittest.SkipTest(f"AMB3R SfM pipeline unavailable: {exc}") from exc
+
+        class DummyModel:
+            def to(self, device):
+                return self
+
+        class DummyMemory:
+            def __init__(self) -> None:
+                self.best_kf_idx = None
+                self.cluster_pred_all = None
+
+            def initialize(self, cluster_pred_all, best_kf_idx):
+                self.cluster_pred_all = cluster_pred_all
+                self.best_kf_idx = best_kf_idx
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "sfm.yaml"
+            cfg_path.write_text("device: 'cpu'\n", encoding="utf-8")
+            pipeline = AMB3R_SfM(DummyModel(), cfg_path=cfg_path, options={"fine_amb3r_init_candidates": 2})
+
+        calls = []
+
+        def local_mapping(views_to_map, cfg):
+            ids = [int(value) for value in views_to_map["images"][0, :, 0, 0, 0].tolist()]
+            calls.append(ids)
+            return {"score": len(calls)}
+
+        def build_prediction_dict(res, idx_to_use):
+            return {"conf": torch.tensor([[float(res["score"])]])}
+
+        memory = DummyMemory()
+        pipeline.keyframe_memory = memory
+        pipeline.local_mapping = local_mapping
+        pipeline.build_prediction_dict = build_prediction_dict
+
+        images = torch.arange(5, dtype=torch.float32).view(1, 5, 1, 1, 1)
+        pipeline.initialize_map(images, 0, [1, 2, 3, 4])
+
+        self.assertEqual(calls, [[0, 1, 2, 3, 4], [1, 2, 3, 4, 0], [2, 1, 3, 4, 0]])
+        self.assertEqual(memory.best_kf_idx, 2)
+        self.assertEqual(set(memory.cluster_pred_all), {0, 1, 2})
+
     def test_preview_litevggt_and_fine_amb3r_imports_are_isolated(self) -> None:
         sys.modules.pop("vggt", None)
 
@@ -551,6 +627,7 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("torch-scatter==2.1.2", dockerfile)
         self.assertIn("romatch==0.1.2", requirements)
         self.assertIn("scikit-learn==1.6.1", requirements)
+        self.assertIn("seaborn==0.13.2", requirements)
         self.assertIn("hf_endpoint", dockerfile)
         self.assertIn("https://hf-mirror.com", dockerfile)
         self.assertIn("/model-cache/roma/roma_outdoor.pth", dockerfile)
@@ -574,9 +651,21 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("/model-cache/mast3r", dockerfile)
         self.assertIn("artdeco_repo_commit", dockerfile)
         self.assertIn("speed3r_repo_commit", dockerfile)
+        self.assertIn("env pythonpath=${artdeco_root}/vslam/thirdparty/mast3r/dust3r/croco", dockerfile)
         self.assertIn("three-dgs-worker-extension-wheel-cache", dockerfile)
+        self.assertIn("cached_wheel_install curope", dockerfile)
+        self.assertIn("artdeco rope2d cuda extension import ok", dockerfile)
+        self.assertIn("speed3r rope2d cuda extension import ok", dockerfile)
         self.assertIn("cached_wheel_install artdeco-vslam \"$artdeco_root/vslam\"", dockerfile)
         self.assertIn("three-dgs-worker-weight-download-cache", dockerfile)
+        self.assertLess(
+            dockerfile.index("copy backend/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/fused-ssim"),
+            dockerfile.index("cached_wheel_install fused-ssim"),
+        )
+        self.assertGreater(
+            dockerfile.index("copy backend/app ./app"),
+            dockerfile.index("cached_wheel_install artdeco-vslam"),
+        )
         self.assertIn("import pycolmap", dockerfile)
         self.assertIn("'einops==0.8.0' 'transformer-engine[pytorch]==2.4.0'", dockerfile)
         self.assertLess(

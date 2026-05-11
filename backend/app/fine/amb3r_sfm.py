@@ -181,7 +181,10 @@ def build_amb3r_colmap_scene(
             oom_retries += 1
             scene_data = None
             del image_tensor
-            torch.cuda.empty_cache()
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
 
     if processed is None or scene_data is None:
         raise FineFailure("AMB3R_RECONSTRUCTION_FAILED", "AMB3R did not produce a reconstruction")

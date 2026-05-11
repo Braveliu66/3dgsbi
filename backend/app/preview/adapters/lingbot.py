@@ -26,23 +26,27 @@ def run(ctx: PreviewContext) -> PreviewResult:
         model_path=weight,
         output_ply=ply_path,
         work_dir=ctx.work_dir / "lingbot",
-        fps=read_int(ctx.options.get("preview_lingbot_fps"), 8, minimum=1, maximum=60),
-        max_frames=read_int(ctx.options.get("preview_lingbot_max_frames"), 160, minimum=2, maximum=10_000),
+        fps=read_int(ctx.options.get("preview_lingbot_fps"), 3, minimum=1, maximum=60),
+        max_frames=read_int(ctx.options.get("preview_lingbot_max_frames"), 0, minimum=0, maximum=100_000),
         image_size=read_int(ctx.options.get("preview_lingbot_image_size"), 518, minimum=224, maximum=1024),
-        mode=str(ctx.options.get("preview_lingbot_mode") or "auto"),
-        keyframe_interval=read_optional_int(ctx.options.get("preview_lingbot_keyframe_interval")),
+        mode=str(ctx.options.get("preview_lingbot_mode") or "windowed"),
+        keyframe_interval=read_optional_int(ctx.options.get("preview_lingbot_keyframe_interval")) or 6,
         camera_iterations=read_int(ctx.options.get("preview_lingbot_camera_iterations"), 1, minimum=1, maximum=8),
-        num_scale_frames=read_int(ctx.options.get("preview_lingbot_num_scale_frames"), 8, minimum=1, maximum=64),
+        num_scale_frames=read_int(ctx.options.get("preview_lingbot_num_scale_frames"), 2, minimum=1, maximum=64),
         window_size=read_int(ctx.options.get("preview_lingbot_window_size"), 64, minimum=8, maximum=512),
-        overlap_keyframes=read_int(ctx.options.get("preview_lingbot_overlap_keyframes"), 8, minimum=1, maximum=128),
-        max_points=read_int(ctx.options.get("preview_lingbot_max_points"), 1_200_000, minimum=10_000, maximum=20_000_000),
-        conf_threshold=read_float(ctx.options.get("preview_lingbot_conf_threshold"), 1.5, minimum=-100.0, maximum=100.0),
-        compile_model=read_bool(ctx.options.get("preview_lingbot_compile"), False),
+        overlap_keyframes=read_int(ctx.options.get("preview_lingbot_overlap_keyframes"), 4, minimum=1, maximum=128),
+        max_points=read_int(ctx.options.get("preview_lingbot_max_points"), 0, minimum=0, maximum=200_000_000),
+        frame_stride=read_int(ctx.options.get("preview_lingbot_frame_stride"), 1, minimum=1, maximum=10_000),
+        pixel_stride=read_int(ctx.options.get("preview_lingbot_pixel_stride"), 4, minimum=1, maximum=512),
+        conf_percentile=read_float(ctx.options.get("preview_lingbot_conf_percentile"), 5.0, minimum=0.0, maximum=100.0),
+        min_conf=read_float(ctx.options.get("preview_lingbot_min_conf"), 1e-5, minimum=-100.0, maximum=100.0),
+        save_predictions=read_bool(ctx.options.get("preview_lingbot_save_predictions"), True),
+        compile_model=read_bool(ctx.options.get("preview_lingbot_compile"), True),
         progress=lambda stage, progress, message: ctx.report(stage, progress, message),
     )
     timer.mark("lingbot_inference")
 
-    ctx.report("spz_conversion", 86, "converting LingBot-Map Gaussian PLY to Spark SPZ")
+    ctx.report("spz_conversion", 86, "converting LingBot-Map plain PLY to Spark SPZ")
     splat_count = convert_ply_to_spz(ply_path, ctx.output_spz)
     timer.mark("spz_conversion")
 

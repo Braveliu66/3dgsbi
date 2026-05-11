@@ -45,7 +45,7 @@ ALGORITHMS: list[dict[str, Any]] = [
         "commands": {},
         "source_type": "pinned_runtime_package",
         "license_notice": "Apache-2.0; worker installs the LingBot-Map core package at a pinned commit and excludes optional rendering/visualization dependencies.",
-        "notes": "Video fast preview pipeline: sampled video frames -> LingBot-Map streaming/windowed RGB-D reconstruction -> lightweight Gaussian PLY -> Spark SPZ. It does not use LingBot offline rendering, Kaolin, Open3D, viser, sky segmentation, or custom render CUDA extensions.",
+        "notes": "Video fast preview pipeline: sampled video frames -> LingBot-Map windowed RGB-D reconstruction -> per-frame NPZ -> Spark plain PLY -> Spark SPZ. It does not use LingBot offline rendering, Kaolin, Open3D, viser, sky segmentation, or custom render CUDA extensions.",
     },
     {
         "name": "Spark SPZ",

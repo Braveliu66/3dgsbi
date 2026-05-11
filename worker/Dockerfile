@@ -29,7 +29,7 @@ ENV HF_HUB_CACHE=/model-cache/huggingface/hub
 ENV XDG_CACHE_HOME=/model-cache/xdg
 ENV TORCH_EXTENSIONS_DIR=/model-cache/torch_extensions
 
-RUN mkdir -p /model-cache/amb3r /model-cache/lingbot /model-cache/speed3r_pi3 /model-cache/mast3r /model-cache/roma
+RUN mkdir -p /model-cache/amb3r /model-cache/lingbot /model-cache/speed3r_pi3 /model-cache/mast3r /model-cache/roma /opt/model-cache-seed/lingbot
 
 RUN --mount=type=cache,id=three-dgs-worker-apt-cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-apt-lists,target=/var/lib/apt/lists,sharing=locked \
@@ -120,6 +120,7 @@ ENV FINE_RECONSTRUCTION_ENABLED=true
 ENV LMRS_ROOT=/opt/lm-rs
 ENV ARTDECO_ROOT=/opt/artdeco-runtime
 ENV SPEED3R_ROOT=/opt/speed3r-runtime
+ENV PYTHONPATH=${ARTDECO_ROOT}/VSLAM/thirdparty/mast3r/dust3r/croco
 ENV MAX_JOBS=2
 ENV CUDA_PATH=/usr/local/cuda
 ENV NVTE_FRAMEWORK=pytorch
@@ -251,41 +252,6 @@ PY
 done
 EOF
 
-RUN --mount=type=cache,id=three-dgs-worker-weight-download-cache,target=/root/.cache/three-dgs-downloads,sharing=locked <<'EOF'
-set -eu
-download_weight() {
-  url="$1"
-  target="$2"
-  cached="/root/.cache/three-dgs-downloads/$(basename "$target")"
-  if [ -s "$target" ]; then
-    return 0
-  fi
-  mkdir -p "$(dirname "$target")" "$(dirname "$cached")"
-  if [ -s "$cached" ]; then
-    cp "$cached" "$target"
-    return 0
-  fi
-  tmp="${cached}.part"
-  attempt=1
-  while [ "$attempt" -le 5 ]; do
-    if curl -fL -C - --retry 5 --retry-delay 10 "$url" -o "$tmp" || curl -fL --retry 5 --retry-delay 10 "$url" -o "$tmp"; then
-      mv "$tmp" "$cached"
-      cp "$cached" "$target"
-      return 0
-    fi
-    if [ "$attempt" -eq 5 ]; then
-      return 1
-    fi
-    echo "RoMA weight download failed, retrying in $((attempt * 20)) seconds ($attempt/5)"
-    sleep $((attempt * 20))
-    attempt=$((attempt + 1))
-  done
-}
-download_weight "${HF_ENDPOINT}/xmanifold/roma/resolve/main/roma_outdoor.pth" /model-cache/roma/roma_outdoor.pth
-download_weight "${HF_ENDPOINT}/xmanifold/roma/resolve/main/roma_indoor.pth" /model-cache/roma/roma_indoor.pth
-download_weight "${HF_ENDPOINT}/Dominoc/dinov2_vitl14_pretrain/resolve/main/dinov2_vitl14_pretrain.pth" /model-cache/roma/dinov2_vitl14_pretrain.pth
-EOF
-
 RUN --mount=type=cache,id=three-dgs-worker-pycolmap-pip-cache,target=/root/.cache/pip,sharing=locked <<'EOF'
 set -eu
 attempt=1
@@ -306,7 +272,10 @@ PY
 done
 EOF
 
-COPY backend/app ./app
+COPY backend/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/diff-gaussian-rasterization/third_party/glm \
+    ./app/fine/local_3dgs/vendor/gaussian_splatting/submodules/diff-gaussian-rasterization/third_party/glm
+COPY backend/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/fused-ssim \
+    ./app/fine/local_3dgs/vendor/gaussian_splatting/submodules/fused-ssim
 
 RUN --mount=type=cache,id=three-dgs-worker-runtime-extension-pip-cache,target=/root/.cache/pip,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-extension-wheel-cache,target=/root/.cache/three-dgs-wheels,sharing=locked \
@@ -396,6 +365,7 @@ ensure_git_checkout() {
   fi
   retry_git -C "$repo_path" checkout "$repo_commit"
 }
+retry_pip 'faiss-cpu==1.12.0'
 CACHED_LMRS=/repo-cache/lm-rs/source
 ensure_git_checkout "$LMRS_REPO_URL" "$CACHED_LMRS" "$LMRS_REPO_COMMIT"
 retry_git -C "$CACHED_LMRS" submodule update --init --recursive submodules/simple-knn submodules/diff-gaussian-rasterization
@@ -433,6 +403,31 @@ test -f /usr/include/eigen3/Eigen/Sparse
 rm -rf "$ARTDECO_ROOT"
 mkdir -p "$(dirname "$ARTDECO_ROOT")"
 cp -a "$CACHED_ARTDECO" "$ARTDECO_ROOT"
+cached_wheel_install asmk "$ARTDECO_ROOT/VSLAM/thirdparty/mast3r/asmk" --no-deps --no-build-isolation
+cached_wheel_install curope "$ARTDECO_ROOT/VSLAM/thirdparty/mast3r/dust3r/croco/models/curope" --no-deps --no-build-isolation
+python - <<'PY'
+from pathlib import Path
+import sys
+
+sys.path.insert(0, "/opt/artdeco-runtime")
+sys.path.insert(0, "/opt/artdeco-runtime/VSLAM")
+sys.path.insert(0, "/opt/artdeco-runtime/VSLAM/thirdparty/mast3r/dust3r/croco")
+pos_embed = Path("/opt/artdeco-runtime/VSLAM/thirdparty/Pi3/pi3/models/layers/pos_embed.py")
+source = pos_embed.read_text(encoding="utf-8")
+patched = source.replace(
+    "try:\n    raise ImportError\nexcept ImportError:",
+    "try:\n    from models.curope import cuRoPE2D\n    RoPE2D = cuRoPE2D\nexcept ImportError:",
+)
+if patched == source:
+    raise RuntimeError(f"ARTDECO Pi3 RoPE2D patch did not apply: {pos_embed}")
+pos_embed.write_text(patched, encoding="utf-8")
+
+from models.curope import cuRoPE2D
+from VSLAM.thirdparty.Pi3.pi3.models.layers.pos_embed import RoPE2D
+
+assert RoPE2D is cuRoPE2D
+print("ARTDECO RoPE2D CUDA extension import ok")
+PY
 sed -i 's/if not (torch.cuda.is_available() and CUDA_HOME):/if not CUDA_HOME:/' "$ARTDECO_ROOT/VSLAM/setup.py"
 sed -i 's|str(ROOT / "thirdparty/eigen")|"/usr/include/eigen3"|' "$ARTDECO_ROOT/VSLAM/setup.py"
 sed -i 's/D11.type()/D11.scalar_type()/' "$ARTDECO_ROOT/VSLAM/backend/src/matching_kernels.cu"
@@ -443,6 +438,18 @@ ensure_git_checkout "$SPEED3R_REPO_URL" "$CACHED_SPEED3R" "$SPEED3R_REPO_COMMIT"
 rm -rf "$SPEED3R_ROOT"
 mkdir -p "$(dirname "$SPEED3R_ROOT")"
 cp -a "$CACHED_SPEED3R" "$SPEED3R_ROOT"
+python - <<'PY'
+import sys
+
+sys.path.insert(0, "/opt/speed3r-runtime")
+sys.path.insert(0, "/opt/artdeco-runtime/VSLAM/thirdparty/mast3r/dust3r/croco")
+
+from models.curope import cuRoPE2D
+from pi3.models.layers.pos_embed import RoPE2D
+
+assert RoPE2D is cuRoPE2D
+print("Speed3R RoPE2D CUDA extension import ok")
+PY
 find "$LMRS_ROOT" -name .git -prune -exec rm -rf {} +
 find "$LMRS_ROOT" -name .git -type f -delete
 find "$ARTDECO_ROOT" -name .git -prune -exec rm -rf {} +
@@ -450,5 +457,7 @@ find "$ARTDECO_ROOT" -name .git -type f -delete
 find "$SPEED3R_ROOT" -name .git -prune -exec rm -rf {} +
 find "$SPEED3R_ROOT" -name .git -type f -delete
 EOF
+
+COPY backend/app ./app
 
 CMD ["python", "-m", "app.worker_bootstrap"]
