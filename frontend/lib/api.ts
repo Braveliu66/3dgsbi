@@ -2,8 +2,11 @@ import type { AlgorithmEntry, Artifact, AuthResponse, MediaAsset, Project, Runti
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
 const TOKEN_KEY = "three_dgs_token";
-const UPLOAD_CHUNK_SIZE = 16 * 1024 * 1024;
-const UPLOAD_CONCURRENCY = 4;
+const TRANSFER_API_BASE = process.env.NEXT_PUBLIC_UPLOAD_API_BASE_URL || API_BASE;
+const UPLOAD_CHUNK_SIZE = readPositiveEnvInt(process.env.NEXT_PUBLIC_UPLOAD_CHUNK_SIZE, 8 * 1024 * 1024);
+const UPLOAD_CONCURRENCY = readPositiveEnvInt(process.env.NEXT_PUBLIC_UPLOAD_CONCURRENCY, 4);
+const RANGE_DOWNLOAD_CHUNK_SIZE = readPositiveEnvInt(process.env.NEXT_PUBLIC_RANGE_DOWNLOAD_CHUNK_SIZE, 8 * 1024 * 1024);
+const RANGE_DOWNLOAD_CONCURRENCY = readPositiveEnvInt(process.env.NEXT_PUBLIC_RANGE_DOWNLOAD_CONCURRENCY, 6);
 const CHUNK_RETRIES = 3;
 const HASH_READ_SIZE = 4 * 1024 * 1024;
 
@@ -176,7 +179,16 @@ async function uploadChunk(
 }
 
 function getUploadApiBase(): string {
-  return API_BASE.replace(/\/$/, "");
+  return transferApiBase();
+}
+
+function transferApiBase(): string {
+  return TRANSFER_API_BASE.replace(/\/$/, "");
+}
+
+function readPositiveEnvInt(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
 
 function chunkByteSize(file: File, chunkIndex: number): number {
@@ -419,8 +431,33 @@ export async function downloadFileWithProgress(
   expectedBytes = 0,
   onProgress?: TransferProgressCallback
 ): Promise<void> {
+  const { bytes, contentType } = await fetchBytesWithProgress(url, fileName, expectedBytes, onProgress);
+  saveBlob(new Blob([bytesToArrayBuffer(bytes)], { type: contentType || "application/octet-stream" }), fileName);
+}
+
+export async function fetchBytesWithProgress(
+  url: string,
+  fileName: string,
+  expectedBytes = 0,
+  onProgress?: TransferProgressCallback,
+  signal?: AbortSignal
+): Promise<{ bytes: Uint8Array; contentType: string }> {
+  const totalBytes = expectedBytes > 0 ? expectedBytes : await probeRangeSize(url, signal).catch(() => 0);
+  if (totalBytes > RANGE_DOWNLOAD_CHUNK_SIZE) {
+    return fetchRangeBytes(url, fileName, totalBytes, onProgress, signal);
+  }
+  return fetchStreamBytes(url, fileName, totalBytes, onProgress, signal);
+}
+
+async function fetchStreamBytes(
+  url: string,
+  fileName: string,
+  expectedBytes = 0,
+  onProgress?: TransferProgressCallback,
+  signal?: AbortSignal
+): Promise<{ bytes: Uint8Array; contentType: string }> {
   emitTransferProgress(onProgress, fileName, "downloading", 0, expectedBytes);
-  const response = await fetch(url, { cache: "no-store" });
+  const response = await fetch(url, { cache: "no-store", signal });
   if (!response.ok) {
     const text = await response.text();
     throw new Error(readErrorMessage(text, `${response.status} ${response.statusText}`));
@@ -429,14 +466,13 @@ export async function downloadFileWithProgress(
   const contentLength = Number(response.headers.get("Content-Length") || 0);
   const totalBytes = contentLength > 0 ? contentLength : expectedBytes;
   if (!response.body) {
-    const blob = await response.blob();
-    saveBlob(blob, fileName);
-    emitTransferProgress(onProgress, fileName, "complete", totalBytes || blob.size, totalBytes || blob.size);
-    return;
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    emitTransferProgress(onProgress, fileName, "complete", totalBytes || bytes.byteLength, totalBytes || bytes.byteLength);
+    return { bytes, contentType: response.headers.get("Content-Type") || "application/octet-stream" };
   }
 
   const reader = response.body.getReader();
-  const chunks: BlobPart[] = [];
+  const chunks: Uint8Array[] = [];
   let loadedBytes = 0;
   while (true) {
     const { done, value } = await reader.read();
@@ -444,13 +480,101 @@ export async function downloadFileWithProgress(
     if (!value) continue;
     const chunk = new Uint8Array(value.byteLength);
     chunk.set(value);
-    chunks.push(chunk.buffer);
+    chunks.push(chunk);
     loadedBytes += value.byteLength;
     emitTransferProgress(onProgress, fileName, "downloading", loadedBytes, totalBytes);
   }
-  const blob = new Blob(chunks, { type: response.headers.get("Content-Type") || "application/octet-stream" });
-  saveBlob(blob, fileName);
   emitTransferProgress(onProgress, fileName, "complete", totalBytes || loadedBytes, totalBytes || loadedBytes);
+  return { bytes: concatBytes(chunks, loadedBytes), contentType: response.headers.get("Content-Type") || "application/octet-stream" };
+}
+
+async function fetchRangeBytes(
+  url: string,
+  fileName: string,
+  totalBytes: number,
+  onProgress?: TransferProgressCallback,
+  signal?: AbortSignal
+): Promise<{ bytes: Uint8Array; contentType: string }> {
+  emitTransferProgress(onProgress, fileName, "downloading", 0, totalBytes);
+  const ranges = Array.from({ length: Math.ceil(totalBytes / RANGE_DOWNLOAD_CHUNK_SIZE) }, (_, index) => {
+    const start = index * RANGE_DOWNLOAD_CHUNK_SIZE;
+    return { index, start, end: Math.min(totalBytes - 1, start + RANGE_DOWNLOAD_CHUNK_SIZE - 1) };
+  });
+  const result = new Uint8Array(totalBytes);
+  const active = new Map<number, number>();
+  let completedBytes = 0;
+  let contentType = "application/octet-stream";
+  const report = () => {
+    const activeBytes = Array.from(active.values()).reduce((sum, value) => sum + value, 0);
+    emitTransferProgress(onProgress, fileName, "downloading", Math.min(totalBytes, completedBytes + activeBytes), totalBytes);
+  };
+
+  await runPool(ranges, RANGE_DOWNLOAD_CONCURRENCY, async ({ index, start, end }) => {
+    const response = await fetch(url, {
+      cache: "no-store",
+      headers: { Range: `bytes=${start}-${end}` },
+      signal
+    });
+    if (response.status !== 206) {
+      const text = await response.text();
+      throw new Error(readErrorMessage(text, `${response.status} ${response.statusText}`));
+    }
+    contentType = response.headers.get("Content-Type") || contentType;
+    const expected = end - start + 1;
+    let loaded = 0;
+    if (!response.body) {
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (bytes.byteLength !== expected) throw new Error("Downloaded chunk size does not match expected size");
+      result.set(bytes, start);
+      loaded = bytes.byteLength;
+    } else {
+      const reader = response.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        result.set(value, start + loaded);
+        loaded += value.byteLength;
+        active.set(index, loaded);
+        report();
+      }
+      if (loaded !== expected) throw new Error("Downloaded chunk size does not match expected size");
+    }
+    active.delete(index);
+    completedBytes += loaded;
+    report();
+  });
+
+  emitTransferProgress(onProgress, fileName, "complete", totalBytes, totalBytes);
+  return { bytes: result, contentType };
+}
+
+async function probeRangeSize(url: string, signal?: AbortSignal): Promise<number> {
+  const response = await fetch(url, {
+    cache: "no-store",
+    headers: { Range: "bytes=0-0" },
+    signal
+  });
+  if (response.status !== 206) return 0;
+  const contentRange = response.headers.get("Content-Range") || "";
+  const match = contentRange.match(/\/(\d+)$/);
+  return match ? Number(match[1]) : 0;
+}
+
+function concatBytes(chunks: Uint8Array[], totalBytes: number): Uint8Array {
+  const result = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result;
+}
+
+function bytesToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer as ArrayBuffer;
 }
 
 function saveBlob(blob: Blob, fileName: string): void {
@@ -513,7 +637,7 @@ export function projectEventsUrl(projectId: string): string {
 
 export function artifactUrl(path: string): string {
   if (path.startsWith("http")) return path;
-  return `${API_BASE}${path}`;
+  return `${transferApiBase()}${path}`;
 }
 
 export function mediaThumbnailUrl(media: MediaAsset): string | null {
@@ -528,7 +652,7 @@ export function mediaFileUrl(media: MediaAsset): string {
 function authenticatedAssetPath(path: string): string {
   const token = getToken();
   const suffix = token ? `${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}` : "";
-  return `${API_BASE}${path}${suffix}`;
+  return `${transferApiBase()}${path}${suffix}`;
 }
 
 export function formatBytes(value: number | undefined | null): string {

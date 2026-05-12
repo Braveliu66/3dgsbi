@@ -16,6 +16,7 @@ try:
         GTnet,
         attach_deblur_mlp_optimizer,
         build_deblur_mlp_state,
+        deblur_transform_regularization,
         predict_deblur_transforms,
     )
 except Exception as exc:  # pragma: no cover - depends on local torch availability
@@ -58,6 +59,7 @@ class DeblurMLPTests(unittest.TestCase):
         self.assertEqual(tuple(position_delta.shape), (4, 9))
         self.assertTrue(bool(torch.all(scale_delta >= 0.9)))
         self.assertTrue(bool(torch.all(rotation_delta >= 0.9)))
+        self.assertTrue(bool(torch.all(torch.abs(position_delta) <= state.config.max_position_delta + 1e-6)))
 
     def test_defocus_state_disables_position_moments(self) -> None:
         state = build_deblur_mlp_state("defocus", {"fine_deblur_width": 16, "fine_deblur_hidden": 2}, device="cpu")
@@ -66,6 +68,38 @@ class DeblurMLPTests(unittest.TestCase):
         self.assertFalse(state.config.use_position)
         self.assertEqual(state.metrics()["deblur_algorithm"], "Deblurring-3DGS_GTnet")
         self.assertEqual(state.metrics()["deblur_mlp_min_clamp"], 0.9)
+        self.assertIn("deblur_mlp_max_position_delta", state.metrics())
+        self.assertIn("deblur_mlp_transform_reg_weight", state.metrics())
+
+    def test_transform_regularization_is_nonnegative(self) -> None:
+        scale_delta = torch.ones(3, 3)
+        rotation_delta = torch.ones(3, 4) * 1.01
+        position_delta = torch.zeros(3, 6)
+
+        regularization = deblur_transform_regularization(scale_delta, rotation_delta, position_delta)
+
+        self.assertGreaterEqual(float(regularization.item()), 0.0)
+
+    def test_position_delta_clamps_to_configured_limit(self) -> None:
+        state = build_deblur_mlp_state(
+            "motion",
+            {
+                "fine_deblur_width": 16,
+                "fine_deblur_hidden": 2,
+                "fine_deblur_num_moments": 2,
+                "fine_deblur_lambda_p": 0.1,
+                "fine_deblur_max_position_delta": 0.001,
+            },
+            device="cpu",
+        )
+        means = torch.ones(4, 3) * 100.0
+        scales = torch.ones(4, 3)
+        rotations = torch.ones(4, 4)
+        camera_center = torch.zeros(1, 3)
+
+        _, _, position_delta = predict_deblur_transforms(state, means, scales, rotations, camera_center)
+
+        self.assertTrue(bool(torch.all(torch.abs(position_delta) <= 0.001 + 1e-6)))
 
     def test_gtnet_optimizer_group_survives_topology_wrappers(self) -> None:
         class DummyGaussians:

@@ -109,16 +109,16 @@ ALGORITHMS: list[dict[str, Any]] = [
     },
     {
         "name": "FastGS Reference",
-        "repo_url": "https://github.com/MrNeRF/FastGS",
-        "license": "Research license, see upstream",
+        "repo_url": "https://github.com/fastgs/FastGS",
+        "license": "MIT plus upstream 3DGS-derived components; see upstream",
         "commit_hash_setting": "fastgs_repo_commit",
         "local_path": None,
         "enabled": False,
         "weight_paths": [],
         "commands": {},
         "source_type": "optional_reference",
-        "license_notice": "Registered as an optional algorithm reference only; official FastGS repo is not vendored or required by the default fine path.",
-        "notes": "Reference for future selective CUDA/kernel optimization. It must be compiled inside the existing worker CUDA/Python environment if enabled later.",
+        "license_notice": "Registered as the official FastGS reference; worker builds its diff_gaussian_rasterization_fastgs submodule for image fine FastGS metrics.",
+        "notes": "Official FastGS reference for metric-map accumulation and Compact Box rasterization in the image fine path.",
     },
 ]
 
@@ -367,9 +367,9 @@ def fine_runtime_status() -> dict[str, Any]:
     modules = {
         "transformer_engine": import_check("transformer_engine"),
         "litevggt_runtime": litevggt_runtime_status(),
-        "gsplat": import_check("gsplat"),
         "deblur_mlp": import_check("app.fine.deblur_mlp"),
         "diff_gaussian_rasterization": import_check("diff_gaussian_rasterization"),
+        "diff_gaussian_rasterization_fastgs": import_check("diff_gaussian_rasterization_fastgs"),
         "simple_knn": import_check("simple_knn"),
         "fused_ssim": import_check("fused_ssim"),
     }
@@ -384,7 +384,7 @@ def fine_runtime_status() -> dict[str, Any]:
         "torch_cuda": torch_status,
         "spark_spz": spark_status,
         **modules,
-        "error": None if available else "CUDA torch/Spark SPZ/LiteVGGT/gsplat/DeblurMLP/diff_gaussian_rasterization/simple_knn/fused_ssim check failed",
+        "error": None if available else "CUDA torch/Spark SPZ/LiteVGGT/DeblurMLP/diff_gaussian_rasterization_fastgs/diff_gaussian_rasterization/simple_knn/fused_ssim check failed",
     }
 
 

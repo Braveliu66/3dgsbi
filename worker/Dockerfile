@@ -112,6 +112,8 @@ ARG SPEED3R_REPO_URL=https://github.com/Visual-AI/speed3r.git
 ARG SPEED3R_REPO_COMMIT=5460f7309c87e5daac36385ff6611627de7d7267
 ARG LINGBOT_MAP_REPO_URL=https://github.com/Robbyant/lingbot-map.git
 ARG LINGBOT_MAP_REPO_COMMIT=4cd986009b9adeded8a4e740919221940dedeffe
+ARG FASTGS_REPO_URL=https://github.com/fastgs/FastGS.git
+ARG FASTGS_REPO_COMMIT=44e02a5c1d5e9ed64d2ecd4af1cbba14ac92150f
 
 ENV FINE_RECONSTRUCTION_ENABLED=true
 ENV ARTDECO_ROOT=/opt/artdeco-runtime
@@ -263,6 +265,7 @@ COPY backend/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/fused-ssim
 RUN --mount=type=cache,id=three-dgs-worker-runtime-extension-pip-cache,target=/root/.cache/pip,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-extension-wheel-cache,target=/root/.cache/three-dgs-wheels,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-artdeco-git-cache,target=/repo-cache/artdeco,sharing=locked \
+    --mount=type=cache,id=three-dgs-worker-fastgs-git-cache,target=/repo-cache/fastgs,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-lingbot-map-git-cache,target=/repo-cache/lingbot-map,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-speed3r-git-cache,target=/repo-cache/speed3r,sharing=locked <<'EOF'
 set -eu
@@ -349,6 +352,9 @@ ensure_git_checkout() {
 }
 retry_pip 'faiss-cpu==1.12.0'
 cached_wheel_install diff-gaussian-rasterization /app/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/diff-gaussian-rasterization --no-deps --no-build-isolation
+CACHED_FASTGS=/repo-cache/fastgs/source
+ensure_git_checkout "$FASTGS_REPO_URL" "$CACHED_FASTGS" "$FASTGS_REPO_COMMIT"
+cached_wheel_install diff-gaussian-rasterization-fastgs "$CACHED_FASTGS/submodules/diff-gaussian-rasterization_fastgs" --no-deps --no-build-isolation
 cached_wheel_install fused-ssim /app/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/fused-ssim --no-deps --no-build-isolation
 CACHED_LINGBOT_MAP=/repo-cache/lingbot-map/source
 ensure_git_checkout "$LINGBOT_MAP_REPO_URL" "$CACHED_LINGBOT_MAP" "$LINGBOT_MAP_REPO_COMMIT"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.preview.io.ply import convert_pointcloud_ply_to_fixed_splat_ply
 from app.preview.io.spz import convert_ply_to_spz
 from app.preview.types import PreviewContext, PreviewFailure, PreviewResult, SOURCE_COMMITS
 from app.preview.utils import StageTimer, require_file
@@ -53,7 +54,17 @@ def run(ctx: PreviewContext) -> PreviewResult:
     )
     timer.mark("lingbot_inference")
 
-    ctx.report("spz_conversion", 86, "converting LingBot-Map pseudo-splat PLY to Spark SPZ")
+    point_radius = read_float(metrics.get("lingbot_preview_point_radius"), 0.002, minimum=1e-8, maximum=1.0)
+    ctx.report("splat_ply_conversion", 82, "converting LingBot-Map point-cloud PLY to fixed Gaussian PLY")
+    splat_ply_count = convert_pointcloud_ply_to_fixed_splat_ply(
+        points_ply_path,
+        splats_ply_path,
+        point_radius=point_radius,
+        opacity=0.75,
+    )
+    timer.mark("splat_ply_conversion")
+
+    ctx.report("spz_conversion", 86, "converting fixed LingBot-Map Gaussian PLY to Spark SPZ")
     splat_count = convert_ply_to_spz(splats_ply_path, ctx.output_spz)
     timer.mark("spz_conversion")
 
@@ -66,6 +77,8 @@ def run(ctx: PreviewContext) -> PreviewResult:
             **timer.metrics(),
             "adapter": "lingbot_map_spz",
             "point_source": metrics.get("lingbot_point_source"),
+            "fixed_splat_ply_count": splat_ply_count,
+            "fixed_splat_point_radius": point_radius,
             "intermediate_points_ply": str(points_ply_path),
             "intermediate_splats_ply": str(splats_ply_path),
             "preview_meta_json": str(meta_path),

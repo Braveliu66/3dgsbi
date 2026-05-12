@@ -191,6 +191,53 @@ class Storage:
             while chunk := handle.read(READ_CHUNK_SIZE):
                 yield chunk
 
+    def iter_range(self, uri: str, start: int, end: int) -> Iterator[bytes]:
+        if end < start:
+            return
+        remaining = end - start + 1
+        if uri.startswith("db://"):
+            offset = start
+            for chunk in self.iter_bytes(uri):
+                if offset >= len(chunk):
+                    offset -= len(chunk)
+                    continue
+                data = chunk[offset:]
+                offset = 0
+                if len(data) > remaining:
+                    data = data[:remaining]
+                remaining -= len(data)
+                yield data
+                if remaining <= 0:
+                    return
+            return
+        if uri.startswith("s3://"):
+            body = self.s3().get_object(
+                Bucket=self.settings.s3_bucket,
+                Key=self.key_from_uri(uri),
+                Range=f"bytes={start}-{end}",
+            )["Body"]
+            try:
+                for chunk in body.iter_chunks(chunk_size=READ_CHUNK_SIZE):
+                    if not chunk:
+                        continue
+                    if len(chunk) > remaining:
+                        chunk = chunk[:remaining]
+                    remaining -= len(chunk)
+                    yield chunk
+                    if remaining <= 0:
+                        return
+            finally:
+                body.close()
+            return
+        with self.local_path(uri).open("rb") as handle:
+            handle.seek(start)
+            while remaining > 0:
+                chunk = handle.read(min(READ_CHUNK_SIZE, remaining))
+                if not chunk:
+                    return
+                remaining -= len(chunk)
+                yield chunk
+
     def delete(self, uri: str | None) -> None:
         if not uri:
             return

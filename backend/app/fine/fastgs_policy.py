@@ -53,6 +53,7 @@ class FastGSPolicy:
         pipe: Any,
         background: torch.Tensor,
         render_fn: RenderFn,
+        metric_render_fn: RenderFn,
         ssim_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
     ) -> None:
         if not cameras:
@@ -84,7 +85,7 @@ class FastGSPolicy:
                     gaussians=gaussians,
                     pipe=pipe,
                     background=background,
-                    render_fn=render_fn,
+                    render_fn=metric_render_fn,
                     metric_map=metric_map,
                     gaussian_count=gaussian_count,
                 )
@@ -281,16 +282,23 @@ def cuda_metric_available() -> bool:
 
 
 def compiled_features() -> list[str]:
+    features: list[str] = []
+    try:
+        import diff_gaussian_rasterization_fastgs
+
+        if hasattr(diff_gaussian_rasterization_fastgs, "GaussianRasterizer"):
+            features.extend(["official_metric_map", "compact_box"])
+    except Exception:
+        pass
     try:
         import diff_gaussian_rasterization
     except Exception:
-        return []
-    features: list[str] = []
+        return features
     if getattr(diff_gaussian_rasterization, "MOBILEGS_COMPACT_BOX", False):
         features.append("compact_box")
     if getattr(diff_gaussian_rasterization, "MOBILEGS_FASTGS_METRIC", False):
         features.append("cuda_metric_accumulation")
-    return features
+    return sorted(set(features))
 
 
 def cuda_accumulate_metrics(

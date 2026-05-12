@@ -39,6 +39,7 @@ def train_mobile_3dgs(
     iterations: int,
     lm_start_iter: int,
     blur_mode: str,
+    blur_registry: dict[str, dict[str, Any]] | None,
     options: dict[str, Any],
     progress: Progress,
 ) -> MobileGSTrainResult:
@@ -47,12 +48,14 @@ def train_mobile_3dgs(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
+    progress("fine_mobilegs_setup", 42, f"[mobilegs] output directory ready: {output_dir}")
     with local_3dgs_runtime() as runtime:
         GaussianModel = runtime.GaussianModel
         Scene = runtime.Scene
         l1_loss = runtime.l1_loss
         ssim = runtime.ssim
         opt = build_optimization_options(iterations, options)
+        progress("fine_mobilegs_runtime", 42, f"[mobilegs] local 3DGS runtime loaded from {runtime.root}")
         dataset = SimpleNamespace(
             source_path=str(scene_dir.resolve()),
             model_path=str(output_dir.resolve()),
@@ -65,6 +68,15 @@ def train_mobile_3dgs(
             sh_degree=3,
             white_background=False,
         )
+        progress(
+            "fine_mobilegs_dataset",
+            42,
+            (
+                "[mobilegs] dataset configured: "
+                f"source={dataset.source_path}, images={dataset.images}, resolution={dataset.resolution}, "
+                f"data_device={dataset.data_device}, sh_degree={dataset.sh_degree}"
+            ),
+        )
         pipe = SimpleNamespace(
             convert_SHs_python=False,
             compute_cov3D_python=False,
@@ -75,23 +87,86 @@ def train_mobile_3dgs(
             enable_error_check=False,
         )
         gaussians = GaussianModel(3, "default")
+        progress("fine_mobilegs_scene_loading", 42, "[mobilegs] loading COLMAP-compatible scene and initial Gaussian cloud")
         scene = Scene(dataset, gaussians, shuffle=True)
+
+        debug_dir = output_dir / "debug"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        gaussians.save_ply(debug_dir / "init_gaussians.ply")
+        progress(
+            "fine_mobilegs_scene_ready",
+            43,
+            (
+                "[mobilegs] scene loaded: "
+                f"train_cameras={len(scene.getTrainCameras())}, initial_gaussians={gaussian_count(gaussians)}, "
+                f"scene_extent={float(scene.cameras_extent):.6f}, debug_init={debug_dir / 'init_gaussians.ply'}"
+            ),
+        )
+
+        progress("fine_edgs_init", 43, "[mobilegs] checking EDGS dense initialization settings")
         edgs_metrics = initialize_edgs_if_enabled(gaussians, scene, opt, options)
+        progress(
+            "fine_edgs_ready",
+            44,
+            (
+                "[mobilegs] EDGS initialization result: "
+                f"enabled={edgs_metrics.get('edgs_enabled', True)}, "
+                f"failed={edgs_metrics.get('edgs_failed', False)}, "
+                f"gaussians={gaussian_count(gaussians)}, "
+                f"densification_disabled={edgs_metrics.get('densification_disabled_by_edgs', False)}"
+            ),
+        )
+        progress(
+            "fine_optimizer_setup",
+            44,
+            (
+                "[mobilegs] optimizer options: "
+                f"iterations={iterations}, lambda_dssim={opt.lambda_dssim}, "
+                f"position_lr={opt.position_lr_init}->{opt.position_lr_final}, "
+                f"densify_from={opt.densify_from_iter}, densify_until={opt.densify_until_iter}, "
+                f"densification_interval={opt.densification_interval}, opacity_reset_interval={opt.opacity_reset_interval}"
+            ),
+        )
         gaussians.training_setup(opt)
         background = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32, device="cuda")
-        deblur_state = build_deblur_mlp_state(blur_mode, options, device=background.device)
-        attach_deblur_mlp_optimizer(gaussians, deblur_state)
-        deblur_warmup_iters = read_int(options.get("fine_deblur_warmup_iters"), 3000, minimum=0, maximum=iterations)
-        deblur_xyz_lr_scale = read_float(options.get("fine_deblur_xyz_lr_scale"), 0.1, minimum=0.001, maximum=1.0)
-        deblur_activated = False
-        if deblur_state.enabled:
-            deblur_state.model.requires_grad_(False)
         cameras = scene.getTrainCameras().copy()
         if not cameras:
             raise FineFailure("FINE_CAMERA_LOAD_FAILED", "3DGS scene contains no train cameras")
+        blur_registry = blur_registry or {}
+        blurred_train_cameras = sum(1 for camera in cameras if is_blurred_view(camera, blur_registry))
+        clear_train_cameras = max(0, len(cameras) - blurred_train_cameras)
+        deblur_options = options if blurred_train_cameras > 0 else {**options, "fine_deblur_enabled": "false"}
+        deblur_state = build_deblur_mlp_state(blur_mode if blurred_train_cameras > 0 else "sharp", deblur_options, device=background.device)
+        attach_deblur_mlp_optimizer(gaussians, deblur_state)
+        deblur_warmup_iters = resolve_deblur_warmup(iterations, options, deblur_state.enabled)
+        deblur_xyz_lr_scale = read_float(options.get("fine_deblur_xyz_lr_scale"), 0.1, minimum=0.001, maximum=1.0)
+        deblur_activated = False
+        deblur_densify_disabled = False
+        deblur_photometric_views = 0
+        last_deblur_reg = 0.0
+        if deblur_state.enabled:
+            deblur_state.model.requires_grad_(False)
+        progress(
+            "fine_deblur_setup",
+            45,
+            (
+                "[mobilegs] DeblurMLP setup: "
+                f"enabled={deblur_state.enabled}, mode={blur_mode}, warmup_iters={deblur_warmup_iters}, "
+                f"xyz_lr_scale={deblur_xyz_lr_scale}, blurred_train_cameras={blurred_train_cameras}, "
+                f"clear_train_cameras={clear_train_cameras}"
+            ),
+        )
 
         policy = FastGSPolicy(options)
         lm_status = resolve_local_lm_status(lm_start_iter, iterations, blur_mode, deblur_state.enabled, options)
+        progress(
+            "fine_lmrs_status",
+            45,
+            (
+                "[mobilegs] LM-RS status: "
+                f"active={lm_status['active']}, start_iter={lm_status['start_iter']}, reason={lm_status['reason']}"
+            ),
+        )
         lm_optimizer: LocalCGOptimizer | None = None
         lm_pixel_sampler: UniformPixelSampler | None = None
         lm_camera_sampler: RandomCameraSampler | None = None
@@ -102,14 +177,24 @@ def train_mobile_3dgs(
         last_l1 = 0.0
         last_ssim = 0.0
         train_stack = cameras.copy()
+        log_interval = training_log_interval(iterations)
+        progress(
+            "fine_gaussian_train",
+            46,
+            (
+                "[mobilegs] training loop started: "
+                f"iterations={iterations}, cameras={len(cameras)}, gaussians={gaussian_count(gaussians)}, "
+                f"progress_interval={log_interval}"
+            ),
+        )
 
-        def standard_render(viewpoint, model, pipeline, bg, **render_options):
+        def topology_render(viewpoint, model, pipeline, bg, **render_options):
             return normalize_render_pkg(render_gaussians(viewpoint, model, pipeline, bg, **render_options), int(model.get_xyz.shape[0]))
 
-        def training_render(viewpoint, model, pipeline, bg, *, use_deblur: bool = True, **render_options):
-            if deblur_state.enabled and use_deblur:
+        def photometric_render(viewpoint, model, pipeline, bg, *, use_deblur: bool = True, **render_options):
+            if deblur_state.enabled and use_deblur and is_blurred_view(viewpoint, blur_registry):
                 return normalize_render_pkg(render_with_deblur_mlp(viewpoint, model, pipeline, bg, deblur_state), int(model.get_xyz.shape[0]))
-            return standard_render(viewpoint, model, pipeline, bg, **render_options)
+            return topology_render(viewpoint, model, pipeline, bg, **render_options)
 
         def lmrs_render(viewpoint, model, pipeline, bg, cg_state, batch_index):
             return normalize_render_pkg(
@@ -122,13 +207,25 @@ def train_mobile_3dgs(
             deblur_active = bool(deblur_state.enabled and iteration > deblur_warmup_iters)
             if not in_lm_phase:
                 gaussians.update_learning_rate(iteration)
+                base_xyz_lr = optimizer_lr_value(gaussians, "xyz")
             if deblur_active and not deblur_activated:
                 deblur_state.model.requires_grad_(True)
                 deblur_activated = True
-            if deblur_active:
-                scale_xyz_learning_rate(gaussians, deblur_xyz_lr_scale)
+                deblur_densify_disabled = True
+                progress(
+                    "fine_deblur_active",
+                    min(84, 42 + int(iteration / max(1, iterations) * 42)),
+                    f"[mobilegs] DeblurMLP activated after warmup at iteration {iteration}; xyz_lr={optimizer_lr(gaussians, 'xyz')}",
+                )
+            if deblur_active and not in_lm_phase and base_xyz_lr is not None:
+                set_xyz_learning_rate(gaussians, base_xyz_lr * deblur_xyz_lr_scale)
             if iteration % 1000 == 0:
                 gaussians.oneupSHdegree()
+                progress(
+                    "fine_sh_degree_update",
+                    min(84, 42 + int(iteration / max(1, iterations) * 42)),
+                    f"[mobilegs] increased spherical harmonics degree at iteration {iteration}",
+                )
             if in_lm_phase:
                 if lm_optimizer is None:
                     lm_options = build_lmrs_options(options)
@@ -138,7 +235,15 @@ def train_mobile_3dgs(
                     lm_optimizer = LocalCGOptimizer(gaussians, lm_options, scene_extent=scene.cameras_extent)
                     lm_pixel_sampler = UniformPixelSampler()
                     lm_camera_sampler = RandomCameraSampler(cameras)
-                    progress("fine_lmrs_phase_start", 72, f"switched to local LM-RS matrix-free CG at iteration {iteration}")
+                    progress(
+                        "fine_lmrs_phase_start",
+                        72,
+                        (
+                            "[mobilegs] switched to local LM-RS matrix-free CG: "
+                            f"iteration={iteration}, cg_iter={lm_options.cg_iter}, batch_size={lm_options.batch_size}, "
+                            f"samples_per_tile={lm_options.N_sample_per_tile}"
+                        ),
+                    )
                 lm_loss, elapsed = lmrs_step(
                     pixel_sampler=lm_pixel_sampler,
                     camera_sampler=lm_camera_sampler,
@@ -154,9 +259,17 @@ def train_mobile_3dgs(
                 ema_loss = 0.4 * lm_loss + 0.6 * ema_loss
                 last_l1 = lm_loss
                 last_ssim = 0.0
-                if iteration % max(50, min(500, iterations // 20 or 50)) == 0 or iteration == iterations:
+                if iteration % log_interval == 0 or iteration == iterations:
                     mapped_progress = 42 + int(iteration / max(1, iterations) * 42)
-                    progress("fine_gaussian_train", min(84, mapped_progress), f"trained {iteration}/{iterations} iterations, lm_loss={ema_loss:.5f}")
+                    progress(
+                        "fine_gaussian_train",
+                        min(84, mapped_progress),
+                        (
+                            "[mobilegs] LM-RS iteration checkpoint: "
+                            f"iteration={iteration}/{iterations}, lm_loss={ema_loss:.5f}, "
+                            f"last_lm_loss={lm_last_loss:.5f}, gaussians={gaussian_count(gaussians)}, lm_elapsed={lm_elapsed:.3f}s"
+                        ),
+                    )
                 continue
 
             if not train_stack:
@@ -164,16 +277,24 @@ def train_mobile_3dgs(
             viewpoint = train_stack.pop(random.randrange(len(train_stack)))
             gt_image = viewpoint.original_image.to("cuda")
 
-            render_pkg = training_render(viewpoint, gaussians, pipe, background, use_deblur=deblur_active)
+            deblur_view_active = bool(deblur_active and is_blurred_view(viewpoint, blur_registry))
+            render_pkg = photometric_render(viewpoint, gaussians, pipe, background, use_deblur=deblur_active)
             image = render_pkg["render"]
             l1_value = l1_loss(image, gt_image)
             ssim_value = 1.0 - ssim(image, gt_image)
             loss = (1.0 - opt.lambda_dssim) * l1_value + opt.lambda_dssim * ssim_value
+            if deblur_view_active:
+                deblur_reg = render_pkg.get("deblur_regularization")
+                if deblur_reg is not None and deblur_state.config is not None:
+                    loss = loss + deblur_state.config.transform_reg_weight * deblur_reg
+                    last_deblur_reg = float(deblur_reg.detach().item())
+                deblur_photometric_views += 1
             gaussians.optimizer.zero_grad(set_to_none=True)
             loss.backward()
 
             with torch.no_grad():
-                if iteration < opt.densify_until_iter:
+                can_densify = bool(iteration < opt.densify_until_iter and not deblur_active)
+                if can_densify:
                     visible = render_pkg["visibility_filter"]
                     gaussians.max_radii2D[visible] = torch.max(gaussians.max_radii2D[visible], render_pkg["radii"][visible])
                     gaussians.add_densification_stats(render_pkg["viewspace_points"], visible)
@@ -185,7 +306,7 @@ def train_mobile_3dgs(
             last_ssim = float(ssim_value.item())
 
             with torch.no_grad():
-                if iteration < opt.densify_until_iter:
+                if can_densify:
                     if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                         policy.update_multiview_scores(
@@ -193,7 +314,8 @@ def train_mobile_3dgs(
                             gaussians=gaussians,
                             pipe=pipe,
                             background=background,
-                            render_fn=training_render if deblur_active else standard_render,
+                            render_fn=topology_render,
+                            metric_render_fn=topology_render,
                             ssim_fn=ssim,
                         )
                         changed = policy.apply_fastgs_densify_and_prune(
@@ -204,43 +326,84 @@ def train_mobile_3dgs(
                             radii=render_pkg["radii"],
                         )
                         policy.observe_gaussian_count(gaussians)
+                        progress(
+                            "fine_fastgs_topology",
+                            min(84, 42 + int(iteration / max(1, iterations) * 42)),
+                            (
+                                "[mobilegs] FastGS densify/prune step: "
+                                f"iteration={iteration}, changed={changed}, gaussians={gaussian_count(gaussians)}, "
+                                f"size_threshold={size_threshold}, ema_loss={ema_loss:.5f}"
+                            ),
+                        )
                         if changed:
                             policy.reset_after_topology_change()
                     if iteration % opt.opacity_reset_interval == 0:
                         gaussians.reset_opacity()
+                        progress(
+                            "fine_opacity_reset",
+                            min(84, 42 + int(iteration / max(1, iterations) * 42)),
+                            f"[mobilegs] opacity reset at iteration {iteration}, gaussians={gaussian_count(gaussians)}",
+                        )
                 elif iteration > 15_000 and iteration < iterations and iteration % 3000 == 0:
                     policy.update_multiview_scores(
                         cameras=cameras,
                         gaussians=gaussians,
                         pipe=pipe,
                         background=background,
-                        render_fn=training_render if deblur_activated else standard_render,
+                        render_fn=topology_render,
+                        metric_render_fn=topology_render,
                         ssim_fn=ssim,
                     )
                     policy.apply_final_prune(gaussians)
                     policy.observe_gaussian_count(gaussians)
+                    progress(
+                        "fine_fastgs_final_prune",
+                        min(84, 42 + int(iteration / max(1, iterations) * 42)),
+                        f"[mobilegs] late FastGS prune at iteration {iteration}, gaussians={gaussian_count(gaussians)}",
+                    )
 
-            if iteration % max(50, min(500, iterations // 20 or 50)) == 0 or iteration == iterations:
+            if iteration % log_interval == 0 or iteration == iterations:
                 mapped_progress = 42 + int(iteration / max(1, iterations) * 42)
-                progress("fine_gaussian_train", min(84, mapped_progress), f"trained {iteration}/{iterations} iterations, loss={ema_loss:.5f}")
+                progress(
+                    "fine_gaussian_train",
+                    min(84, mapped_progress),
+                    (
+                        "[mobilegs] training checkpoint: "
+                        f"iteration={iteration}/{iterations}, loss={ema_loss:.5f}, l1={last_l1:.5f}, "
+                        f"ssim_loss={last_ssim:.5f}, gaussians={gaussian_count(gaussians)}, "
+                        f"deblur_active={deblur_active}, deblur_view={deblur_view_active}, xyz_lr={optimizer_lr(gaussians, 'xyz')}"
+                    ),
+                )
 
+        progress("fine_fastgs_final_prune", 85, f"[mobilegs] running final multiview scoring and prune, gaussians_before={gaussian_count(gaussians)}")
         with torch.no_grad():
             policy.update_multiview_scores(
                 cameras=cameras,
                 gaussians=gaussians,
                 pipe=pipe,
                 background=background,
-                render_fn=training_render if deblur_activated else standard_render,
+                render_fn=topology_render,
+                metric_render_fn=topology_render,
                 ssim_fn=ssim,
             )
             policy.apply_final_prune(gaussians)
             policy.observe_gaussian_count(gaussians)
+        progress("fine_gaussian_save", 86, f"[mobilegs] saving Gaussian scene at iteration {iterations}, gaussians={gaussian_count(gaussians)}")
 
         scene.save(iterations)
         ply_path = output_dir / "point_cloud" / f"iteration_{iterations}" / "point_cloud.ply"
         if not ply_path.exists() or ply_path.stat().st_size <= 0:
             raise FineFailure("FINE_PLY_NOT_FOUND", f"3DGS training did not produce point cloud: {ply_path}")
         elapsed = round(time.monotonic() - started, 3)
+        progress(
+            "fine_gaussian_train_done",
+            87,
+            (
+                "[mobilegs] training complete: "
+                f"ply={ply_path}, elapsed={elapsed}s, final_gaussians={gaussian_count(gaussians)}, "
+                f"ema_loss={ema_loss:.5f}, last_l1={last_l1:.5f}, last_ssim_loss={last_ssim:.5f}"
+            ),
+        )
         return MobileGSTrainResult(
             ply_path=ply_path,
             iterations=iterations,
@@ -248,8 +411,8 @@ def train_mobile_3dgs(
             metrics={
                 "training_backend": "litevggt_initialized_local_3dgs_fastgs_deblur" if deblur_state.enabled else "litevggt_initialized_local_3dgs_fastgs",
                 "local_3dgs_root": str(runtime.root),
-                "raster_backend": "diff_gaussian_rasterization",
-                "target_raster_backend": "gsplat",
+                "raster_backend": "diff_gaussian_rasterization_fastgs",
+                "target_raster_backend": "diff_gaussian_rasterization_fastgs",
                 "data_device": dataset.data_device,
                 "training_elapsed_seconds": elapsed,
                 "final_gaussians": int(gaussians.get_xyz.shape[0]),
@@ -260,6 +423,11 @@ def train_mobile_3dgs(
                 "deblur_warmup_iters": deblur_warmup_iters,
                 "deblur_xyz_lr_scale": deblur_xyz_lr_scale,
                 "deblur_activated_after_warmup": deblur_activated,
+                "deblur_blurred_train_cameras": blurred_train_cameras,
+                "deblur_clear_train_cameras": clear_train_cameras,
+                "deblur_photometric_views": deblur_photometric_views,
+                "deblur_densify_disabled_after_activation": deblur_densify_disabled,
+                "deblur_last_transform_regularization": last_deblur_reg,
                 **deblur_state.metrics(),
                 **edgs_metrics,
                 "lm_optimizer": lm_status,
@@ -268,7 +436,7 @@ def train_mobile_3dgs(
                 "lmrs_last_loss": lm_last_loss,
                 "lmrs_cg_iter": read_int(options.get("fine_lmrs_cg_iter"), 8, minimum=1, maximum=64) if lm_iterations else None,
                 "fastergs_backend": "compact_box_cuda_if_available",
-                "requested_algorithms": ["LiteVGGT", "Deblurring-3DGS", "FastGS", "gsplat"],
+                "requested_algorithms": ["LiteVGGT", "Deblurring-3DGS", "FastGS"],
                 "effective_algorithms": effective_algorithms(deblur_state.enabled, lm_iterations, policy),
                 **policy.metrics(),
             },
@@ -423,14 +591,67 @@ def normalize_roma_resolution_dim(value: int, minimum: int, maximum: int, requir
     return value
 
 
-def scale_xyz_learning_rate(gaussians: Any, multiplier: float) -> None:
+def training_log_interval(iterations: int) -> int:
+    return max(50, min(500, iterations // 20 or 50))
+
+
+def gaussian_count(gaussians: Any) -> int:
+    return int(gaussians.get_xyz.shape[0])
+
+
+def optimizer_lr(gaussians: Any, group_name: str) -> str:
+    value = optimizer_lr_value(gaussians, group_name)
+    return f"{float(value):.8f}" if value is not None else "unavailable"
+
+
+def optimizer_lr_value(gaussians: Any, group_name: str) -> float | None:
+    optimizer = getattr(gaussians, "optimizer", None)
+    if optimizer is None:
+        return None
+    for group in optimizer.param_groups:
+        if group.get("name") == group_name:
+            value = group.get("lr")
+            return float(value) if value is not None else None
+    return None
+
+
+def set_xyz_learning_rate(gaussians: Any, value: float) -> None:
     optimizer = getattr(gaussians, "optimizer", None)
     if optimizer is None:
         return
     for group in optimizer.param_groups:
         if group.get("name") == "xyz":
-            group["lr"] *= multiplier
+            group["lr"] = float(value)
             return
+
+
+def resolve_deblur_warmup(iterations: int, options: dict[str, Any], deblur_enabled: bool) -> int:
+    if not deblur_enabled:
+        return iterations
+    explicit = options.get("fine_deblur_warmup_iters")
+    fallback = min(3000, max(0, iterations // 3))
+    warmup = read_int(explicit, fallback, minimum=0, maximum=max(0, iterations)) if explicit is not None else fallback
+    return min(warmup, max(0, iterations - 1))
+
+
+def is_blurred_view(camera: Any, blur_registry: dict[str, dict[str, Any]]) -> bool:
+    entry = blur_registry_entry(camera, blur_registry)
+    return bool(entry and entry.get("blurred"))
+
+
+def blur_registry_entry(camera: Any, blur_registry: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    image_name = str(getattr(camera, "image_name", "") or "")
+    candidates = [image_name]
+    path = Path(image_name)
+    if path.suffix:
+        candidates.append(path.name)
+        candidates.append(path.stem)
+    else:
+        candidates.extend([f"{image_name}.jpg", f"{image_name}.png"])
+    for key in candidates:
+        if key in blur_registry:
+            return blur_registry[key]
+    return None
 
 
 def resolve_local_lm_status(
@@ -489,8 +710,7 @@ def effective_algorithms(deblur_enabled: bool, lm_iterations: int, policy: FastG
         "LiteVGGT_initialization",
         "Deblurring-3DGS_GTnet" if deblur_enabled else "Deblurring-3DGS_disabled",
         "FastGS_official_metric_map" if policy.official_metric_calls > 0 else "FastGS_local_multiview_score",
-        "diff_gaussian_rasterization_active",
-        "gsplat_target_backend",
+        "diff_gaussian_rasterization_fastgs_active",
     ]
     if lm_iterations > 0:
         algorithms.append("LM-RS_local_matrix_free")

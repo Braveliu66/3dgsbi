@@ -69,6 +69,17 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(response.content, PNG_BYTES)
             self.assertEqual(response.headers["content-length"], str(len(PNG_BYTES)))
 
+    def test_db_media_file_supports_range_response(self) -> None:
+        with TestClient(app) as client:
+            headers = auth_headers(client)
+            asset = upload_image(client, headers)
+            response = client.get(f"/api/media/{asset['id']}/file", headers={**headers, "Range": "bytes=1-3"})
+
+            self.assertEqual(response.status_code, 206)
+            self.assertEqual(response.content, PNG_BYTES[1:4])
+            self.assertEqual(response.headers["content-range"], f"bytes 1-3/{len(PNG_BYTES)}")
+            self.assertEqual(response.headers["accept-ranges"], "bytes")
+
     def test_legacy_local_uri_falls_back_to_database_blob(self) -> None:
         with TestClient(app) as client:
             headers = auth_headers(client)

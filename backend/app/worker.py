@@ -32,6 +32,7 @@ settings = get_settings()
 storage = Storage(settings)
 TASK_PROCESS_POLL_SECONDS = 2.0
 TASK_PROCESS_TERM_TIMEOUT_SECONDS = 10.0
+TASK_LOG_LINE_LIMIT = 5000
 
 
 class TaskLogCapture:
@@ -735,7 +736,7 @@ def append_log(existing: list[str] | None, *lines: str) -> list[str]:
     for line in lines:
         if line and (not logs or logs[-1] != line):
             logs.append(line)
-    return logs[-240:]
+    return logs[-TASK_LOG_LINE_LIMIT:]
 
 
 def emit(db, project_id: str, event: str, payload: dict[str, Any], task_id: str | None = None) -> None:

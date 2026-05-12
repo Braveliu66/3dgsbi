@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import redis
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, status
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -51,6 +51,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Length", "Content-Range", "Accept-Ranges"],
 )
 
 
@@ -1059,7 +1060,13 @@ def artifact_original_ply_download_url(artifact_id: str, user: User = Depends(ge
 
 
 @app.get("/api/artifacts/{artifact_id}/file")
-def artifact_file(artifact_id: str, token: str = Query(...), download: bool = Query(default=False), db: Session = Depends(get_db)):
+def artifact_file(
+    artifact_id: str,
+    token: str = Query(...),
+    download: bool = Query(default=False),
+    range_header: str | None = Header(default=None, alias="Range"),
+    db: Session = Depends(get_db),
+):
     verify_artifact_token(token, artifact_id)
     artifact = db.get(Artifact, artifact_id)
     if not artifact:
@@ -1073,17 +1080,31 @@ def artifact_file(artifact_id: str, token: str = Query(...), download: bool = Qu
         filename=artifact.file_name,
         media_type=mimetypes.guess_type(artifact.file_name)[0] or "application/octet-stream",
         attachment=download,
+        range_header=range_header,
     )
 
 
 @app.get("/api/artifacts/{artifact_id}/original-ply/file")
-def artifact_original_ply_file(artifact_id: str, token: str = Query(...), download: bool = Query(default=False), db: Session = Depends(get_db)):
+def artifact_original_ply_file(
+    artifact_id: str,
+    token: str = Query(...),
+    download: bool = Query(default=False),
+    range_header: str | None = Header(default=None, alias="Range"),
+    db: Session = Depends(get_db),
+):
     verify_artifact_token(token, artifact_id)
     artifact = db.get(Artifact, artifact_id)
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
     if is_ply_artifact(artifact):
-        return artifact_file(artifact_id, token, download, db)
+        uri = storage.resolve_existing_uri(artifact.object_uri)
+        return stored_file_response(
+            uri,
+            filename=artifact.file_name,
+            media_type=mimetypes.guess_type(artifact.file_name)[0] or "application/octet-stream",
+            attachment=download,
+            range_header=range_header,
+        )
     path = intermediate_ply_path(artifact)
     if not path:
         raise HTTPException(status_code=404, detail="Original PLY not found")
@@ -1116,7 +1137,12 @@ def media_thumbnail(media_id: str, user: User = Depends(get_current_user), db: S
 
 
 @app.get("/api/media/{media_id}/file")
-def media_file(media_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def media_file(
+    media_id: str,
+    range_header: str | None = Header(default=None, alias="Range"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     media = db.get(MediaAsset, media_id)
     if not media:
         raise HTTPException(status_code=404, detail="Media not found")
@@ -1129,21 +1155,70 @@ def media_file(media_id: str, user: User = Depends(get_current_user), db: Sessio
         uri,
         filename=media.file_name,
         media_type=mimetypes.guess_type(media.file_name)[0] or "application/octet-stream",
+        range_header=range_header,
     )
 
 
-def stored_file_response(uri: str, *, filename: str | None = None, media_type: str | None = None, attachment: bool = False):
+def stored_file_response(
+    uri: str,
+    *,
+    filename: str | None = None,
+    media_type: str | None = None,
+    attachment: bool = False,
+    range_header: str | None = None,
+):
     try:
         uri = storage.resolve_existing_uri(uri)
         size = storage.size(uri)
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=404, detail="Stored file not found") from exc
-    headers = {"Content-Length": str(size)}
+    headers = {"Accept-Ranges": "bytes", "Content-Length": str(size)}
     if attachment and filename:
         headers["Content-Disposition"] = f'attachment; filename="{safe_filename(filename)}"'
+    if range_header:
+        start, end = parse_range_header(range_header, size)
+        headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+        headers["Content-Length"] = str(end - start + 1)
+        return StreamingResponse(
+            storage.iter_range(uri, start, end),
+            media_type=media_type or "application/octet-stream",
+            status_code=status.HTTP_206_PARTIAL_CONTENT,
+            headers=headers,
+        )
     if uri.startswith(("db://", "s3://")):
         return StreamingResponse(storage.iter_bytes(uri), media_type=media_type or "application/octet-stream", headers=headers)
-    return FileResponse(storage.local_path(uri), filename=filename if attachment else None, media_type=media_type)
+    return FileResponse(storage.local_path(uri), filename=filename if attachment else None, media_type=media_type, headers=headers)
+
+
+def parse_range_header(range_header: str, size: int) -> tuple[int, int]:
+    if not range_header.startswith("bytes=") or "," in range_header:
+        raise HTTPException(
+            status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+            detail="Unsupported range",
+            headers={"Content-Range": f"bytes */{size}"},
+        )
+    raw_start, _, raw_end = range_header.removeprefix("bytes=").partition("-")
+    try:
+        if raw_start == "":
+            suffix_size = int(raw_end)
+            if suffix_size <= 0:
+                raise ValueError
+            return max(size - suffix_size, 0), max(size - 1, 0)
+        start = int(raw_start)
+        end = int(raw_end) if raw_end else size - 1
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+            detail="Invalid range",
+            headers={"Content-Range": f"bytes */{size}"},
+        ) from exc
+    if start < 0 or start >= size or end < start:
+        raise HTTPException(
+            status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+            detail="Range not satisfiable",
+            headers={"Content-Range": f"bytes */{size}"},
+        )
+    return start, min(end, size - 1)
 
 
 @app.get("/api/projects/{project_id}/viewer-config")

@@ -34,6 +34,137 @@ class LiteVGGTReconstruction:
     metrics: dict[str, int | float | str | bool]
 
 
+@dataclass(slots=True)
+class LiteVGGTWindowResult:
+    start: int
+    end: int
+    images: np.ndarray
+    valid_masks: np.ndarray
+    w2c: np.ndarray
+    intrinsics: np.ndarray
+    points: np.ndarray
+    colors: np.ndarray
+    confidence: np.ndarray
+    valid_pixel_count: int
+    point_count_before_filter: int
+    point_count_after_filter: int
+
+
+def build_litevggt_windows(frame_count: int, window_size: int, overlap: int) -> list[tuple[int, int]]:
+    frame_count = int(frame_count)
+    window_size = max(8, int(window_size))
+    overlap = max(0, min(int(overlap), window_size - 1))
+
+    if frame_count <= 0:
+        return []
+    if frame_count <= window_size:
+        return [(0, frame_count)]
+
+    step = max(1, window_size - overlap)
+    windows: list[tuple[int, int]] = []
+    start = 0
+
+    while start < frame_count:
+        end = min(frame_count, start + window_size)
+        if end - start < window_size:
+            start = max(0, end - window_size)
+        window = (start, end)
+        if not windows or windows[-1] != window:
+            windows.append(window)
+        if end >= frame_count:
+            break
+        start += step
+
+    return windows
+
+
+def effective_litevggt_overlap(window_size: int, configured_overlap: int) -> int:
+    window_size = max(8, int(window_size))
+    configured_overlap = max(0, int(configured_overlap))
+    return min(configured_overlap, max(3, window_size // 2))
+
+
+def resolve_litevggt_window_attempts(initial_window_size: int, oom_window_sizes: list[int]) -> list[int]:
+    attempts: list[int] = []
+    for value in [initial_window_size, *oom_window_sizes]:
+        window_size = max(8, int(value))
+        if window_size not in attempts:
+            attempts.append(window_size)
+    return attempts
+
+
+def estimate_sim3_umeyama(source: np.ndarray, target: np.ndarray) -> tuple[float, np.ndarray, np.ndarray]:
+    src = np.asarray(source, dtype=np.float64).reshape(-1, 3)
+    dst = np.asarray(target, dtype=np.float64).reshape(-1, 3)
+    valid = np.isfinite(src).all(axis=1) & np.isfinite(dst).all(axis=1)
+    src = src[valid]
+    dst = dst[valid]
+
+    if src.shape[0] < 3:
+        raise PreviewFailure(
+            "LITEVGGT_WINDOW_ALIGNMENT_FAILED",
+            "LiteVGGT window alignment requires at least 3 overlapping camera centers",
+        )
+
+    src_mean = src.mean(axis=0)
+    dst_mean = dst.mean(axis=0)
+    src_centered = src - src_mean
+    dst_centered = dst - dst_mean
+    src_var = float(np.mean(np.sum(src_centered * src_centered, axis=1)))
+    if not np.isfinite(src_var) or src_var <= 1e-12:
+        raise PreviewFailure(
+            "LITEVGGT_WINDOW_ALIGNMENT_FAILED",
+            "LiteVGGT window alignment source cameras are degenerate",
+        )
+
+    covariance = (src_centered.T @ dst_centered) / src.shape[0]
+    u, singular_values, vt = np.linalg.svd(covariance)
+    sign = np.ones(3, dtype=np.float64)
+    if np.linalg.det(vt.T @ u.T) < 0:
+        sign[-1] = -1.0
+    rotation = vt.T @ np.diag(sign) @ u.T
+    scale = float(np.sum(singular_values * sign) / src_var)
+    translation = dst_mean - scale * (src_mean @ rotation.T)
+
+    if not np.isfinite(scale) or not np.isfinite(rotation).all() or not np.isfinite(translation).all():
+        raise PreviewFailure("LITEVGGT_WINDOW_ALIGNMENT_FAILED", "LiteVGGT window alignment produced non-finite Sim(3)")
+
+    return scale, rotation.astype(np.float32), translation.astype(np.float32)
+
+
+def camera_centers_from_w2c(w2c: np.ndarray) -> np.ndarray:
+    matrices = np.asarray(w2c, dtype=np.float64).reshape(-1, 4, 4)
+    rotations = matrices[:, :3, :3]
+    translations = matrices[:, :3, 3]
+    return -np.einsum("nij,nj->ni", np.transpose(rotations, (0, 2, 1)), translations).astype(np.float32)
+
+
+def transform_points_sim3(points: np.ndarray, scale: float, rotation: np.ndarray, translation: np.ndarray) -> np.ndarray:
+    pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+    return (float(scale) * (pts @ rotation.T) + translation).astype(np.float32, copy=False)
+
+
+def transform_w2c_sim3(w2c: np.ndarray, scale: float, rotation: np.ndarray, translation: np.ndarray) -> np.ndarray:
+    matrices = np.asarray(w2c, dtype=np.float64).reshape(-1, 4, 4)
+    align_rotation = np.asarray(rotation, dtype=np.float64).reshape(3, 3)
+    align_translation = np.asarray(translation, dtype=np.float64).reshape(3)
+    transformed = np.empty_like(matrices)
+
+    for index, matrix in enumerate(matrices):
+        c2w = np.linalg.inv(matrix)
+        center = c2w[:3, 3]
+        c2w[:3, :3] = align_rotation @ c2w[:3, :3]
+        c2w[:3, 3] = float(scale) * (align_rotation @ center) + align_translation
+        transformed[index] = np.linalg.inv(c2w)
+
+    return transformed.astype(np.float32)
+
+
+def is_cuda_oom_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return "out of memory" in message and ("cuda" in message or "cudnn" in message or "gpu" in message)
+
+
 def _load_small_gray(image_path: Path, size: int = 160) -> np.ndarray:
     img = Image.open(image_path).convert("L")
     img.thumbnail((size, size), Image.Resampling.BILINEAR)

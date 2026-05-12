@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import shutil
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -30,8 +30,9 @@ class BlurAnalysis:
     training_blur_frames: int = 0
     rejected_blur_frames: int = 0
     deblur_trigger_reason: str = "none"
+    per_frame_blur: dict[str, dict[str, str | bool | float]] = field(default_factory=dict)
 
-    def metrics(self) -> dict[str, int | float | str]:
+    def metrics(self) -> dict[str, int | float | str | dict[str, dict[str, str | bool | float]]]:
         return {
             "blur_mode": self.mode,
             "blur_mean_laplacian": round(self.mean_laplacian, 4),
@@ -43,6 +44,7 @@ class BlurAnalysis:
             "training_blur_frames": self.training_blur_frames,
             "rejected_blur_frames": self.rejected_blur_frames,
             "deblur_trigger_reason": self.deblur_trigger_reason,
+            "blur_frame_registry": self.per_frame_blur,
         }
 
 
@@ -91,25 +93,39 @@ def prepare_mobile_images(
     reject_count = min(analysis.rejected_images, max(0, len(scores) - min_images))
     keep_count = max(min_images, len(scores) - reject_count)
     kept = sorted(sorted(scores, key=lambda item: item.quality, reverse=True)[:keep_count], key=lambda item: item.path.name)
+    classifications = classify_blur_scores(scores)
+    per_frame_blur: dict[str, dict[str, str | bool | float]] = {}
 
     if output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     for index, item in enumerate(kept):
+        normalized_name = f"{index:06d}.jpg"
+        classification = classifications[item.path]
+        per_frame_blur[normalized_name] = {
+            "source_image": item.path.name,
+            "blurred": classification.blurred,
+            "kind": classification.kind,
+            "quality": round(item.quality, 6),
+        }
         with Image.open(item.path) as original:
             image = ImageOps.exif_transpose(original).convert("RGB")
-            image.save(output_dir / f"{index:06d}.jpg", format="JPEG", quality=94)
+            image.save(output_dir / normalized_name, format="JPEG", quality=94)
+    kept_blur = [classifications[item.path] for item in kept if classifications[item.path].blurred]
+    mode = blur_mode_from_classifications(kept_blur)
+    training_blur_frames = len(kept_blur)
     return output_dir, BlurAnalysis(
-        mode=analysis.mode,
+        mode=mode,
         mean_laplacian=analysis.mean_laplacian,
         mean_gradient=analysis.mean_gradient,
         mean_fft_high_ratio=analysis.mean_fft_high_ratio,
         rejected_images=len(scores) - len(kept),
         kept_images=len(kept),
         blurred_images=analysis.blurred_images,
-        training_blur_frames=analysis.training_blur_frames,
+        training_blur_frames=training_blur_frames,
         rejected_blur_frames=analysis.rejected_blur_frames,
-        deblur_trigger_reason=analysis.deblur_trigger_reason,
+        deblur_trigger_reason="none" if training_blur_frames == 0 else f"training_blur:{mode}",
+        per_frame_blur=per_frame_blur,
     )
 
 
@@ -146,7 +162,7 @@ def summarize_blur_scores(scores: list[BlurScore], *, reject_ratio: float, min_i
     mean_fft = float(fft_ratios.mean())
     median_lap = float(np.median(laps))
     median_fft = float(np.median(fft_ratios))
-    classifications = {item.path: classify_blur_score(item, median_laplacian=median_lap, median_fft_high_ratio=median_fft) for item in scores}
+    classifications = classify_blur_scores(scores, median_laplacian=median_lap, median_fft_high_ratio=median_fft)
     kept_blur = [classifications[item.path] for item in kept_scores if classifications[item.path].blurred]
     rejected_blur = [classifications[item.path] for item in rejected_scores if classifications[item.path].blurred]
     mode = blur_mode_from_classifications(kept_blur)
@@ -163,7 +179,36 @@ def summarize_blur_scores(scores: list[BlurScore], *, reject_ratio: float, min_i
         training_blur_frames=training_blur_frames,
         rejected_blur_frames=len(rejected_blur),
         deblur_trigger_reason=trigger_reason,
+        per_frame_blur={
+            item.path.name: {
+                "source_image": item.path.name,
+                "blurred": classifications[item.path].blurred,
+                "kind": classifications[item.path].kind,
+                "quality": round(item.quality, 6),
+            }
+            for item in scores
+        },
     )
+
+
+def classify_blur_scores(
+    scores: list[BlurScore],
+    *,
+    median_laplacian: float | None = None,
+    median_fft_high_ratio: float | None = None,
+) -> dict[Path, BlurClassification]:
+    if median_laplacian is None:
+        median_laplacian = float(np.median(np.array([item.laplacian for item in scores], dtype=np.float32)))
+    if median_fft_high_ratio is None:
+        median_fft_high_ratio = float(np.median(np.array([item.fft_high_ratio for item in scores], dtype=np.float32)))
+    return {
+        item.path: classify_blur_score(
+            item,
+            median_laplacian=median_laplacian,
+            median_fft_high_ratio=median_fft_high_ratio,
+        )
+        for item in scores
+    }
 
 
 def classify_blur_score(score: BlurScore, *, median_laplacian: float, median_fft_high_ratio: float) -> BlurClassification:

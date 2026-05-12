@@ -11,8 +11,6 @@ import type { Artifact, Project, Task, ViewerConfig } from "@/lib/types";
 import { SplatViewer } from "@/components/SplatViewer";
 import { TaskProgress } from "@/components/TaskProgress";
 
-const LOG_LIST_THRESHOLD = 12;
-
 export default function ProjectDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -61,7 +59,6 @@ export default function ProjectDetailPage() {
   const videoCount = media.filter((item) => item.kind === "video").length;
   const tasks = project?.tasks ?? [];
   const logs = latestTask?.logs ?? [];
-  const showCompactLogs = logs.length > LOG_LIST_THRESHOLD;
   const canStartFine = Boolean(project && !isActiveTask(latestTask) && (
     (project.input_type === "images" && imageCount >= 3) ||
     (project.input_type === "video" && videoCount === 1 && media.length === 1)
@@ -423,7 +420,7 @@ export default function ProjectDetailPage() {
               {logs.length ? (
                 <section className="stack">
                   <h3>任务日志</h3>
-                  <div className="log-console" style={{ maxHeight: showCompactLogs ? 220 : 180 }}>
+                  <div className="log-console">
                     {logs.map((line, index) => <div key={`${index}-${line}`}>{line}</div>)}
                   </div>
                 </section>

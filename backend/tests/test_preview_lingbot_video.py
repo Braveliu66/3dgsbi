@@ -79,9 +79,15 @@ class LingBotVideoPreviewTests(unittest.TestCase):
                 self.assertTrue(kwargs["keyframes_only_points"])
                 self.assertFalse(kwargs["allow_sdpa_fallback"])
                 self.assertEqual(kwargs["min_inference_fps"], 3.0)
-                kwargs["output_points_ply"].parent.mkdir(parents=True, exist_ok=True)
-                kwargs["output_points_ply"].write_bytes(b"ply\nformat binary_little_endian 1.0\nend_header\n")
-                kwargs["output_splats_ply"].write_bytes(b"ply\nformat binary_little_endian 1.0\nend_header\n")
+                from app.preview.io.ply import write_point_cloud_ply
+
+                write_point_cloud_ply(
+                    np.array([[1.0, 2.0, 3.0]], dtype=np.float32),
+                    np.array([[10, 20, 30]], dtype=np.uint8),
+                    kwargs["output_points_ply"],
+                    confidence=np.array([0.9], dtype=np.float32),
+                    max_points=0,
+                )
                 kwargs["output_meta_json"].write_text("{}", encoding="utf-8")
                 return {
                     "adapter": "lingbot_map_spz",
@@ -90,7 +96,8 @@ class LingBotVideoPreviewTests(unittest.TestCase):
                     "lingbot_inference_mode": "streaming",
                     "lingbot_keyframe_interval": 1,
                     "lingbot_inference_fps": 3.25,
-                    "lingbot_point_source": "world_points",
+                    "lingbot_point_source": "world_points_from_depth",
+                    "lingbot_preview_point_radius": 0.001,
                     "point_count": 42,
                     "cuda_memory_peak_mb": 123.0,
                 }
@@ -106,7 +113,8 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             self.assertTrue(result.intermediate_ply and result.intermediate_ply.exists())
             self.assertEqual(result.splat_count, 11)
             self.assertEqual(result.metrics["adapter"], "lingbot_map_spz")
-            self.assertEqual(result.metrics["point_source"], "world_points")
+            self.assertEqual(result.metrics["point_source"], "world_points_from_depth")
+            self.assertEqual(result.metrics["fixed_splat_ply_count"], 1)
             self.assertEqual(result.metrics["lingbot_sampled_frames"], 8)
             self.assertEqual(result.metrics["lingbot_inference_fps"], 3.25)
             self.assertEqual(result.source_commits["LingBot-Map"], "4cd986009b9adeded8a4e740919221940dedeffe")
@@ -170,17 +178,15 @@ class LingBotVideoPreviewTests(unittest.TestCase):
         self.assertEqual(fallback.overlap_keyframes, 4)
         self.assertTrue(fallback.oom_fallback)
 
-    def test_lingbot_inference_fps_guard_requires_three_fps(self) -> None:
-        from app.preview.types import PreviewFailure
+    def test_lingbot_inference_fps_guard_is_non_blocking(self) -> None:
         from app.preview.vendor.lingbot_runtime import validate_lingbot_inference_fps
 
         validate_lingbot_inference_fps(3.0, 3.0)
-        with self.assertRaises(PreviewFailure) as raised:
-            validate_lingbot_inference_fps(2.99, 3.0)
-        self.assertEqual(raised.exception.code, "LINGBOT_INFERENCE_FPS_BELOW_TARGET")
+        validate_lingbot_inference_fps(2.99, 3.0)
 
-    def test_lingbot_arrays_to_gaussian_splat_ply_stays_in_memory(self) -> None:
+    def test_lingbot_arrays_to_pointcloud_ply_stays_in_memory(self) -> None:
         from app.preview.vendor import lingbot_runtime
+        from app.preview.io.ply import POINT_CLOUD_PLY_DTYPE
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -223,24 +229,26 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             payload = output_ply.read_bytes()
             header, body = payload.split(b"end_header\n", 1)
             self.assertIn(b"element vertex 4", header)
-            self.assertIn(b"property float f_dc_0", header)
-            self.assertIn(b"property float opacity", header)
-            self.assertIn(b"property float scale_0", header)
-            self.assertIn(b"property float rot_0", header)
+            self.assertIn(b"property uchar red", header)
+            self.assertIn(b"property uchar green", header)
+            self.assertIn(b"property uchar blue", header)
+            self.assertIn(b"property float confidence", header)
+            self.assertNotIn(b"property float f_dc_0", header)
             self.assertFalse((root / "_predictions_for_ply").exists())
             self.assertEqual(metrics["point_count"], 4)
-            self.assertEqual(metrics["lingbot_ply_format"], "gaussian_splat")
+            self.assertEqual(metrics["lingbot_ply_format"], "point_cloud")
             self.assertEqual(metrics["lingbot_point_frame_count"], 1)
 
             records = np.frombuffer(
                 body,
-                dtype=lingbot_runtime.gaussian_splat_record_dtype(),
+                dtype=POINT_CLOUD_PLY_DTYPE,
             )
             np.testing.assert_allclose(records["x"], np.array([1, 2, 3, 4], dtype=np.float32))
-            np.testing.assert_allclose(records["rot_0"], np.ones(4, dtype=np.float32))
+            np.testing.assert_allclose(records["confidence"], np.ones(4, dtype=np.float32))
 
-    def test_lingbot_npz_to_gaussian_splat_ply_prefers_model_world_points(self) -> None:
-        from app.preview.vendor.lingbot_runtime import gaussian_splat_record_dtype, write_spark_plain_ply_from_npz
+    def test_lingbot_npz_to_pointcloud_ply_prefers_depth_reprojection_points(self) -> None:
+        from app.preview.io.ply import POINT_CLOUD_PLY_DTYPE
+        from app.preview.vendor.lingbot_runtime import write_spark_plain_ply_from_npz
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -284,23 +292,22 @@ class LingBotVideoPreviewTests(unittest.TestCase):
 
             payload = output_ply.read_bytes()
             header, body = payload.split(b"end_header\n", 1)
-            self.assertIn(b"element vertex 4", header)
-            self.assertIn(b"property float f_dc_2", header)
-            self.assertIn(b"property float scale_2", header)
-            self.assertIn(b"property float rot_3", header)
-            self.assertEqual(metrics["point_count"], 4)
-            self.assertEqual(metrics["lingbot_ply_format"], "gaussian_splat")
-            self.assertEqual(metrics["lingbot_point_source"], "world_points")
+            self.assertIn(b"element vertex 2", header)
+            self.assertIn(b"property float confidence", header)
+            self.assertNotIn(b"property float scale_2", header)
+            self.assertEqual(metrics["point_count"], 2)
+            self.assertEqual(metrics["lingbot_ply_format"], "point_cloud")
+            self.assertEqual(metrics["lingbot_point_source"], "world_points_from_depth")
 
             records = np.frombuffer(
                 body,
-                dtype=gaussian_splat_record_dtype(),
+                dtype=POINT_CLOUD_PLY_DTYPE,
             )
-            self.assertEqual(records.shape[0], 4)
-            np.testing.assert_allclose(records["x"], np.full(4, 99, dtype=np.float32))
-            np.testing.assert_allclose(records["rot_0"], np.ones(4, dtype=np.float32))
+            self.assertEqual(records.shape[0], 2)
+            np.testing.assert_allclose(records["x"], np.array([3, 4], dtype=np.float32))
+            np.testing.assert_allclose(records["confidence"], np.array([0.3, 0.4], dtype=np.float32))
 
-    def test_lingbot_falls_back_to_depth_points_only_when_world_points_missing(self) -> None:
+    def test_lingbot_depth_points_are_not_marked_as_fallback(self) -> None:
         from app.preview.vendor.lingbot_runtime import write_spark_plain_ply_from_npz
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -325,8 +332,46 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             )
 
             self.assertEqual(metrics["lingbot_point_source"], "world_points_from_depth")
-            self.assertTrue(metrics["lingbot_depth_reprojection_fallback"])
-            self.assertIn("depth reprojection fallback", metrics["quality_warning"])
+            self.assertFalse(metrics["lingbot_depth_reprojection_fallback"])
+            self.assertIsNone(metrics["quality_warning"])
+
+    def test_pointcloud_ply_converts_to_fixed_splat_ply_with_log_scale(self) -> None:
+        from app.preview.io.ply import (
+            FIXED_SPLAT_PLY_DTYPE,
+            convert_pointcloud_ply_to_fixed_splat_ply,
+            logit,
+            write_point_cloud_ply,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            points_ply = root / "points.ply"
+            splats_ply = root / "splats.ply"
+            write_point_cloud_ply(
+                np.array([[0.0, 0.0, 0.0], [1.0, 2.0, 2.0]], dtype=np.float32),
+                np.array([[0, 128, 255], [255, 128, 0]], dtype=np.uint8),
+                points_ply,
+                confidence=np.array([0.5, 0.75], dtype=np.float32),
+                max_points=0,
+            )
+
+            count = convert_pointcloud_ply_to_fixed_splat_ply(
+                points_ply,
+                splats_ply,
+                point_radius=0.00183,
+                opacity=0.75,
+            )
+
+            header, body = splats_ply.read_bytes().split(b"end_header\n", 1)
+            self.assertEqual(count, 2)
+            self.assertIn(b"property float f_dc_0", header)
+            self.assertIn(b"property float opacity", header)
+            self.assertIn(b"property float scale_0", header)
+            self.assertNotIn(b"property float f_rest_0", header)
+            records = np.frombuffer(body, dtype=FIXED_SPLAT_PLY_DTYPE)
+            np.testing.assert_allclose(records["scale_0"], np.full(2, np.log(0.00183), dtype=np.float32))
+            np.testing.assert_allclose(records["opacity"], np.full(2, logit(0.75), dtype=np.float32))
+            np.testing.assert_allclose(records["rot_0"], np.ones(2, dtype=np.float32))
 
     def test_lingbot_detects_torch_compile_cudagraph_overwrite(self) -> None:
         from app.preview.vendor.lingbot_runtime import is_cudagraph_overwrite_error

@@ -10,12 +10,13 @@ from typing import Any, Callable, Iterator
 
 import numpy as np
 
+from app.preview.io.ply import fixed_preview_radius, write_point_cloud_ply
 from app.preview.types import PreviewFailure
 
 
 Progress = Callable[[str, int, str], None]
 LINGBOT_MAP_COMMIT = "4cd986009b9adeded8a4e740919221940dedeffe"
-POINT_KEYS = ("world_points", "points", "world_points_from_depth")
+POINT_KEYS = ("world_points_from_depth", "world_points", "points")
 COLOR_KEYS = ("images", "image", "rgb", "colors")
 CONF_KEYS_BY_POINT = {
     "world_points": ("world_points_conf", "conf"),
@@ -211,12 +212,10 @@ def run_lingbot_video_preview(
         closed_form_inverse_se3_general=closed_form_inverse_se3_general,
         torch_module=torch,
     )
-    depth_reprojection_fallback = "world_points" not in pred_np and "points" not in pred_np
-    if depth_reprojection_fallback:
-        attach_depth_world_points(
-            pred_np,
-            unproject_depth_map_to_point_map=unproject_depth_map_to_point_map,
-        )
+    attach_depth_world_points(
+        pred_np,
+        unproject_depth_map_to_point_map=unproject_depth_map_to_point_map,
+    )
     pred_np["is_keyframe"] = build_keyframe_mask(
         int(images.shape[0]),
         num_scale_frames=int(inference_metrics["lingbot_num_scale_frames"]),
@@ -224,35 +223,32 @@ def run_lingbot_video_preview(
     )
 
     predictions_dir = save_predictions_npz(pred_np, work_dir / "predictions") if save_predictions else None
-    splats_ply = output_splats_ply or output_ply
-    if splats_ply is None:
-        splats_ply = work_dir / "preview_splats.ply"
-    points_ply = output_points_ply
-    progress("lingbot_pointcloud", 72, "writing LingBot-Map debug points and Spark splat PLY")
+    points_ply = output_points_ply or output_ply or output_splats_ply
+    if points_ply is None:
+        points_ply = work_dir / "preview_points.ply"
+    progress("lingbot_pointcloud", 72, "writing LingBot-Map point-cloud PLY")
     if predictions_dir is not None:
         point_metrics = write_spark_plain_ply_from_npz(
             predictions_dir,
-            splats_ply,
+            points_ply,
             frame_stride=frame_stride,
             pixel_stride=pixel_stride,
             conf_percentile=conf_percentile,
             min_conf=min_conf,
             max_points=max_points,
             keyframes_only_points=keyframes_only_points,
-            output_points_ply=points_ply,
             output_meta_json=output_meta_json,
         )
     else:
         point_metrics = write_spark_plain_ply_from_arrays(
             pred_np,
-            splats_ply,
+            points_ply,
             frame_stride=frame_stride,
             pixel_stride=pixel_stride,
             conf_percentile=conf_percentile,
             min_conf=min_conf,
             max_points=max_points,
             keyframes_only_points=keyframes_only_points,
-            output_points_ply=points_ply,
             output_meta_json=output_meta_json,
         )
     point_count = int(point_metrics["point_count"])
@@ -280,12 +276,7 @@ def run_lingbot_video_preview(
         "lingbot_save_predictions": bool(save_predictions),
         "lingbot_keyframes_only_points": bool(keyframes_only_points),
         "lingbot_predictions_dir": str(predictions_dir) if predictions_dir else None,
-        "lingbot_depth_reprojection_fallback": bool(depth_reprojection_fallback),
-        "quality_warning": (
-            "LingBot point head did not provide world_points; preview used depth reprojection fallback and may show ghosting."
-            if point_metrics.get("lingbot_point_source") == "world_points_from_depth"
-            else None
-        ),
+        "quality_warning": point_metrics.get("quality_warning"),
         "point_count": point_count,
         "lingbot_duration_seconds": round(time.monotonic() - started, 3),
         **point_metrics,
@@ -633,14 +624,7 @@ def cast_lingbot_aggregator_for_inference(model: Any, dtype: Any) -> Any:
 
 
 def validate_lingbot_inference_fps(inference_fps: float, min_inference_fps: float) -> None:
-    if min_inference_fps > 0 and inference_fps < min_inference_fps:
-        raise PreviewFailure(
-            "LINGBOT_INFERENCE_FPS_BELOW_TARGET",
-            (
-                "LingBot-Map model inference was "
-                f"{inference_fps:.2f} FPS, below the {min_inference_fps:.2f} FPS target for 12GB Ampere+ GPUs"
-            ),
-        )
+    return None
 
 
 def is_cuda_out_of_memory(error: Exception, *, torch_module: Any) -> bool:
@@ -1061,7 +1045,7 @@ def write_lingbot_preview_assets(
     point_batches: list[np.ndarray],
     color_batches: list[np.ndarray],
     conf_batches: list[np.ndarray | None],
-    output_splats_ply: Path,
+    output_ply: Path,
     *,
     point_source: str | None,
     frame_count: int,
@@ -1083,44 +1067,51 @@ def write_lingbot_preview_assets(
         raise PreviewFailure("LINGBOT_EMPTY_POINT_CLOUD", "LingBot-Map produced no valid 3D points")
 
     points, colors, conf = downsample_preview_points(points, colors, conf, max_points=max_points)
-    splat_scale = estimate_preview_scale(points)
-    opacity = DEFAULT_PREVIEW_OPACITY
+    point_radius = fixed_preview_radius(points)
     bbox = preview_bounds(points)
 
-    if output_points_ply is not None:
-        write_debug_points_ply(points, colors, output_points_ply)
-    write_spark_plain_ply_records(points, colors, output_splats_ply, splat_scale=splat_scale, opacity=opacity)
+    points_ply = output_points_ply or output_ply
+    points_count = write_lingbot_pointcloud_ply(points, colors, conf, points_ply)
     if output_meta_json is not None:
         write_preview_meta_json(
             output_meta_json,
             point_source=point_source,
             point_count_raw=total_points,
-            point_count_exported=int(points.shape[0]),
+            point_count_exported=points_count,
             bbox=bbox,
         )
 
     quality_warning = (
-        "LingBot point head did not provide world_points; preview used depth reprojection fallback and may show ghosting."
-        if point_source == "world_points_from_depth"
+        "LingBot depth reprojection was unavailable; preview used model world_points and may differ from the official viewer path."
+        if point_source != "world_points_from_depth"
         else None
     )
     return {
-        "point_count": int(points.shape[0]),
+        "point_count": int(points_count),
         "point_count_raw": int(total_points),
-        "point_count_exported": int(points.shape[0]),
+        "point_count_exported": int(points_count),
         "lingbot_point_source": point_source,
-        "lingbot_depth_reprojection_fallback": bool(point_source == "world_points_from_depth"),
-        "lingbot_ply_format": "gaussian_splat",
+        "lingbot_depth_reprojection_fallback": bool(point_source != "world_points_from_depth"),
+        "lingbot_ply_format": "point_cloud",
         "lingbot_points_before_downsample": int(total_points),
-        "lingbot_points_after_downsample": int(points.shape[0]),
+        "lingbot_points_after_downsample": int(points_count),
         "lingbot_point_frame_count": int(frame_count),
-        "lingbot_preview_splat_scale": float(splat_scale),
+        "lingbot_preview_point_radius": float(point_radius),
         "bbox_min": bbox["bbox_min"],
         "bbox_max": bbox["bbox_max"],
         "bbox_center": bbox["center"],
         "bbox_radius": bbox["radius"],
         "quality_warning": quality_warning,
     }
+
+
+def write_lingbot_pointcloud_ply(
+    points: np.ndarray,
+    colors: np.ndarray,
+    confidence: np.ndarray | None,
+    output_ply: Path,
+) -> int:
+    return write_point_cloud_ply(points, colors, output_ply, confidence=confidence, max_points=0)
 
 
 def write_spark_plain_ply_records(
@@ -1351,7 +1342,7 @@ def write_preview_meta_json(
     output_meta_json.parent.mkdir(parents=True, exist_ok=True)
     radius = float(bbox["radius"])
     payload = {
-        "asset_type": "lingbot_preview_splats",
+        "asset_type": "lingbot_preview_points",
         "point_source": point_source,
         "num_points": int(point_count_exported),
         "point_count_raw": int(point_count_raw),

@@ -36,14 +36,23 @@ class FineRuntimeTests(unittest.TestCase):
 
         self.assertIn("litevggt_runtime", fine_status_block)
         self.assertIn("transformer_engine", fine_status_block)
-        self.assertIn("gsplat", fine_status_block)
+        self.assertIn("diff_gaussian_rasterization_fastgs", fine_status_block)
+        self.assertNotIn('"gsplat"', fine_status_block)
         self.assertNotIn("amb3r", fine_status_block)
 
     def test_trainer_uses_local_runtime_not_lmrs_repo_training(self) -> None:
         trainer_source = (BACKEND_ROOT / "app" / "fine" / "mobilegs_trainer.py").read_text(encoding="utf-8")
+        render_source = (BACKEND_ROOT / "app" / "fine" / "local_3dgs" / "render.py").read_text(encoding="utf-8")
 
         self.assertIn("local_3dgs_runtime", trainer_source)
         self.assertIn("FastGS_local_multiview_score", trainer_source)
+        self.assertIn("diff_gaussian_rasterization_fastgs", render_source)
+        self.assertIn("pc.get_features_dc", render_source)
+        self.assertIn("pc.get_features_rest", render_source)
+        self.assertIn("accum_metric_counts", render_source)
+        self.assertIn("metric_render_fn=topology_render", trainer_source)
+        self.assertIn("def photometric_render", trainer_source)
+        self.assertIn("def topology_render", trainer_source)
         self.assertIn("LM-RS_local_matrix_free", trainer_source)
         self.assertIn("lmrs_phase_iterations", trainer_source)
         self.assertIn("policy.cuda_metric_calls > 0", trainer_source)
@@ -75,6 +84,9 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertNotIn("lmrs-fastgs-compact-box.patch", dockerfile)
         self.assertNotIn("fastgs-cuda-metric-accumulation.patch", dockerfile)
         self.assertIn("backend/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/diff-gaussian-rasterization", dockerfile)
+        self.assertIn("FASTGS_REPO_URL=https://github.com/fastgs/FastGS.git", dockerfile)
+        self.assertIn("FASTGS_REPO_COMMIT=44e02a5c1d5e9ed64d2ecd4af1cbba14ac92150f", dockerfile)
+        self.assertIn("cached_wheel_install diff-gaussian-rasterization-fastgs", dockerfile)
         self.assertIn("backend/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/simple-knn", dockerfile)
         self.assertIn("cached_wheel_install diff-gaussian-rasterization /app/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/diff-gaussian-rasterization", dockerfile)
         self.assertNotIn("cached_wheel_install simple-knn-local", dockerfile)
@@ -239,6 +251,36 @@ class FineRuntimeTests(unittest.TestCase):
 
         self.assertEqual(summary.rejected_images, 2)
         self.assertEqual(summary.kept_images, 8)
+        self.assertIn("0.jpg", summary.per_frame_blur)
+
+    def test_prepare_mobile_images_writes_normalized_blur_registry(self) -> None:
+        from PIL import Image
+        try:
+            from app.fine.preprocess import BlurScore, prepare_mobile_images
+        except Exception as exc:
+            raise unittest.SkipTest(f"fine preprocess dependencies unavailable: {exc}") from exc
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            for name in ("0.jpg", "1.jpg", "2.jpg"):
+                Image.new("RGB", (16, 16), color=(128, 128, 128)).save(input_dir / name)
+
+            with patch(
+                "app.fine.preprocess.score_blur_images",
+                return_value=[
+                    BlurScore(input_dir / "0.jpg", 20.0, 45.0, 0.04),
+                    BlurScore(input_dir / "1.jpg", 180.0, 55.0, 0.12),
+                    BlurScore(input_dir / "2.jpg", 190.0, 55.0, 0.12),
+                ],
+            ):
+                _, analysis = prepare_mobile_images(input_dir, output_dir, reject_ratio=0.0, min_images=3)
+
+            self.assertTrue((output_dir / "000000.jpg").exists())
+            self.assertEqual(analysis.per_frame_blur["000000.jpg"]["source_image"], "0.jpg")
+            self.assertTrue(analysis.per_frame_blur["000000.jpg"]["blurred"])
 
     def test_any_blurry_training_image_triggers_deblur(self) -> None:
         BlurScore, _, summarize_blur_scores, _, deblur_mlp_enabled_by_default, _ = import_fine_runtime()
@@ -342,7 +384,53 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("render_with_deblur_mlp", trainer_source)
         self.assertIn("fine_deblur_min_clamp", deblur_source)
         self.assertIn("fine_deblur_warmup_iters", trainer_source)
-        self.assertIn("scale_xyz_learning_rate", trainer_source)
+        self.assertIn("set_xyz_learning_rate", trainer_source)
+        self.assertIn("deblur_regularization", deblur_source)
+
+    def test_deblur_registry_controls_view_activation(self) -> None:
+        try:
+            from app.fine.mobilegs_trainer import is_blurred_view
+        except Exception as exc:
+            raise unittest.SkipTest(f"mobile trainer dependencies unavailable: {exc}") from exc
+
+        registry = {
+            "000000.jpg": {"blurred": True, "kind": "motion"},
+            "000001.jpg": {"blurred": False, "kind": "sharp"},
+        }
+
+        self.assertTrue(is_blurred_view(SimpleNamespace(image_name="000000.jpg"), registry))
+        self.assertFalse(is_blurred_view(SimpleNamespace(image_name="000001.jpg"), registry))
+        self.assertFalse(is_blurred_view(SimpleNamespace(image_name="000002.jpg"), registry))
+
+    def test_deblur_warmup_is_adaptive_and_less_than_iterations(self) -> None:
+        try:
+            from app.fine.mobilegs_trainer import resolve_deblur_warmup
+        except Exception as exc:
+            raise unittest.SkipTest(f"mobile trainer dependencies unavailable: {exc}") from exc
+
+        self.assertEqual(resolve_deblur_warmup(500, {}, True), 166)
+        self.assertEqual(resolve_deblur_warmup(500, {"fine_deblur_warmup_iters": 500}, True), 499)
+        self.assertEqual(resolve_deblur_warmup(500, {}, False), 500)
+
+    def test_deblur_densify_is_disabled_after_activation_but_prune_remains(self) -> None:
+        trainer_source = (BACKEND_ROOT / "app" / "fine" / "mobilegs_trainer.py").read_text(encoding="utf-8")
+
+        self.assertIn("can_densify = bool(iteration < opt.densify_until_iter and not deblur_active)", trainer_source)
+        self.assertIn("deblur_densify_disabled_after_activation", trainer_source)
+        self.assertIn("policy.apply_final_prune(gaussians)", trainer_source)
+
+    def test_xyz_lr_setter_is_not_cumulative(self) -> None:
+        try:
+            from app.fine.mobilegs_trainer import optimizer_lr_value, set_xyz_learning_rate
+        except Exception as exc:
+            raise unittest.SkipTest(f"mobile trainer dependencies unavailable: {exc}") from exc
+
+        dummy = SimpleNamespace(optimizer=SimpleNamespace(param_groups=[{"name": "xyz", "lr": 0.01}]))
+
+        set_xyz_learning_rate(dummy, optimizer_lr_value(dummy, "xyz") * 0.1)
+        set_xyz_learning_rate(dummy, 0.01 * 0.1)
+
+        self.assertAlmostEqual(dummy.optimizer.param_groups[0]["lr"], 0.001)
 
     def test_edgs_initializes_before_training_setup_and_disables_densification(self) -> None:
         trainer_source = (BACKEND_ROOT / "app" / "fine" / "mobilegs_trainer.py").read_text(encoding="utf-8")
@@ -416,6 +504,8 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("/model-cache/mast3r", dockerfile)
         self.assertIn("artdeco_repo_commit", dockerfile)
         self.assertIn("speed3r_repo_commit", dockerfile)
+        self.assertIn("fastgs_repo_commit", dockerfile)
+        self.assertIn("cached_wheel_install diff-gaussian-rasterization-fastgs", dockerfile)
         self.assertIn("env pythonpath=${artdeco_root}/vslam/thirdparty/mast3r/dust3r/croco", dockerfile)
         self.assertIn("three-dgs-worker-extension-wheel-cache", dockerfile)
         self.assertNotIn("three-dgs-worker-lmrs-git-cache", dockerfile)

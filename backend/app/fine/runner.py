@@ -27,8 +27,8 @@ LEGACY_PIPELINE_NAME = "mobilegs_lmrs"
 SOURCE_COMMITS_FINE = {
     "LiteVGGT": SOURCE_COMMITS["LiteVGGT"],
     "Spark": SOURCE_COMMITS["Spark"],
-    "gsplat": "1.5.3",
     "FastGS": "44e02a5c1d5e9ed64d2ecd4af1cbba14ac92150f",
+    "diff_gaussian_rasterization_fastgs": "44e02a5c1d5e9ed64d2ecd4af1cbba14ac92150f",
     "Deblurring-3DGS": "e63366b8581c0fde2fda0ab1aea99518da2e2f10",
 }
 
@@ -97,6 +97,7 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         iterations=iterations,
         lm_start_iter=lm_start_iter,
         blur_mode=blur_mode,
+        blur_registry=blur.per_frame_blur,
         options=train_options,
         progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
     )
@@ -214,7 +215,7 @@ def assert_runtime_ready() -> None:
     if not torch.cuda.is_available():
         raise FineFailure("GPU_RESOURCE_UNAVAILABLE", "CUDA GPU is required for fine reconstruction")
     missing = []
-    for module_name in ("diff_gaussian_rasterization", "simple_knn", "fused_ssim", "gsplat"):
+    for module_name in ("diff_gaussian_rasterization", "diff_gaussian_rasterization_fastgs", "simple_knn", "fused_ssim"):
         try:
             __import__(module_name)
         except Exception as exc:
@@ -224,6 +225,9 @@ def assert_runtime_ready() -> None:
     rasterizer = __import__("diff_gaussian_rasterization")
     if not hasattr(rasterizer, "GaussianRasterizer"):
         raise FineFailure("FINE_RUNTIME_UNAVAILABLE", "diff_gaussian_rasterization is missing GaussianRasterizer")
+    fastgs_rasterizer = __import__("diff_gaussian_rasterization_fastgs")
+    if not hasattr(fastgs_rasterizer, "GaussianRasterizer"):
+        raise FineFailure("FINE_RUNTIME_UNAVAILABLE", "diff_gaussian_rasterization_fastgs is missing GaussianRasterizer")
 
 
 def deblur_mlp_enabled_by_default(blur_mode: str, options: dict[str, Any]) -> bool:

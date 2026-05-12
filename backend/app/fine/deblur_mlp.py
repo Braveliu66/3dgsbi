@@ -97,6 +97,8 @@ class DeblurMLPConfig:
     lambda_p: float = 0.01
     min_clamp: float = 0.9
     max_clamp: float = 1.1
+    max_position_delta: float = 0.02
+    transform_reg_weight: float = 0.001
     lr: float = 1e-3
 
 
@@ -126,6 +128,8 @@ class DeblurMLPState:
             "deblur_mlp_lambda_p": self.config.lambda_p,
             "deblur_mlp_min_clamp": self.config.min_clamp,
             "deblur_mlp_max_clamp": self.config.max_clamp,
+            "deblur_mlp_max_position_delta": self.config.max_position_delta,
+            "deblur_mlp_transform_reg_weight": self.config.transform_reg_weight,
             "deblur_mlp_lr": self.config.lr,
         }
 
@@ -153,6 +157,8 @@ def build_deblur_mlp_state(blur_mode: str, options: dict[str, Any], *, device: t
         lambda_p=read_float(options.get("fine_deblur_lambda_p"), 0.01, minimum=0.0, maximum=0.1),
         min_clamp=read_float(options.get("fine_deblur_min_clamp"), 0.9, minimum=0.5, maximum=1.0),
         max_clamp=read_float(options.get("fine_deblur_max_clamp"), 1.1, minimum=1.0, maximum=1.8),
+        max_position_delta=read_float(options.get("fine_deblur_max_position_delta"), 0.02, minimum=0.0, maximum=1.0),
+        transform_reg_weight=read_float(options.get("fine_deblur_transform_reg_weight"), 0.001, minimum=0.0, maximum=1.0),
         lr=read_float(options.get("fine_deblur_gtnet_lr"), 1e-3, minimum=1e-6, maximum=1e-1),
     )
     model = GTnet(
@@ -227,8 +233,24 @@ def predict_deblur_transforms(
     scale_delta = torch.clamp(1.0 + config.lambda_s * scale_delta, min=config.min_clamp, max=config.max_clamp)
     rotation_delta = torch.clamp(1.0 + config.lambda_s * rotation_delta, min=config.min_clamp, max=config.max_clamp)
     if position_delta is not None:
-        position_delta = config.lambda_p * position_delta
+        position_delta = torch.clamp(
+            config.lambda_p * position_delta,
+            min=-config.max_position_delta,
+            max=config.max_position_delta,
+        )
     return scale_delta, rotation_delta, position_delta
+
+
+
+def deblur_transform_regularization(
+    scale_delta: torch.Tensor,
+    rotation_delta: torch.Tensor,
+    position_delta: torch.Tensor | None,
+) -> torch.Tensor:
+    reg = torch.mean((scale_delta - 1.0) ** 2) + torch.mean((rotation_delta - 1.0) ** 2)
+    if position_delta is not None:
+        reg = reg + torch.mean(position_delta**2)
+    return reg
 
 
 def render_with_deblur_mlp(viewpoint_camera: Any, pc: Any, pipe: Any, bg_color: torch.Tensor, state: DeblurMLPState) -> dict[str, torch.Tensor]:
@@ -253,7 +275,7 @@ def render_with_deblur_mlp(viewpoint_camera: Any, pc: Any, pipe: Any, bg_color: 
 
     if not state.config.use_position:
         screen = _screen_space_points(means3d)
-        image, radii = rasterizer(
+        output = rasterizer(
             means3D=means3d,
             means2D=screen,
             shs=shs,
@@ -263,7 +285,14 @@ def render_with_deblur_mlp(viewpoint_camera: Any, pc: Any, pipe: Any, bg_color: 
             rotations=rotations * rotation_delta,
             cov3D_precomp=None,
         )
-        return {"render": image, "viewspace_points": screen, "visibility_filter": radii > 0, "radii": radii}
+        image, radii = _unpack_rasterizer_output(output)
+        return {
+            "render": image,
+            "viewspace_points": screen,
+            "visibility_filter": radii > 0,
+            "radii": radii,
+            "deblur_regularization": deblur_transform_regularization(scale_delta, rotation_delta, None),
+        }
 
     moments = int(state.config.num_moments)
     position_delta = position_delta.view(-1, 3, moments)
@@ -284,7 +313,7 @@ def render_with_deblur_mlp(viewpoint_camera: Any, pc: Any, pipe: Any, bg_color: 
         else:
             delta_index = moment - 1
             transformed_pos = means3d + position_delta[..., delta_index]
-        image, radii = rasterizer(
+        output = rasterizer(
             means3D=transformed_pos,
             means2D=screen,
             shs=shs,
@@ -294,6 +323,7 @@ def render_with_deblur_mlp(viewpoint_camera: Any, pc: Any, pipe: Any, bg_color: 
             rotations=rotations * rotation_delta[..., delta_index],
             cov3D_precomp=None,
         )
+        image, radii = _unpack_rasterizer_output(output)
         renders.append(image)
         radii_accum = radii if radii_accum is None else torch.maximum(radii_accum, radii)
         visible = radii > 0
@@ -304,6 +334,7 @@ def render_with_deblur_mlp(viewpoint_camera: Any, pc: Any, pipe: Any, bg_color: 
         "viewspace_points": first_screen,
         "visibility_filter": visibility_accum,
         "radii": radii_accum,
+        "deblur_regularization": deblur_transform_regularization(scale_delta, rotation_delta, position_delta),
     }
 
 
@@ -356,3 +387,10 @@ def _resolve_colors(viewpoint_camera: Any, pc: Any, pipe: Any) -> tuple[torch.Te
     dir_pp_normalized = dir_pp / dir_pp.norm(dim=1, keepdim=True)
     sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)
     return None, torch.clamp_min(sh2rgb + 0.5, 0.0)
+
+def _unpack_rasterizer_output(output: object) -> tuple[torch.Tensor, torch.Tensor]:
+    if not isinstance(output, (tuple, list)):
+        raise RuntimeError(f"GaussianRasterizer returned unsupported output type: {type(output)!r}")
+    if len(output) < 2:
+        raise RuntimeError(f"GaussianRasterizer returned {len(output)} values, expected at least 2")
+    return output[0], output[1]

@@ -4,7 +4,7 @@ import { Focus, Maximize2, RotateCcw, RotateCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { Box3, Object3D, PerspectiveCamera, Vector3, WebGLRenderer } from "three";
 import type { OrbitControls as OrbitControlsType } from "three/examples/jsm/controls/OrbitControls.js";
-import { artifactUrl, formatBytes } from "@/lib/api";
+import { artifactUrl, fetchBytesWithProgress, formatBytes } from "@/lib/api";
 
 type ViewerState = "idle" | "loading" | "ready" | "error";
 type AxisView = "x-positive" | "x-negative" | "y-positive" | "y-negative" | "z-positive" | "z-negative";
@@ -413,34 +413,15 @@ function ViewerLoadProgress({ progress, format }: { progress: ModelLoadProgress;
 }
 
 async function fetchModelBytes(url: string, format: ModelFormat, signal: AbortSignal, onProgress: (progress: ModelLoadProgress) => void): Promise<LoadedModel> {
-  const response = await fetch(artifactUrl(url), { cache: "no-store", signal });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || `${response.status} ${response.statusText}`);
-  }
-  const totalBytes = Number(response.headers.get("Content-Length") || 0);
-  onProgress(modelProgress(0, totalBytes));
-  if (!response.body) {
-    const blob = await response.blob();
-    onProgress(modelProgress(blob.size, blob.size));
-    return { fileBytes: new Uint8Array(await blob.arrayBuffer()), fileName: modelFileName(format) };
-  }
-
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let loadedBytes = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (!value) continue;
-    const chunk = new Uint8Array(value.byteLength);
-    chunk.set(value);
-    chunks.push(chunk);
-    loadedBytes += value.byteLength;
-    onProgress(modelProgress(loadedBytes, totalBytes));
-  }
-  onProgress(modelProgress(totalBytes || loadedBytes, totalBytes || loadedBytes));
-  return { fileBytes: concatChunks(chunks, loadedBytes), fileName: modelFileName(format) };
+  const fileName = modelFileName(format);
+  const result = await fetchBytesWithProgress(
+    artifactUrl(url),
+    fileName,
+    0,
+    (progress) => onProgress(modelProgress(progress.loadedBytes, progress.totalBytes)),
+    signal
+  );
+  return { fileBytes: result.bytes, fileName };
 }
 
 async function fetchPreviewMeta(url: string, signal: AbortSignal): Promise<PreviewMeta> {
@@ -473,16 +454,6 @@ function modelProgress(loadedBytes: number, totalBytes: number): ModelLoadProgre
     totalBytes: total,
     percent: total > 0 ? Math.max(0, Math.min(100, Math.round((loaded / total) * 100))) : 0
   };
-}
-
-function concatChunks(chunks: Uint8Array[], totalBytes: number): Uint8Array {
-  const result = new Uint8Array(totalBytes);
-  let offset = 0;
-  for (const chunk of chunks) {
-    result.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return result;
 }
 
 function modelFileName(format: ModelFormat): string {

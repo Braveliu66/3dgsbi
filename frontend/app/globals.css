@@ -1271,7 +1271,7 @@ p { line-height: 1.55; }
 }
 
 .log-console {
-  max-height: 240px;
+  max-height: 360px;
   overflow: auto;
   border-radius: var(--radius);
   padding: 12px;
