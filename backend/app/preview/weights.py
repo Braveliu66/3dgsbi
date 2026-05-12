@@ -89,6 +89,9 @@ PIPELINE_WEIGHT_PATHS: dict[str, tuple[str, ...]] = {
         "roma/roma_indoor.pth",
         "roma/dinov2_vitl14_pretrain.pth",
     ),
+    "litevggt_fastgs_deblur_gsplat": (
+        "litevggt/te_dict.pt",
+    ),
     "video_artdeco_speed3r": (
         "speed3r_pi3/config.json",
         "speed3r_pi3/model.safetensors",

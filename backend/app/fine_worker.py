@@ -282,8 +282,8 @@ def prepare_fine_inputs(db, task: Task, project: Project, work_dir: Path, starte
     options = task.options or {}
     if project.input_type == "images":
         image_count = sum(1 for media in project.media if media.kind == "image")
-        if image_count < 3:
-            raise FineFailure("INSUFFICIENT_IMAGES", "Fine reconstruction requires an image project with at least 3 images")
+        if image_count < 8:
+            raise FineFailure("INSUFFICIENT_IMAGES", "LiteVGGT fine reconstruction requires an image project with at least 8 images")
         pipeline = normalize_fine_pipeline(str(options.get("fine_pipeline") or PIPELINE_NAME))
         if pipeline != PIPELINE_NAME:
             raise FineFailure("UNSUPPORTED_FINE_PIPELINE", f"Image fine reconstruction only supports {PIPELINE_NAME}")
@@ -300,7 +300,7 @@ def prepare_fine_inputs(db, task: Task, project: Project, work_dir: Path, starte
             started,
             f"normalized {normalized.output_count} images to RGB JPEG, max side {normalized.max_side}px",
         )
-        return pipeline, normalized.output_dir, None, normalized.metrics(), "checking MobileGS pycolmap + LM-RS runtime"
+        return pipeline, normalized.output_dir, None, normalized.metrics(), "checking LiteVGGT + FastGS/Deblur runtime"
 
     if project.input_type == "video":
         video_items = [media for media in project.media if media.kind == "video"]
@@ -327,8 +327,8 @@ def download_single_video(media, work_dir: Path) -> Path:
 
 def ensure_fine_weights(db, task: Task, project: Project, started: float, pipeline: str) -> None:
     specs = weights_for_pipeline(pipeline)
-    if pipeline == PIPELINE_NAME and not read_bool((task.options or {}).get("fine_edgs_enabled"), True):
-        specs = tuple(spec for spec in specs if not spec.relative_path.startswith("roma/"))
+    if pipeline == PIPELINE_NAME and read_bool((task.options or {}).get("fine_edgs_enabled"), False):
+        specs = specs + weights_for_pipeline("mobilegs_lmrs")
     update_task(db, task, project, "weights_checking", 8, started, f"checking {len(specs)} model weights for {pipeline}")
     if settings.model_auto_download:
         try:
@@ -342,7 +342,7 @@ def ensure_fine_weights(db, task: Task, project: Project, started: float, pipeli
         except ModelDownloadError as exc:
             raise FineFailure("MODEL_WEIGHT_DOWNLOAD_FAILED", str(exc)) from exc
     if pipeline == PIPELINE_NAME:
-        if read_bool((task.options or {}).get("fine_edgs_enabled"), True):
+        if read_bool((task.options or {}).get("fine_edgs_enabled"), False):
             ensure_roma_weights(Path(settings.model_cache_dir))
     elif pipeline == VIDEO_PIPELINE_NAME:
         ensure_video_artdeco_weights(Path(settings.model_cache_dir))

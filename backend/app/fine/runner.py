@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import get_settings
+from app.fine.litevggt_scene import build_litevggt_scene
 from app.fine.local_3dgs.scene_quality import assess_sfm_scene_quality
 from app.fine.local_3dgs.sparse_compensation import compensate_sparse_point_cloud
 from app.fine.option_utils import read_float, read_int
@@ -20,13 +21,13 @@ from app.preview.types import PreviewFailure
 from app.preview.utils import image_files
 
 
-PIPELINE_NAME = "mobilegs_lmrs"
+PIPELINE_NAME = "litevggt_fastgs_deblur_gsplat"
+LEGACY_PIPELINE_NAME = "mobilegs_lmrs"
 
 SOURCE_COMMITS_FINE = {
-    "PyCOLMAP": "3.12.6",
+    "LiteVGGT": SOURCE_COMMITS["LiteVGGT"],
     "Spark": SOURCE_COMMITS["Spark"],
-    "LM-RS": "cb40c7c06c2a60f8314ce095ad7b4513fbb33319",
-    "LM-RS Rasterizer": "c2529d3bb13bc38271710785c015a89d9d623237",
+    "gsplat": "1.5.3",
     "FastGS": "44e02a5c1d5e9ed64d2ecd4af1cbba14ac92150f",
     "Deblurring-3DGS": "e63366b8581c0fde2fda0ab1aea99518da2e2f10",
 }
@@ -41,12 +42,12 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
     assert_runtime_ready()
 
     image_count = len(image_files(ctx.input_dir))
-    if image_count < 3:
-        raise FineFailure("INSUFFICIENT_IMAGES", "Fine reconstruction requires at least 3 images")
+    if image_count < 8:
+        raise FineFailure("INSUFFICIENT_IMAGES", "LiteVGGT fine reconstruction requires at least 8 images")
 
     iterations = read_int(ctx.options.get("fine_iterations"), settings.fine_iterations, minimum=500, maximum=60_000)
     explicit_lm_start_iter = ctx.options.get("fine_lm_start_iter")
-    reject_ratio = read_float(ctx.options.get("fine_blur_reject_ratio"), 0.15, minimum=0.0, maximum=0.45)
+    reject_ratio = read_float(ctx.options.get("fine_blur_reject_ratio"), 0.0, minimum=0.0, maximum=0.45)
     colmap_features = read_int(ctx.options.get("fine_sift_max_num_features"), 8192, minimum=1024, maximum=32768)
     colmap_max_size = read_int(ctx.options.get("fine_colmap_max_image_size"), 1600, minimum=512, maximum=3200)
     colmap_threads = read_int(ctx.options.get("fine_colmap_threads"), 8, minimum=1, maximum=32)
@@ -67,7 +68,14 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
     scene_result = build_scene(ctx, train_input_dir, scene_dir, colmap_features, colmap_max_size, colmap_threads)
     if scene_result.backend == "pycolmap":
         scene_result.metrics.update(assess_sfm_scene_quality(scene_result.scene_dir, prefix="pycolmap").metrics)
-    if read_bool(ctx.options.get("fine_edgs_enabled"), True):
+    if scene_result.backend == "litevggt":
+        scene_result.metrics.update(
+            {
+                "sparse_compensation_enabled": False,
+                "sparse_compensation_reason": "litevggt_initialization",
+            }
+        )
+    elif read_bool(ctx.options.get("fine_edgs_enabled"), False):
         scene_result.metrics.update(
             {
                 "sparse_compensation_enabled": False,
@@ -77,8 +85,11 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
     else:
         scene_result.metrics.update(compensate_sparse_point_cloud(scene_result.scene_dir, ctx.options).metrics)
 
-    ctx_progress(ctx, "fine_mobilegs_train_start", 42, f"training MobileGS with {scene_result.backend} initialization")
+    ctx_progress(ctx, "fine_gaussian_train_start", 42, f"training Gaussian model with {scene_result.backend} initialization")
     from app.fine.mobilegs_trainer import train_mobile_3dgs
+    train_options = {**ctx.options}
+    if scene_result.backend == "litevggt" and "fine_edgs_enabled" not in train_options:
+        train_options["fine_edgs_enabled"] = False
 
     train_result = train_mobile_3dgs(
         scene_dir=scene_result.scene_dir,
@@ -86,7 +97,7 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         iterations=iterations,
         lm_start_iter=lm_start_iter,
         blur_mode=blur_mode,
-        options=ctx.options,
+        options=train_options,
         progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
     )
 
@@ -110,7 +121,7 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
 
     metrics = {
         "pipeline": PIPELINE_NAME,
-        "algorithm": "mobilegs_pycolmap_deblurmlp_lmrs",
+        "algorithm": "litevggt_fastgs_deblur_gaussian_training",
         "source_version": ctx.source_version,
         "source_commits": SOURCE_COMMITS_FINE,
         "input_images": image_count,
@@ -148,9 +159,17 @@ def build_scene(
     colmap_max_size: int,
     colmap_threads: int,
 ):
-    sfm_backend = str(ctx.options.get("fine_sfm_backend") or "pycolmap").strip().lower()
-    if sfm_backend not in {"pycolmap", "colmap"}:
+    sfm_backend = str(ctx.options.get("fine_sfm_backend") or "litevggt").strip().lower()
+    if sfm_backend not in {"litevggt", "pycolmap", "colmap"}:
         raise FineFailure("UNSUPPORTED_FINE_SFM_BACKEND", f"Unsupported fine SfM backend: {sfm_backend}")
+    if sfm_backend == "litevggt":
+        return build_litevggt_scene(
+            input_dir,
+            scene_dir,
+            model_cache_dir=ctx.model_cache_dir,
+            options=ctx.options,
+            progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
+        )
 
     result = build_pycolmap_scene(
         input_dir,
@@ -173,7 +192,10 @@ def normalize_fine_pipeline(value: str | None) -> str:
         "fused_quality": PIPELINE_NAME,
         "fused_quality_3dgs": PIPELINE_NAME,
         "mobilegs": PIPELINE_NAME,
-        "mobilegs_lmrs": PIPELINE_NAME,
+        LEGACY_PIPELINE_NAME: PIPELINE_NAME,
+        "litevggt_fastgs": PIPELINE_NAME,
+        "litevggt_fastgs_deblur": PIPELINE_NAME,
+        "litevggt_fastgs_deblur_gsplat": PIPELINE_NAME,
         "video_artdeco_litevggt": VIDEO_PIPELINE_NAME,
         "video_litevggt": VIDEO_PIPELINE_NAME,
         "artdeco_litevggt": VIDEO_PIPELINE_NAME,
@@ -192,13 +214,13 @@ def assert_runtime_ready() -> None:
     if not torch.cuda.is_available():
         raise FineFailure("GPU_RESOURCE_UNAVAILABLE", "CUDA GPU is required for fine reconstruction")
     missing = []
-    for module_name in ("diff_gaussian_rasterization", "simple_knn", "fused_ssim"):
+    for module_name in ("diff_gaussian_rasterization", "simple_knn", "fused_ssim", "gsplat"):
         try:
             __import__(module_name)
         except Exception as exc:
             missing.append(f"{module_name}: {exc}")
     if missing:
-        raise FineFailure("FINE_RUNTIME_UNAVAILABLE", f"MobileGS fine runtime dependency missing: {'; '.join(missing)}")
+        raise FineFailure("FINE_RUNTIME_UNAVAILABLE", f"Fine reconstruction runtime dependency missing: {'; '.join(missing)}")
     rasterizer = __import__("diff_gaussian_rasterization")
     if not hasattr(rasterizer, "GaussianRasterizer"):
         raise FineFailure("FINE_RUNTIME_UNAVAILABLE", "diff_gaussian_rasterization is missing GaussianRasterizer")

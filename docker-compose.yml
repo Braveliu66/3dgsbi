@@ -45,6 +45,7 @@ services:
       SECRET_KEY: change-this-for-deploy
       MODEL_CACHE_DIR: /model-cache
       MODEL_AUTO_DOWNLOAD: "false"
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -98,6 +99,8 @@ services:
       TORCHINDUCTOR_CACHE_DIR: /model-cache/torchinductor
       TORCHINDUCTOR_FX_GRAPH_CACHE: "1"
       TORCHINDUCTOR_AUTOGRAD_CACHE: "1"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
     depends_on:
       backend:
         condition: service_healthy
@@ -134,6 +137,8 @@ services:
       HF_HUB_CACHE: /model-cache/huggingface/hub
       XDG_CACHE_HOME: /model-cache/xdg
       TORCH_EXTENSIONS_DIR: /model-cache/torch_extensions
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
     depends_on:
       backend:
         condition: service_healthy
@@ -157,17 +162,22 @@ services:
         - type=local,dest=.docker-build-cache/frontend,mode=max
       args:
         NEXT_PUBLIC_API_BASE_URL: ""
-        NEXT_PUBLIC_UPLOAD_API_BASE_URL: "http://127.0.0.1:8000"
+        NEXT_PUBLIC_UPLOAD_API_BASE_URL: ""
         INTERNAL_API_BASE_URL: http://backend:8000
     environment:
       NEXT_PUBLIC_API_BASE_URL: ""
-      NEXT_PUBLIC_UPLOAD_API_BASE_URL: "http://127.0.0.1:8000"
+      NEXT_PUBLIC_UPLOAD_API_BASE_URL: ""
       INTERNAL_API_BASE_URL: http://backend:8000
+    command: ["npx", "next", "dev", "-H", "0.0.0.0", "-p", "3000"]
     depends_on:
       backend:
         condition: service_healthy
     ports:
       - "3001:3000"
+    volumes:
+      - ./frontend:/app
+      - frontend-node-modules:/app/node_modules
+      - frontend-next-cache:/app/.next
     healthcheck:
       test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
       interval: 10s
@@ -177,3 +187,5 @@ services:
 
 volumes:
   postgres-data:
+  frontend-node-modules:
+  frontend-next-cache:

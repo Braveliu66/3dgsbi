@@ -431,7 +431,7 @@ def voxel_downsample_points(
     return points[selected], colors[selected], confidence[selected]
 
 
-def _run_litevggt_reconstruction(
+def run_litevggt_reconstruction(
     *,
     input_dir: Path,
     checkpoint_path: Path,
@@ -674,7 +674,7 @@ def run_litevggt_pointcloud(
     selection_strategy: str = "per_frame",
     progress: Progress,
 ) -> dict[str, int | float | str | bool]:
-    reconstruction = _run_litevggt_reconstruction(
+    reconstruction = run_litevggt_reconstruction(
         input_dir=input_dir,
         checkpoint_path=checkpoint_path,
         keep_ratio=keep_ratio,

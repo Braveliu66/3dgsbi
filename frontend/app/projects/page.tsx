@@ -4,11 +4,8 @@ import Link from "next/link";
 import { FilePlus2, Image, Search, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api, formatBytes, mediaThumbnailUrl } from "@/lib/api";
-import { formatDateTime, inputTypeLabel, projectStatusLabel } from "@/lib/labels";
-import type { Project, ProjectStatus } from "@/lib/types";
-
-const PROJECT_LIST_THRESHOLD = 9;
-const PROJECT_LIST_COLUMNS = "34px minmax(0, 1.5fr) 150px 140px 110px 112px";
+import { formatDateTime, formatEta, inputTypeLabel, projectStatusLabel, taskTypeLabel } from "@/lib/labels";
+import type { Project, ProjectStatus, Task } from "@/lib/types";
 
 export default function ProjectsPage() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -44,7 +41,6 @@ export default function ProjectsPage() {
   const visibleProjectIds = useMemo(() => visible.map((project) => project.id), [visible]);
   const selectedCount = selectedProjectIds.size;
   const allVisibleSelected = visibleProjectIds.length > 0 && visibleProjectIds.every((id) => selectedProjectIds.has(id));
-  const listMode = visible.length > PROJECT_LIST_THRESHOLD;
 
   function toggleProject(projectId: string, selected: boolean) {
     setSelectedProjectIds((ids) => {
@@ -130,47 +126,12 @@ export default function ProjectsPage() {
           {error ? <div className="error-box">{error}</div> : null}
           {visible.length === 0 && !error ? <div className="empty-state">暂无匹配项目</div> : null}
 
-          {visible.length > 0 && listMode ? (
-            <div className="project-list">
-              <div className="list-row header" style={{ gridTemplateColumns: PROJECT_LIST_COLUMNS }}>
-                <input
-                  className="project-checkbox"
-                  type="checkbox"
-                  aria-label="选择当前结果"
-                  checked={allVisibleSelected}
-                  disabled={busy || visibleProjectIds.length === 0}
-                  onChange={(event) => toggleVisibleProjects(event.target.checked)}
-                />
-                <span>项目</span><span>状态</span><span>输入</span><span>占用</span><span>更新</span>
-              </div>
-              {visible.map((project) => (
-                <div className="list-row project-list-row" style={{ gridTemplateColumns: PROJECT_LIST_COLUMNS }} key={project.id}>
-                  <input
-                    className="project-checkbox"
-                    type="checkbox"
-                    aria-label={`选择项目 ${project.name}`}
-                    checked={selectedProjectIds.has(project.id)}
-                    disabled={busy}
-                    onChange={(event) => toggleProject(project.id, event.target.checked)}
-                  />
-                  <div className="stack project-list-title">
-                    <Link className="list-title-link truncate" href={`/projects/${project.id}`} title={project.name}><strong>{project.name}</strong></Link>
-                    <span className="muted small truncate" title={projectTagsLabel(project)}>{projectTagsLabel(project)}</span>
-                  </div>
-                  <span className={`status-pill ${project.status}`}>{projectStatusLabel(project.status)}</span>
-                  <span>{inputTypeLabel(project.input_type)}</span>
-                  <span className="muted small">{formatBytes(project.total_size_bytes)}</span>
-                  <span className="muted small">{formatDateTime(project.updated_at)}</span>
-                </div>
-              ))}
-            </div>
-          ) : null}
-
-          {visible.length > 0 && !listMode ? (
+          {visible.length > 0 ? (
             <div className="project-grid">
               {visible.map((project) => {
                 const cover = projectCover(project, brokenCoverIds);
                 const selected = selectedProjectIds.has(project.id);
+                const activeTask = projectActiveTask(project);
                 return (
                   <article className={`panel project-card${selected ? " selected" : ""}`} key={project.id}>
                     <label className="project-card-select" onClick={(event) => event.stopPropagation()}>
@@ -203,13 +164,15 @@ export default function ProjectsPage() {
                         <h3 className="truncate" title={project.name}>{project.name}</h3>
                         <span className={`status-pill ${project.status}`}>{projectStatusLabel(project.status)}</span>
                       </div>
-                      <p className="muted small truncate" title={projectTagsLabel(project)}>
+                      <p className="project-card-tags muted small truncate" title={projectTagsLabel(project)}>
                         {projectTagsLabel(project)}
                       </p>
-                      <div className="row between small muted">
-                        <span>{formatBytes(project.total_size_bytes)}</span>
+                      <div className="project-card-meta small muted">
                         <span>{formatDateTime(project.updated_at)}</span>
+                        <span>{inputTypeLabel(project.input_type)}</span>
+                        <span>{formatBytes(project.total_size_bytes)}</span>
                       </div>
+                      <ProjectTrainingProgress task={activeTask} />
                     </Link>
                   </article>
                 );
@@ -233,8 +196,35 @@ function projectTagsLabel(project: Project): string {
   return project.tags.join(" / ") || "无标签";
 }
 
+function projectActiveTask(project: Project): Task | null {
+  return project.tasks?.find((task) => task.status === "queued" || task.status === "running") ?? null;
+}
+
 function projectCover(project: Project, brokenCoverIds: Set<string>): { mediaId: string; url: string } | null {
-  const media = project.media?.find((item) => item.thumbnail_uri && !brokenCoverIds.has(item.id));
+  const media = project.media?.find((item) => item.kind === "image" && item.thumbnail_uri && !brokenCoverIds.has(item.id))
+    ?? project.media?.find((item) => item.thumbnail_uri && !brokenCoverIds.has(item.id));
   const url = media ? mediaThumbnailUrl(media) : null;
   return media && url ? { mediaId: media.id, url } : null;
+}
+
+function ProjectTrainingProgress({ task }: { task: Task | null }) {
+  if (!task) return null;
+  const progress = Math.max(0, Math.min(100, Math.round(task.progress || 0)));
+  return (
+    <div className="project-training">
+      <div className="row between small">
+        <span className="truncate" title={task.current_stage || task.type}>
+          {taskTypeLabel(task.type)} · {task.current_stage || "等待调度"}
+        </span>
+        <span>{progress}%</span>
+      </div>
+      <div className="progress-track" aria-label="训练进度">
+        <span style={{ width: `${progress}%` }} />
+      </div>
+      <div className="row between small muted">
+        <span>{task.status === "queued" ? "排队中" : "训练中"}</span>
+        <span>剩余 {formatEta(task.eta_seconds)}</span>
+      </div>
+    </div>
+  );
 }

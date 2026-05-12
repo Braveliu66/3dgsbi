@@ -30,15 +30,14 @@ def import_fine_runtime():
 
 
 class FineRuntimeTests(unittest.TestCase):
-    def test_fine_runtime_registers_pycolmap_edgs_runtime(self) -> None:
+    def test_fine_runtime_registers_litevggt_runtime(self) -> None:
         algorithms_source = (BACKEND_ROOT / "app" / "algorithms.py").read_text(encoding="utf-8")
         fine_status_block = algorithms_source.split("def fine_runtime_status", 1)[1].split("def ", 1)[0]
 
-        self.assertIn("pycolmap", fine_status_block)
-        self.assertIn("romatch", fine_status_block)
-        self.assertIn("sklearn", fine_status_block)
+        self.assertIn("litevggt_runtime", fine_status_block)
+        self.assertIn("transformer_engine", fine_status_block)
+        self.assertIn("gsplat", fine_status_block)
         self.assertNotIn("amb3r", fine_status_block)
-        self.assertNotIn("transformer_engine", fine_status_block)
 
     def test_trainer_uses_local_runtime_not_lmrs_repo_training(self) -> None:
         trainer_source = (BACKEND_ROOT / "app" / "fine" / "mobilegs_trainer.py").read_text(encoding="utf-8")
@@ -139,11 +138,12 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertNotIn("target: worker-preview", compose_source)
         self.assertNotIn("target: worker-fine", compose_source)
 
-    def test_legacy_fine_pipeline_aliases_to_mobilegs_lmrs(self) -> None:
+    def test_legacy_fine_pipeline_aliases_to_litevggt_fastgs(self) -> None:
         *_, normalize_fine_pipeline = import_fine_runtime()
 
-        self.assertEqual(normalize_fine_pipeline("fused_quality_3dgs"), "mobilegs_lmrs")
-        self.assertEqual(normalize_fine_pipeline(None), "mobilegs_lmrs")
+        self.assertEqual(normalize_fine_pipeline("fused_quality_3dgs"), "litevggt_fastgs_deblur_gsplat")
+        self.assertEqual(normalize_fine_pipeline("mobilegs_lmrs"), "litevggt_fastgs_deblur_gsplat")
+        self.assertEqual(normalize_fine_pipeline(None), "litevggt_fastgs_deblur_gsplat")
 
     def test_video_fine_pipeline_aliases_to_artdeco_speed3r(self) -> None:
         *_, normalize_fine_pipeline = import_fine_runtime()
@@ -270,15 +270,15 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertEqual(summary.mode, "sharp")
         self.assertFalse(deblur_mlp_enabled_by_default(summary.mode, {}))
 
-    def test_sfm_defaults_to_pycolmap(self) -> None:
+    def test_sfm_defaults_to_litevggt(self) -> None:
         _, SceneBuildResult, _, build_scene, *_ = import_fine_runtime()
-        expected = SceneBuildResult(Path("scene"), "pycolmap", 8, 8, 100, {"sfm_backend": "pycolmap"})
+        expected = SceneBuildResult(Path("scene"), "litevggt", 8, 8, 100, {"sfm_backend": "litevggt"})
         ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={}, progress=None)
-        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_pycolmap_scene", return_value=expected) as pycolmap:
+        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_litevggt_scene", return_value=expected) as litevggt:
             result = build_scene(ctx, Path(tmp), Path(tmp) / "scene", 8192, 1600, 8)
 
-        self.assertEqual(result.backend, "pycolmap")
-        pycolmap.assert_called_once()
+        self.assertEqual(result.backend, "litevggt")
+        litevggt.assert_called_once()
 
     def test_explicit_pycolmap_backend_uses_same_default_path(self) -> None:
         _, SceneBuildResult, _, build_scene, *_ = import_fine_runtime()
@@ -304,18 +304,19 @@ class FineRuntimeTests(unittest.TestCase):
 
     def test_removed_fine_sfm_backends_are_unsupported(self) -> None:
         *_, build_scene, _, _ = import_fine_runtime()
-        ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={"fine_sfm_backend": "litevggt"}, progress=None)
+        ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={"fine_sfm_backend": "amb3r"}, progress=None)
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(FineFailure) as raised:
                 build_scene(ctx, Path(tmp), Path(tmp) / "scene", 8192, 1600, 8)
 
         self.assertEqual(raised.exception.code, "UNSUPPORTED_FINE_SFM_BACKEND")
 
-    def test_pycolmap_weight_registration_uses_only_edgs_weights(self) -> None:
+    def test_fine_weight_registration_uses_litevggt_by_default(self) -> None:
         fine_worker_source = (BACKEND_ROOT / "app" / "fine_worker.py").read_text(encoding="utf-8")
         self.assertIn("download_model_weights", fine_worker_source)
         self.assertIn("weights_for_pipeline", fine_worker_source)
         self.assertIn("ensure_roma_weights", fine_worker_source)
+        self.assertIn('"litevggt/te_dict.pt"', (BACKEND_ROOT / "app" / "preview" / "weights.py").read_text(encoding="utf-8"))
         self.assertNotIn("ensure_amb3r_weight", fine_worker_source)
 
     def test_preview_litevggt_and_fine_runner_imports_are_isolated(self) -> None:

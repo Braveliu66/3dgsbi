@@ -427,6 +427,34 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
                         },
                     )
                     upload_db.add(ply_artifact)
+                for metric_key, kind, file_name in (
+                    ("intermediate_splats_ply", "debug_splats_ply", "preview_splats.ply"),
+                    ("preview_meta_json", "preview_meta_json", "preview_meta.json"),
+                ):
+                    path_value = result.metrics.get(metric_key)
+                    path = Path(path_value) if isinstance(path_value, str) else None
+                    if not path or not path.exists() or path.stat().st_size <= 0:
+                        continue
+                    artifact_key = storage_key("users", project.owner_id, "projects", project.id, "preview", task.id, file_name)
+                    artifact_uri = storage.upload_path(path, artifact_key)
+                    upload_db.add(
+                        Artifact(
+                            project_id=project.id,
+                            task_id=task.id,
+                            kind=kind,
+                            object_uri=artifact_uri,
+                            file_name=file_name,
+                            file_size=path.stat().st_size,
+                            checksum=sha256_path(path),
+                            source_version=source_version,
+                            metadata_json={
+                                "pipeline": pipeline,
+                                "source_version": source_version,
+                                "generated_by": worker_id,
+                                "source_commits": result.source_commits,
+                            },
+                        )
+                    )
                 task.status = "succeeded"
                 task.progress = 100
                 task.current_stage = "preview_ready"
@@ -635,11 +663,23 @@ def preview_artifact_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "lingbot_keyframes_only_points",
         "lingbot_predictions_dir",
         "lingbot_point_source",
+        "lingbot_depth_reprojection_fallback",
         "lingbot_ply_format",
         "lingbot_points_before_downsample",
         "lingbot_points_after_downsample",
         "lingbot_point_frame_count",
+        "point_source",
+        "point_count_raw",
+        "point_count_exported",
         "point_count",
+        "bbox_min",
+        "bbox_max",
+        "bbox_center",
+        "bbox_radius",
+        "quality_warning",
+        "intermediate_points_ply_size",
+        "intermediate_splats_ply_size",
+        "preview_meta_json_size",
         "cuda_memory_peak_mb",
     )
     return {key: metrics.get(key) for key in keys if key in metrics}

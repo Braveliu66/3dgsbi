@@ -60,7 +60,7 @@ def train_mobile_3dgs(
             depths="",
             resolution=read_int(options.get("fine_train_resolution"), -1, minimum=-1, maximum=4096),
             train_test_exp=False,
-            data_device="cuda",
+            data_device=str(options.get("fine_data_device") or "cpu"),
             eval=False,
             sh_degree=3,
             white_background=False,
@@ -156,7 +156,7 @@ def train_mobile_3dgs(
                 last_ssim = 0.0
                 if iteration % max(50, min(500, iterations // 20 or 50)) == 0 or iteration == iterations:
                     mapped_progress = 42 + int(iteration / max(1, iterations) * 42)
-                    progress("fine_mobilegs_train", min(84, mapped_progress), f"trained {iteration}/{iterations} iterations, lm_loss={ema_loss:.5f}")
+                    progress("fine_gaussian_train", min(84, mapped_progress), f"trained {iteration}/{iterations} iterations, lm_loss={ema_loss:.5f}")
                 continue
 
             if not train_stack:
@@ -222,7 +222,7 @@ def train_mobile_3dgs(
 
             if iteration % max(50, min(500, iterations // 20 or 50)) == 0 or iteration == iterations:
                 mapped_progress = 42 + int(iteration / max(1, iterations) * 42)
-                progress("fine_mobilegs_train", min(84, mapped_progress), f"trained {iteration}/{iterations} iterations, loss={ema_loss:.5f}")
+                progress("fine_gaussian_train", min(84, mapped_progress), f"trained {iteration}/{iterations} iterations, loss={ema_loss:.5f}")
 
         with torch.no_grad():
             policy.update_multiview_scores(
@@ -246,8 +246,11 @@ def train_mobile_3dgs(
             iterations=iterations,
             point_count=int(gaussians.get_xyz.shape[0]),
             metrics={
-                "training_backend": "local_3dgs_adam_fastgs_deblur" if deblur_state.enabled else "local_3dgs_adam_fastgs",
+                "training_backend": "litevggt_initialized_local_3dgs_fastgs_deblur" if deblur_state.enabled else "litevggt_initialized_local_3dgs_fastgs",
                 "local_3dgs_root": str(runtime.root),
+                "raster_backend": "diff_gaussian_rasterization",
+                "target_raster_backend": "gsplat",
+                "data_device": dataset.data_device,
                 "training_elapsed_seconds": elapsed,
                 "final_gaussians": int(gaussians.get_xyz.shape[0]),
                 "last_l1_loss": last_l1,
@@ -265,7 +268,7 @@ def train_mobile_3dgs(
                 "lmrs_last_loss": lm_last_loss,
                 "lmrs_cg_iter": read_int(options.get("fine_lmrs_cg_iter"), 8, minimum=1, maximum=64) if lm_iterations else None,
                 "fastergs_backend": "compact_box_cuda_if_available",
-                "requested_algorithms": ["PyCOLMAP", "Deblurring-3DGS", "FastGS", "FasterGS", "LM-RS"],
+                "requested_algorithms": ["LiteVGGT", "Deblurring-3DGS", "FastGS", "gsplat"],
                 "effective_algorithms": effective_algorithms(deblur_state.enabled, lm_iterations, policy),
                 **policy.metrics(),
             },
@@ -483,9 +486,11 @@ def build_lmrs_options(options: dict[str, Any]) -> SimpleNamespace:
 
 def effective_algorithms(deblur_enabled: bool, lm_iterations: int, policy: FastGSPolicy) -> list[str]:
     algorithms = [
-        "PyCOLMAP",
+        "LiteVGGT_initialization",
         "Deblurring-3DGS_GTnet" if deblur_enabled else "Deblurring-3DGS_disabled",
         "FastGS_official_metric_map" if policy.official_metric_calls > 0 else "FastGS_local_multiview_score",
+        "diff_gaussian_rasterization_active",
+        "gsplat_target_backend",
     ]
     if lm_iterations > 0:
         algorithms.append("LM-RS_local_matrix_free")

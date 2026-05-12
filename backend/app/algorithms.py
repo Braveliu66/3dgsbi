@@ -61,21 +61,19 @@ ALGORITHMS: list[dict[str, Any]] = [
         "notes": "Spark-readable SPZ conversion/validation.",
     },
     {
-        "name": "MobileGS Fine (pycolmap + EDGS/RoMA + DeblurMLP)",
-        "repo_url": "https://github.com/colmap/pycolmap",
-        "license": "BSD-3-Clause plus local fine reconstruction integrations",
-        "commit_hash_setting": None,
+        "name": "Image Fine (LiteVGGT + FastGS/Deblur)",
+        "repo_url": "https://github.com/GarlicBa/LiteVGGT-repo",
+        "license": "MIT plus local fine reconstruction integrations",
+        "commit_hash_setting": "litevggt_repo_commit",
         "local_path": FINE_ROOT / "runner.py",
         "enabled": True,
         "weight_paths": [
-            "roma/roma_outdoor.pth",
-            "roma/roma_indoor.pth",
-            "roma/dinov2_vitl14_pretrain.pth",
+            "litevggt/te_dict.pt",
         ],
         "commands": {},
         "source_type": "system",
-        "license_notice": "Image fine reconstruction uses pycolmap for COLMAP-compatible SfM and keeps Deblurring-3DGS GTnet ideas. Preview still uses LiteVGGT.",
-        "notes": "Default image fine reconstruction pipeline: JPG/PNG normalization, pycolmap COLMAP-compatible sparse/0, EDGS/RoMA dense-correspondence Gaussian initialization, DeblurMLP-MobileGS warmup training, FastGS-style final pruning, and Spark SPZ conversion.",
+        "license_notice": "Image fine reconstruction uses LiteVGGT as the geometry initializer and keeps Deblurring-3DGS GTnet ideas. RoMA/EDGS is optional and off by default.",
+        "notes": "Default image fine reconstruction pipeline: JPG/PNG normalization, LiteVGGT camera/depth/point initialization, local Gaussian training with FastGS-style densify/prune, DeblurMLP refinement, and Spark SPZ conversion.",
     },
     {
         "name": "Video Fine ARTDECO + Speed3R-Pi3",
@@ -204,7 +202,7 @@ def runtime_preflight(db: Session, settings: Settings | None = None) -> dict[str
                     weights_ready = False
             if not module_status.get("available", True):
                 issues.append(f"bundled module import failed: {module_status.get('error')}")
-            if item.name == "MobileGS Fine (pycolmap + EDGS/RoMA + DeblurMLP)":
+            if item.name == "Image Fine (LiteVGGT + FastGS/Deblur)":
                 fine_runtime = fine_runtime_status()
                 extensions_ready = bool(fine_runtime["available"] or fine_workers["available"])
                 if not extensions_ready:
@@ -340,7 +338,7 @@ def bundled_module_status(name: str) -> dict[str, Any]:
     modules = {
         "LiteVGGT": "app.preview.vendor.litevggt_runtime",
         "LingBot-Map Video Preview": "app.preview.adapters.lingbot",
-        "MobileGS Fine (pycolmap + EDGS/RoMA + DeblurMLP)": "app.fine.runner",
+        "Image Fine (LiteVGGT + FastGS/Deblur)": "app.fine.runner",
         "Video Fine ARTDECO + Speed3R-Pi3": "app.fine.video.pipeline",
         "Deblurring-3DGS GTnet": "app.fine.deblur_mlp",
         "Spark SPZ": "app.preview.io.spz",
@@ -367,9 +365,9 @@ def fine_runtime_status() -> dict[str, Any]:
     torch_status = torch_info()
     spark_status = spark_converter_status()
     modules = {
-        "pycolmap": import_check("pycolmap"),
-        "romatch": import_check("romatch"),
-        "sklearn": import_check("sklearn"),
+        "transformer_engine": import_check("transformer_engine"),
+        "litevggt_runtime": litevggt_runtime_status(),
+        "gsplat": import_check("gsplat"),
         "deblur_mlp": import_check("app.fine.deblur_mlp"),
         "diff_gaussian_rasterization": import_check("diff_gaussian_rasterization"),
         "simple_knn": import_check("simple_knn"),
@@ -386,7 +384,7 @@ def fine_runtime_status() -> dict[str, Any]:
         "torch_cuda": torch_status,
         "spark_spz": spark_status,
         **modules,
-        "error": None if available else "CUDA torch/Spark SPZ/pycolmap/EDGS-RoMA/DeblurMLP/diff_gaussian_rasterization/simple_knn/fused_ssim check failed",
+        "error": None if available else "CUDA torch/Spark SPZ/LiteVGGT/gsplat/DeblurMLP/diff_gaussian_rasterization/simple_knn/fused_ssim check failed",
     }
 
 

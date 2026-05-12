@@ -140,6 +140,7 @@ class WeightDownloadTests(unittest.TestCase):
         self.assertEqual([item.relative_path for item in weights_for_pipeline("litevggt_spz")], ["litevggt/te_dict.pt"])
         self.assertEqual([item.relative_path for item in weights_for_pipeline("litevggt_edgs")], [])
         self.assertEqual([item.relative_path for item in weights_for_pipeline("lingbot_map_spz")], ["lingbot/lingbot-map-long.pt"])
+        self.assertEqual([item.relative_path for item in weights_for_pipeline("litevggt_fastgs_deblur_gsplat")], ["litevggt/te_dict.pt"])
         self.assertEqual(
             [item.relative_path for item in weights_for_pipeline("mobilegs_lmrs")],
             [

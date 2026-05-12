@@ -60,27 +60,29 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             )
 
             def fake_runtime(**kwargs):
-                self.assertEqual(kwargs["fps"], 2)
-                self.assertEqual(kwargs["max_frames"], 128)
+                self.assertEqual(kwargs["fps"], 5)
+                self.assertEqual(kwargs["max_frames"], 160)
                 self.assertEqual(kwargs["image_size"], 518)
-                self.assertEqual(kwargs["mode"], "auto")
+                self.assertEqual(kwargs["mode"], "windowed")
                 self.assertEqual(kwargs["camera_iterations"], 1)
-                self.assertIsNone(kwargs["keyframe_interval"])
+                self.assertEqual(kwargs["keyframe_interval"], 2)
                 self.assertEqual(kwargs["window_size"], 64)
-                self.assertEqual(kwargs["overlap_keyframes"], 4)
-                self.assertEqual(kwargs["num_scale_frames"], 2)
-                self.assertEqual(kwargs["max_points"], 2_000_000)
-                self.assertEqual(kwargs["frame_stride"], 2)
-                self.assertEqual(kwargs["pixel_stride"], 6)
-                self.assertEqual(kwargs["conf_percentile"], 10.0)
+                self.assertEqual(kwargs["overlap_keyframes"], 12)
+                self.assertEqual(kwargs["num_scale_frames"], 4)
+                self.assertEqual(kwargs["max_points"], 600_000)
+                self.assertEqual(kwargs["frame_stride"], 1)
+                self.assertEqual(kwargs["pixel_stride"], 8)
+                self.assertEqual(kwargs["conf_percentile"], 45.0)
                 self.assertEqual(kwargs["min_conf"], 1e-5)
-                self.assertFalse(kwargs["compile_model"])
+                self.assertTrue(kwargs["compile_model"])
                 self.assertFalse(kwargs["save_predictions"])
                 self.assertTrue(kwargs["keyframes_only_points"])
                 self.assertFalse(kwargs["allow_sdpa_fallback"])
                 self.assertEqual(kwargs["min_inference_fps"], 3.0)
-                kwargs["output_ply"].parent.mkdir(parents=True, exist_ok=True)
-                kwargs["output_ply"].write_bytes(b"ply\nformat binary_little_endian 1.0\nend_header\n")
+                kwargs["output_points_ply"].parent.mkdir(parents=True, exist_ok=True)
+                kwargs["output_points_ply"].write_bytes(b"ply\nformat binary_little_endian 1.0\nend_header\n")
+                kwargs["output_splats_ply"].write_bytes(b"ply\nformat binary_little_endian 1.0\nend_header\n")
+                kwargs["output_meta_json"].write_text("{}", encoding="utf-8")
                 return {
                     "adapter": "lingbot_map_spz",
                     "lingbot_model": "lingbot-map-long.pt",
@@ -88,6 +90,7 @@ class LingBotVideoPreviewTests(unittest.TestCase):
                     "lingbot_inference_mode": "streaming",
                     "lingbot_keyframe_interval": 1,
                     "lingbot_inference_fps": 3.25,
+                    "lingbot_point_source": "world_points",
                     "point_count": 42,
                     "cuda_memory_peak_mb": 123.0,
                 }
@@ -95,7 +98,7 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             with patch.object(lingbot, "run_lingbot_video_preview", side_effect=fake_runtime), patch.object(
                 lingbot,
                 "convert_ply_to_spz",
-                side_effect=lambda _ply, spz: (spz.parent.mkdir(parents=True, exist_ok=True), spz.write_bytes(b"spz"), 11)[2],
+                side_effect=lambda ply, spz: (self.assertEqual(ply.name, "preview_splats.ply"), spz.parent.mkdir(parents=True, exist_ok=True), spz.write_bytes(b"spz"), 11)[3],
             ):
                 result = lingbot.run(ctx)
 
@@ -103,6 +106,7 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             self.assertTrue(result.intermediate_ply and result.intermediate_ply.exists())
             self.assertEqual(result.splat_count, 11)
             self.assertEqual(result.metrics["adapter"], "lingbot_map_spz")
+            self.assertEqual(result.metrics["point_source"], "world_points")
             self.assertEqual(result.metrics["lingbot_sampled_frames"], 8)
             self.assertEqual(result.metrics["lingbot_inference_fps"], 3.25)
             self.assertEqual(result.source_commits["LingBot-Map"], "4cd986009b9adeded8a4e740919221940dedeffe")
@@ -235,7 +239,7 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             np.testing.assert_allclose(records["x"], np.array([1, 2, 3, 4], dtype=np.float32))
             np.testing.assert_allclose(records["rot_0"], np.ones(4, dtype=np.float32))
 
-    def test_lingbot_npz_to_gaussian_splat_ply_prefers_depth_points(self) -> None:
+    def test_lingbot_npz_to_gaussian_splat_ply_prefers_model_world_points(self) -> None:
         from app.preview.vendor.lingbot_runtime import gaussian_splat_record_dtype, write_spark_plain_ply_from_npz
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -280,21 +284,49 @@ class LingBotVideoPreviewTests(unittest.TestCase):
 
             payload = output_ply.read_bytes()
             header, body = payload.split(b"end_header\n", 1)
-            self.assertIn(b"element vertex 2", header)
+            self.assertIn(b"element vertex 4", header)
             self.assertIn(b"property float f_dc_2", header)
             self.assertIn(b"property float scale_2", header)
             self.assertIn(b"property float rot_3", header)
-            self.assertEqual(metrics["point_count"], 2)
+            self.assertEqual(metrics["point_count"], 4)
             self.assertEqual(metrics["lingbot_ply_format"], "gaussian_splat")
-            self.assertEqual(metrics["lingbot_point_source"], "world_points_from_depth")
+            self.assertEqual(metrics["lingbot_point_source"], "world_points")
 
             records = np.frombuffer(
                 body,
                 dtype=gaussian_splat_record_dtype(),
             )
-            self.assertEqual(records.shape[0], 2)
-            np.testing.assert_allclose(records["x"], np.array([3, 4], dtype=np.float32))
-            np.testing.assert_allclose(records["rot_0"], np.ones(2, dtype=np.float32))
+            self.assertEqual(records.shape[0], 4)
+            np.testing.assert_allclose(records["x"], np.full(4, 99, dtype=np.float32))
+            np.testing.assert_allclose(records["rot_0"], np.ones(4, dtype=np.float32))
+
+    def test_lingbot_falls_back_to_depth_points_only_when_world_points_missing(self) -> None:
+        from app.preview.vendor.lingbot_runtime import write_spark_plain_ply_from_npz
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            predictions = root / "predictions"
+            predictions.mkdir()
+            np.savez(
+                predictions / "frame_000000.npz",
+                world_points_from_depth=np.ones((2, 2, 3), dtype=np.float32),
+                images=np.full((3, 2, 2), 255, dtype=np.uint8),
+                depth_conf=np.ones((2, 2), dtype=np.float32),
+            )
+
+            metrics = write_spark_plain_ply_from_npz(
+                predictions,
+                root / "preview_splats.ply",
+                frame_stride=1,
+                pixel_stride=1,
+                conf_percentile=0,
+                min_conf=0,
+                max_points=0,
+            )
+
+            self.assertEqual(metrics["lingbot_point_source"], "world_points_from_depth")
+            self.assertTrue(metrics["lingbot_depth_reprojection_fallback"])
+            self.assertIn("depth reprojection fallback", metrics["quality_warning"])
 
     def test_lingbot_detects_torch_compile_cudagraph_overwrite(self) -> None:
         from app.preview.vendor.lingbot_runtime import is_cudagraph_overwrite_error

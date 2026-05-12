@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import json
 import math
 import time
 from dataclasses import dataclass
@@ -14,12 +15,12 @@ from app.preview.types import PreviewFailure
 
 Progress = Callable[[str, int, str], None]
 LINGBOT_MAP_COMMIT = "4cd986009b9adeded8a4e740919221940dedeffe"
-POINT_KEYS = ("world_points_from_depth", "world_points", "points")
+POINT_KEYS = ("world_points", "points", "world_points_from_depth")
 COLOR_KEYS = ("images", "image", "rgb", "colors")
 CONF_KEYS_BY_POINT = {
+    "world_points": ("world_points_conf", "conf"),
+    "points": ("conf", "world_points_conf"),
     "world_points_from_depth": ("depth_conf", "world_points_conf", "conf"),
-    "world_points": ("world_points_conf", "depth_conf", "conf"),
-    "points": ("conf", "world_points_conf", "depth_conf"),
 }
 _BATCHED_NDIMS = {
     "pose_enc": 3,
@@ -42,6 +43,9 @@ OOM_FALLBACK_WINDOW_SIZE = 32
 OOM_FALLBACK_KEYFRAME_INTERVAL = 2
 DEFAULT_KV_CACHE_SLIDING_WINDOW = 16
 OOM_FALLBACK_KV_CACHE_SLIDING_WINDOW = 8
+DEFAULT_PREVIEW_SPLAT_SCALE = 0.006
+DEFAULT_PREVIEW_OPACITY = 0.65
+SH_C0 = np.float32(0.28209479177387814)
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,8 +76,11 @@ def run_lingbot_video_preview(
     *,
     video_path: Path,
     model_path: Path,
-    output_ply: Path,
     work_dir: Path,
+    output_ply: Path | None = None,
+    output_points_ply: Path | None = None,
+    output_splats_ply: Path | None = None,
+    output_meta_json: Path | None = None,
     fps: int,
     max_frames: int,
     image_size: int,
@@ -204,10 +211,12 @@ def run_lingbot_video_preview(
         closed_form_inverse_se3_general=closed_form_inverse_se3_general,
         torch_module=torch,
     )
-    attach_depth_world_points(
-        pred_np,
-        unproject_depth_map_to_point_map=unproject_depth_map_to_point_map,
-    )
+    depth_reprojection_fallback = "world_points" not in pred_np and "points" not in pred_np
+    if depth_reprojection_fallback:
+        attach_depth_world_points(
+            pred_np,
+            unproject_depth_map_to_point_map=unproject_depth_map_to_point_map,
+        )
     pred_np["is_keyframe"] = build_keyframe_mask(
         int(images.shape[0]),
         num_scale_frames=int(inference_metrics["lingbot_num_scale_frames"]),
@@ -215,28 +224,36 @@ def run_lingbot_video_preview(
     )
 
     predictions_dir = save_predictions_npz(pred_np, work_dir / "predictions") if save_predictions else None
-    progress("lingbot_pointcloud", 72, "writing Spark plain PLY from LingBot-Map predictions")
+    splats_ply = output_splats_ply or output_ply
+    if splats_ply is None:
+        splats_ply = work_dir / "preview_splats.ply"
+    points_ply = output_points_ply
+    progress("lingbot_pointcloud", 72, "writing LingBot-Map debug points and Spark splat PLY")
     if predictions_dir is not None:
         point_metrics = write_spark_plain_ply_from_npz(
             predictions_dir,
-            output_ply,
+            splats_ply,
             frame_stride=frame_stride,
             pixel_stride=pixel_stride,
             conf_percentile=conf_percentile,
             min_conf=min_conf,
             max_points=max_points,
             keyframes_only_points=keyframes_only_points,
+            output_points_ply=points_ply,
+            output_meta_json=output_meta_json,
         )
     else:
         point_metrics = write_spark_plain_ply_from_arrays(
             pred_np,
-            output_ply,
+            splats_ply,
             frame_stride=frame_stride,
             pixel_stride=pixel_stride,
             conf_percentile=conf_percentile,
             min_conf=min_conf,
             max_points=max_points,
             keyframes_only_points=keyframes_only_points,
+            output_points_ply=points_ply,
+            output_meta_json=output_meta_json,
         )
     point_count = int(point_metrics["point_count"])
 
@@ -263,6 +280,12 @@ def run_lingbot_video_preview(
         "lingbot_save_predictions": bool(save_predictions),
         "lingbot_keyframes_only_points": bool(keyframes_only_points),
         "lingbot_predictions_dir": str(predictions_dir) if predictions_dir else None,
+        "lingbot_depth_reprojection_fallback": bool(depth_reprojection_fallback),
+        "quality_warning": (
+            "LingBot point head did not provide world_points; preview used depth reprojection fallback and may show ghosting."
+            if point_metrics.get("lingbot_point_source") == "world_points_from_depth"
+            else None
+        ),
         "point_count": point_count,
         "lingbot_duration_seconds": round(time.monotonic() - started, 3),
         **point_metrics,
@@ -431,7 +454,7 @@ def run_lingbot_inference_profile(
         num_scale_frames=profile.num_scale_frames,
         window_size=profile.window_size,
         kv_cache_sliding_window=profile.kv_cache_sliding_window,
-        enable_point=False,
+        enable_point=True,
     )
     model_image_size = int(getattr(model, "_lingbot_model_image_size", DEFAULT_LINGBOT_MODEL_IMAGE_SIZE))
     aggregator_dtype = cast_lingbot_aggregator_for_inference(model, dtype)
@@ -497,7 +520,7 @@ def run_lingbot_inference_profile(
             num_scale_frames=profile.num_scale_frames,
             window_size=profile.window_size,
             kv_cache_sliding_window=profile.kv_cache_sliding_window,
-            enable_point=False,
+            enable_point=True,
         )
         model_image_size = int(getattr(model, "_lingbot_model_image_size", DEFAULT_LINGBOT_MODEL_IMAGE_SIZE))
         aggregator_dtype = cast_lingbot_aggregator_for_inference(model, dtype)
@@ -521,7 +544,7 @@ def run_lingbot_inference_profile(
         "lingbot_flashinfer_available": bool(flashinfer_found),
         "lingbot_allow_sdpa_fallback": bool(allow_sdpa_fallback),
         "lingbot_sdpa_fallback_active": bool(use_sdpa),
-        "lingbot_enable_point": False,
+        "lingbot_enable_point": True,
         "lingbot_aggregator_dtype": str(aggregator_dtype).replace("torch.", ""),
         "lingbot_compile": bool(compile_active),
         "lingbot_compile_requested": bool(compile_requested),
@@ -648,7 +671,7 @@ def load_lingbot_model(
     num_scale_frames: int,
     window_size: int,
     kv_cache_sliding_window: int,
-    enable_point: bool = False,
+    enable_point: bool = True,
 ):
     try:
         import torch
@@ -941,52 +964,43 @@ def write_spark_plain_ply_from_arrays(
     min_conf: float,
     max_points: int,
     keyframes_only_points: bool = False,
+    output_points_ply: Path | None = None,
+    output_meta_json: Path | None = None,
 ) -> dict[str, Any]:
     frame_indices = strided_frame_indices(prediction_frame_count(predictions), frame_stride)
-    selected_indices = []
-    total_points = 0
+    selected_indices: list[int] = []
+    point_batches = []
+    color_batches = []
+    conf_batches = []
     point_source = None
     for frame_index, frame in iter_prediction_frames(predictions, frame_indices):
         if not should_export_prediction_frame(frame, keyframes_only_points=keyframes_only_points):
             continue
-        points, _, source = extract_frame_points(
+        points, colors, conf, source = extract_frame_points(
             frame,
             pixel_stride=pixel_stride,
             conf_percentile=conf_percentile,
             min_conf=min_conf,
             source_name=f"in-memory frame {frame_index}",
         )
-        total_points += int(points.shape[0])
+        point_batches.append(points)
+        color_batches.append(colors)
+        conf_batches.append(conf)
         point_source = point_source or source
         selected_indices.append(frame_index)
 
-    if not selected_indices:
-        raise PreviewFailure("LINGBOT_PREDICTIONS_MISSING", "No LingBot-Map frames selected for point export")
-    if total_points <= 0:
-        raise PreviewFailure("LINGBOT_EMPTY_POINT_CLOUD", "LingBot-Map produced no valid 3D points")
-
-    target_points = total_points if max_points <= 0 else min(total_points, int(max_points))
-    written = write_spark_plain_ply_records(
-        selected_indices,
+    return write_lingbot_preview_assets(
+        point_batches,
+        color_batches,
+        conf_batches,
         output_ply,
-        total_points=total_points,
-        target_points=target_points,
-        extract_points=lambda frame_index: extract_prediction_frame_points(
-            predictions,
-            frame_index,
-            pixel_stride=pixel_stride,
-            conf_percentile=conf_percentile,
-            min_conf=min_conf,
-        ),
+        point_source=point_source,
+        frame_count=len(selected_indices),
+        max_points=max_points,
+        empty_selection_message="No LingBot-Map frames selected for point export",
+        output_points_ply=output_points_ply,
+        output_meta_json=output_meta_json,
     )
-    return {
-        "point_count": int(written),
-        "lingbot_point_source": point_source,
-        "lingbot_ply_format": "gaussian_splat",
-        "lingbot_points_before_downsample": int(total_points),
-        "lingbot_points_after_downsample": int(written),
-        "lingbot_point_frame_count": len(selected_indices),
-    }
 
 
 def write_spark_plain_ply_from_npz(
@@ -999,6 +1013,8 @@ def write_spark_plain_ply_from_npz(
     min_conf: float,
     max_points: int,
     keyframes_only_points: bool = False,
+    output_points_ply: Path | None = None,
+    output_meta_json: Path | None = None,
 ) -> dict[str, Any]:
     files = sorted(predictions_dir.glob("frame_*.npz"))
     files = files[:: max(1, int(frame_stride))]
@@ -1006,64 +1022,122 @@ def write_spark_plain_ply_from_npz(
         raise PreviewFailure("LINGBOT_PREDICTIONS_MISSING", f"No frame_*.npz found in {predictions_dir}")
 
     selected_files = []
-    total_points = 0
+    point_batches = []
+    color_batches = []
+    conf_batches = []
     point_source = None
     for path in files:
         with np.load(path, allow_pickle=False) as data:
             if not should_export_prediction_frame(data, keyframes_only_points=keyframes_only_points):
                 continue
-            points, _, source = extract_frame_points(
+            points, colors, conf, source = extract_frame_points(
                 data,
                 pixel_stride=pixel_stride,
                 conf_percentile=conf_percentile,
                 min_conf=min_conf,
                 source_name=str(path),
             )
-        total_points += int(points.shape[0])
+        point_batches.append(points)
+        color_batches.append(colors)
+        conf_batches.append(conf)
         point_source = point_source or source
         selected_files.append(path)
-    if not selected_files:
-        raise PreviewFailure("LINGBOT_PREDICTIONS_MISSING", f"No frame_*.npz selected in {predictions_dir}")
+
+    return write_lingbot_preview_assets(
+        point_batches,
+        color_batches,
+        conf_batches,
+        output_ply,
+        point_source=point_source,
+        frame_count=len(selected_files),
+        max_points=max_points,
+        empty_selection_message=f"No frame_*.npz selected in {predictions_dir}",
+        output_points_ply=output_points_ply,
+        output_meta_json=output_meta_json,
+    )
+
+
+def write_lingbot_preview_assets(
+    point_batches: list[np.ndarray],
+    color_batches: list[np.ndarray],
+    conf_batches: list[np.ndarray | None],
+    output_splats_ply: Path,
+    *,
+    point_source: str | None,
+    frame_count: int,
+    max_points: int,
+    empty_selection_message: str,
+    output_points_ply: Path | None = None,
+    output_meta_json: Path | None = None,
+) -> dict[str, Any]:
+    if frame_count <= 0:
+        raise PreviewFailure("LINGBOT_PREDICTIONS_MISSING", empty_selection_message)
+    if not point_batches:
+        raise PreviewFailure("LINGBOT_EMPTY_POINT_CLOUD", "LingBot-Map produced no valid 3D points")
+
+    points = np.concatenate(point_batches, axis=0) if len(point_batches) > 1 else point_batches[0]
+    colors = np.concatenate(color_batches, axis=0) if len(color_batches) > 1 else color_batches[0]
+    conf = concatenate_optional_conf(conf_batches, points.shape[0])
+    total_points = int(points.shape[0])
     if total_points <= 0:
         raise PreviewFailure("LINGBOT_EMPTY_POINT_CLOUD", "LingBot-Map produced no valid 3D points")
 
-    target_points = total_points if max_points <= 0 else min(total_points, int(max_points))
-    written = write_spark_plain_ply_records(
-        selected_files,
-        output_ply,
-        total_points=total_points,
-        target_points=target_points,
-        extract_points=lambda path: extract_npz_frame_points(
-            path,
-            pixel_stride=pixel_stride,
-            conf_percentile=conf_percentile,
-            min_conf=min_conf,
-        ),
+    points, colors, conf = downsample_preview_points(points, colors, conf, max_points=max_points)
+    splat_scale = estimate_preview_scale(points)
+    opacity = DEFAULT_PREVIEW_OPACITY
+    bbox = preview_bounds(points)
+
+    if output_points_ply is not None:
+        write_debug_points_ply(points, colors, output_points_ply)
+    write_spark_plain_ply_records(points, colors, output_splats_ply, splat_scale=splat_scale, opacity=opacity)
+    if output_meta_json is not None:
+        write_preview_meta_json(
+            output_meta_json,
+            point_source=point_source,
+            point_count_raw=total_points,
+            point_count_exported=int(points.shape[0]),
+            bbox=bbox,
+        )
+
+    quality_warning = (
+        "LingBot point head did not provide world_points; preview used depth reprojection fallback and may show ghosting."
+        if point_source == "world_points_from_depth"
+        else None
     )
     return {
-        "point_count": int(written),
+        "point_count": int(points.shape[0]),
+        "point_count_raw": int(total_points),
+        "point_count_exported": int(points.shape[0]),
         "lingbot_point_source": point_source,
+        "lingbot_depth_reprojection_fallback": bool(point_source == "world_points_from_depth"),
         "lingbot_ply_format": "gaussian_splat",
         "lingbot_points_before_downsample": int(total_points),
-        "lingbot_points_after_downsample": int(written),
-        "lingbot_point_frame_count": len(selected_files),
+        "lingbot_points_after_downsample": int(points.shape[0]),
+        "lingbot_point_frame_count": int(frame_count),
+        "lingbot_preview_splat_scale": float(splat_scale),
+        "bbox_min": bbox["bbox_min"],
+        "bbox_max": bbox["bbox_max"],
+        "bbox_center": bbox["center"],
+        "bbox_radius": bbox["radius"],
+        "quality_warning": quality_warning,
     }
 
 
 def write_spark_plain_ply_records(
-    frame_sources: list[Any],
+    points: np.ndarray,
+    colors: np.ndarray,
     output_ply: Path,
     *,
-    total_points: int,
-    target_points: int,
-    extract_points: Callable[[Any], tuple[np.ndarray, np.ndarray, str]],
-) -> int:
+    splat_scale: float,
+    opacity: float,
+) -> None:
     output_ply.parent.mkdir(parents=True, exist_ok=True)
     dtype = gaussian_splat_record_dtype()
+    point_count = int(points.shape[0])
     header = (
         "ply\n"
         "format binary_little_endian 1.0\n"
-        f"element vertex {target_points}\n"
+        f"element vertex {point_count}\n"
         "property float x\n"
         "property float y\n"
         "property float z\n"
@@ -1085,28 +1159,10 @@ def write_spark_plain_ply_records(
         "end_header\n"
     ).encode("ascii")
 
-    written = 0
-    global_start = 0
     with output_ply.open("wb") as handle:
         handle.write(header)
-        for source in frame_sources:
-            points, colors, _ = extract_points(source)
-            count = int(points.shape[0])
-            if target_points < total_points:
-                keep = uniform_chunk_indices(global_start, count, total_points, target_points)
-                points = points[keep]
-                colors = colors[keep]
-            global_start += count
-            if points.shape[0] == 0:
-                continue
-
-            records = gaussian_splat_records(points, colors, dtype=dtype)
-            records.tofile(handle)
-            written += int(points.shape[0])
-
-    if written != target_points:
-        raise PreviewFailure("LINGBOT_PLY_WRITE_MISMATCH", f"wrote {written} points, expected {target_points}")
-    return written
+        records = gaussian_splat_records(points, colors, dtype=dtype, splat_scale=splat_scale, opacity=opacity)
+        records.tofile(handle)
 
 
 def gaussian_splat_record_dtype() -> np.dtype:
@@ -1137,23 +1193,182 @@ def gaussian_splat_record_dtype() -> np.dtype:
     return np.dtype(fields)
 
 
-def gaussian_splat_records(points: np.ndarray, colors: np.ndarray, *, dtype: np.dtype) -> np.ndarray:
+def gaussian_splat_records(
+    points: np.ndarray,
+    colors: np.ndarray,
+    *,
+    dtype: np.dtype,
+    splat_scale: float = DEFAULT_PREVIEW_SPLAT_SCALE,
+    opacity: float = DEFAULT_PREVIEW_OPACITY,
+) -> np.ndarray:
     records = np.zeros(points.shape[0], dtype=dtype)
     records["x"] = points[:, 0]
     records["y"] = points[:, 1]
     records["z"] = points[:, 2]
-    sh_c0 = np.float32(0.28209479177387814)
-    sh_dc = (colors.astype(np.float32) / 255.0 - 0.5) / sh_c0
+    sh_dc = rgb_to_fdc(colors.astype(np.float32) / 255.0)
     records["f_dc_0"] = sh_dc[:, 0]
     records["f_dc_1"] = sh_dc[:, 1]
     records["f_dc_2"] = sh_dc[:, 2]
-    log_scale = np.float32(np.log(0.002))
-    records["opacity"] = np.float32(-2.0)
+    log_scale = np.float32(np.log(max(float(splat_scale), 1e-6)))
+    records["opacity"] = np.float32(logit(opacity))
     records["scale_0"] = log_scale
     records["scale_1"] = log_scale
     records["scale_2"] = log_scale
     records["rot_0"] = np.float32(1.0)
     return records
+
+
+def rgb_to_fdc(rgb01: np.ndarray) -> np.ndarray:
+    return (rgb01.astype(np.float32) - 0.5) / SH_C0
+
+
+def logit(value: float) -> float:
+    clipped = min(max(float(value), 1e-4), 1.0 - 1e-4)
+    return math.log(clipped / (1.0 - clipped))
+
+
+def concatenate_optional_conf(conf_batches: list[np.ndarray | None], point_count: int) -> np.ndarray | None:
+    if not conf_batches or any(conf is None for conf in conf_batches):
+        return None
+    conf = np.concatenate([np.asarray(item, dtype=np.float32).reshape(-1) for item in conf_batches if item is not None], axis=0)
+    return conf if conf.shape[0] == point_count else None
+
+
+def downsample_preview_points(
+    points: np.ndarray,
+    colors: np.ndarray,
+    conf: np.ndarray | None,
+    *,
+    max_points: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    mask = np.isfinite(points).all(axis=1)
+    if conf is not None:
+        mask &= np.isfinite(conf)
+    points = points[mask].astype("<f4", copy=False)
+    colors = colors[mask].astype(np.uint8, copy=False)
+    conf = None if conf is None else conf[mask].astype(np.float32, copy=False)
+    if points.shape[0] == 0:
+        raise PreviewFailure("LINGBOT_EMPTY_POINT_CLOUD", "LingBot-Map produced no valid 3D points")
+
+    limit = int(max_points)
+    if limit <= 0 or points.shape[0] <= limit:
+        return points, colors, conf
+
+    bbox = preview_bounds(points)
+    voxel_size = max(float(bbox["radius"]) * 2.0 / 800.0, 1e-5)
+    points, colors, conf = voxel_downsample(points, colors, conf, voxel_size)
+    if points.shape[0] <= limit:
+        return points, colors, conf
+
+    keep = np.linspace(0, points.shape[0] - 1, limit, dtype=np.int64)
+    return points[keep], colors[keep], None if conf is None else conf[keep]
+
+
+def voxel_downsample(
+    points: np.ndarray,
+    colors: np.ndarray,
+    conf: np.ndarray | None,
+    voxel_size: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    if points.shape[0] == 0:
+        return points, colors, conf
+    keys = np.floor(points / max(float(voxel_size), 1e-6)).astype(np.int64)
+    _, unique_idx = np.unique(keys, axis=0, return_index=True)
+    unique_idx = np.sort(unique_idx)
+    return points[unique_idx], colors[unique_idx], None if conf is None else conf[unique_idx]
+
+
+def estimate_preview_scale(points: np.ndarray) -> float:
+    finite = points[np.isfinite(points).all(axis=1)]
+    if finite.shape[0] < 100:
+        return DEFAULT_PREVIEW_SPLAT_SCALE
+    bbox_min = np.percentile(finite, 1, axis=0)
+    bbox_max = np.percentile(finite, 99, axis=0)
+    diag = float(np.linalg.norm(bbox_max - bbox_min))
+    return max(diag / 900.0, 1e-4)
+
+
+def preview_bounds(points: np.ndarray) -> dict[str, Any]:
+    finite = points[np.isfinite(points).all(axis=1)]
+    if finite.shape[0] == 0:
+        raise PreviewFailure("LINGBOT_EMPTY_POINT_CLOUD", "LingBot-Map produced no valid 3D points")
+    bbox_min = np.percentile(finite, 1, axis=0).astype(np.float32)
+    bbox_max = np.percentile(finite, 99, axis=0).astype(np.float32)
+    center = ((bbox_min + bbox_max) * 0.5).astype(np.float32)
+    radius = max(float(np.linalg.norm(bbox_max - bbox_min) * 0.5), 0.05)
+    return {
+        "bbox_min": [float(value) for value in bbox_min],
+        "bbox_max": [float(value) for value in bbox_max],
+        "center": [float(value) for value in center],
+        "radius": radius,
+    }
+
+
+def write_debug_points_ply(points: np.ndarray, colors: np.ndarray, output_ply: Path) -> None:
+    output_ply.parent.mkdir(parents=True, exist_ok=True)
+    dtype = np.dtype(
+        [
+            ("x", "<f4"),
+            ("y", "<f4"),
+            ("z", "<f4"),
+            ("red", "u1"),
+            ("green", "u1"),
+            ("blue", "u1"),
+        ]
+    )
+    records = np.empty(points.shape[0], dtype=dtype)
+    records["x"] = points[:, 0]
+    records["y"] = points[:, 1]
+    records["z"] = points[:, 2]
+    records["red"] = colors[:, 0]
+    records["green"] = colors[:, 1]
+    records["blue"] = colors[:, 2]
+    header = (
+        "ply\n"
+        "format binary_little_endian 1.0\n"
+        f"element vertex {points.shape[0]}\n"
+        "property float x\n"
+        "property float y\n"
+        "property float z\n"
+        "property uchar red\n"
+        "property uchar green\n"
+        "property uchar blue\n"
+        "end_header\n"
+    ).encode("ascii")
+    with output_ply.open("wb") as handle:
+        handle.write(header)
+        records.tofile(handle)
+
+
+def write_preview_meta_json(
+    output_meta_json: Path,
+    *,
+    point_source: str | None,
+    point_count_raw: int,
+    point_count_exported: int,
+    bbox: dict[str, Any],
+) -> None:
+    output_meta_json.parent.mkdir(parents=True, exist_ok=True)
+    radius = float(bbox["radius"])
+    payload = {
+        "asset_type": "lingbot_preview_splats",
+        "point_source": point_source,
+        "num_points": int(point_count_exported),
+        "point_count_raw": int(point_count_raw),
+        "point_count_exported": int(point_count_exported),
+        "bbox_min": bbox["bbox_min"],
+        "bbox_max": bbox["bbox_max"],
+        "center": bbox["center"],
+        "radius": radius,
+        "scale_applied": 1.0,
+        "coordinate_system": "lingbot_world",
+        "recommended_frontend": {
+            "camera_distance": max(radius * 2.4, 0.5),
+            "near": max(radius / 1000.0, 0.001),
+            "far": max(radius * 100.0, 100.0),
+        },
+    }
+    output_meta_json.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
 
 
 def extract_prediction_frame_points(
@@ -1163,7 +1378,7 @@ def extract_prediction_frame_points(
     pixel_stride: int,
     conf_percentile: float,
     min_conf: float,
-) -> tuple[np.ndarray, np.ndarray, str]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, str]:
     for _, frame in iter_prediction_frames(predictions, [frame_index]):
         return extract_frame_points(
             frame,
@@ -1194,7 +1409,7 @@ def extract_npz_frame_points(
     pixel_stride: int,
     conf_percentile: float,
     min_conf: float,
-) -> tuple[np.ndarray, np.ndarray, str]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, str]:
     with np.load(path, allow_pickle=False) as data:
         return extract_frame_points(
             data,
@@ -1212,14 +1427,16 @@ def extract_frame_points(
     conf_percentile: float,
     min_conf: float,
     source_name: str,
-) -> tuple[np.ndarray, np.ndarray, str]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, str]:
     keys = tuple(data.files if hasattr(data, "files") else data.keys())
-    point_key = pick_key(keys, POINT_KEYS)
-    if point_key is None:
-        raise PreviewFailure("LINGBOT_POINT_FIELD_MISSING", f"{source_name} has no point field")
+    try:
+        point_key, points_grid, confidence_grid = select_lingbot_points(data)
+    except PreviewFailure as exc:
+        if exc.code == "LINGBOT_POINTS_MISSING":
+            raise PreviewFailure("LINGBOT_POINT_FIELD_MISSING", f"{source_name} has no point field") from exc
+        raise
 
     stride = max(1, int(pixel_stride))
-    points_grid = np.asarray(data[point_key], dtype=np.float32)
     if points_grid.ndim == 4 and points_grid.shape[0] == 1:
         points_grid = points_grid[0]
     if points_grid.ndim != 3 or points_grid.shape[-1] != 3:
@@ -1236,9 +1453,9 @@ def extract_frame_points(
         colors = np.full((points.shape[0], 3), 255, dtype=np.uint8)
 
     mask = np.isfinite(points).all(axis=1)
-    conf_key = pick_key(keys, CONF_KEYS_BY_POINT.get(point_key, ("conf",)))
-    if conf_key is not None:
-        confidence = np.asarray(data[conf_key], dtype=np.float32)
+    confidence = None
+    if confidence_grid is not None:
+        confidence = np.asarray(confidence_grid, dtype=np.float32)
         confidence = np.squeeze(confidence)
         if confidence.ndim == 2:
             confidence = confidence[::stride, ::stride].reshape(-1)
@@ -1249,8 +1466,31 @@ def extract_frame_points(
                 if conf_percentile > 0 and valid_confidence.size > 0:
                     threshold = max(threshold, float(np.percentile(valid_confidence, conf_percentile)))
                 mask &= finite_conf & (confidence >= threshold)
+        else:
+            confidence = None
 
-    return points[mask].astype("<f4", copy=False), colors[mask].astype(np.uint8, copy=False), point_key
+    filtered_conf = None
+    if confidence is not None and confidence.shape[0] == points.shape[0]:
+        filtered_conf = confidence[mask].astype(np.float32, copy=False)
+    return points[mask].astype("<f4", copy=False), colors[mask].astype(np.uint8, copy=False), filtered_conf, point_key
+
+
+def select_lingbot_points(predictions: Any) -> tuple[str, np.ndarray, np.ndarray | None]:
+    keys = tuple(predictions.files if hasattr(predictions, "files") else predictions.keys())
+    available = set(keys)
+    for key in POINT_KEYS:
+        if key not in available:
+            continue
+        conf = None
+        for conf_key in CONF_KEYS_BY_POINT.get(key, ("conf", "world_points_conf", "depth_conf")):
+            if conf_key in available:
+                conf = np.asarray(predictions[conf_key], dtype=np.float32)
+                break
+        return key, np.asarray(predictions[key], dtype=np.float32), conf
+    raise PreviewFailure(
+        "LINGBOT_POINTS_MISSING",
+        f"LingBot predictions did not contain any supported point source: {POINT_KEYS}",
+    )
 
 
 def image_to_hwc_u8(image: Any) -> np.ndarray | None:

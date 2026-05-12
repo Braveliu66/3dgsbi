@@ -9,6 +9,12 @@ import { artifactUrl, formatBytes } from "@/lib/api";
 type ViewerState = "idle" | "loading" | "ready" | "error";
 type AxisView = "x-positive" | "x-negative" | "y-positive" | "y-negative" | "z-positive" | "z-negative";
 type ModelFormat = "spz" | "rad";
+type PreviewMeta = {
+  bbox_min: [number, number, number];
+  bbox_max: [number, number, number];
+  center: [number, number, number];
+  radius: number;
+};
 
 interface ViewerControlApi {
   resetCamera: () => void;
@@ -76,7 +82,17 @@ const MAX_RENDER_SPLATS = readNumber(process.env.VIEWER_MAX_SPLATS, 5_000_000);
 const DEFAULT_FIT_RADIUS = 1;
 const FIT_PADDING = 1.35;
 
-export function SplatViewer({ modelUrl, format = "spz" }: { modelUrl?: string | null; format?: ModelFormat | null }) {
+export function SplatViewer({
+  modelUrl,
+  format = "spz",
+  previewMetaUrl,
+  debugPointsUrl
+}: {
+  modelUrl?: string | null;
+  format?: ModelFormat | null;
+  previewMetaUrl?: string | null;
+  debugPointsUrl?: string | null;
+}) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewerApiRef = useRef<ViewerControlApi | null>(null);
   const [state, setState] = useState<ViewerState>("idle");
@@ -86,10 +102,12 @@ export function SplatViewer({ modelUrl, format = "spz" }: { modelUrl?: string | 
   const [qualityIndex, setQualityIndex] = useState(1);
   const [splatCount, setSplatCount] = useState<number | null>(null);
   const [modelLoadProgress, setModelLoadProgress] = useState<ModelLoadProgress | null>(null);
+  const [viewMode, setViewMode] = useState<"splats" | "points">("splats");
 
   useEffect(() => {
     const urls = modelUrl ? [modelUrl] : [];
-    if (!urls.length || !hostRef.current) {
+    const debugMode = viewMode === "points" && Boolean(debugPointsUrl);
+    if ((!urls.length && !debugMode) || !hostRef.current) {
       viewerApiRef.current = null;
       setViewerReady(false);
       setState("idle");
@@ -116,24 +134,29 @@ export function SplatViewer({ modelUrl, format = "spz" }: { modelUrl?: string | 
     async function mountViewer() {
       try {
         setState("loading");
-        setMessage(`正在加载 ${modelFormat.toUpperCase()} 模型`);
+        setMessage(debugMode ? "正在加载 Raw Point Cloud" : `正在加载 ${modelFormat.toUpperCase()} 模型`);
+        const previewMeta = previewMetaUrl ? await fetchPreviewMeta(previewMetaUrl, abortController.signal).catch(() => null) : null;
         const loadedModels: LoadedModel[] = [];
-        for (const url of urls) {
-          const loadedModel = await fetchModelBytes(url, modelFormat, abortController.signal, (progress) => {
-            if (!cancelled) setModelLoadProgress(progress);
-          });
-          loadedModels.push(loadedModel);
+        if (!debugMode) {
+          for (const url of urls) {
+            const loadedModel = await fetchModelBytes(url, modelFormat, abortController.signal, (progress) => {
+              if (!cancelled) setModelLoadProgress(progress);
+            });
+            loadedModels.push(loadedModel);
+          }
         }
         if (cancelled) return;
-        setMessage("正在初始化 Spark Viewer");
+        setMessage(debugMode ? "正在初始化 Point Cloud Viewer" : "正在初始化 Spark Viewer");
         const THREE = await import("three");
         const { OrbitControls } = await import("three/examples/jsm/controls/OrbitControls.js");
-        const Spark = (await import("@sparkjsdev/spark") as unknown) as {
-          SplatMesh?: new (options: SplatMeshOptionsLike) => SplatMeshLike;
-          SparkRenderer?: new (options: Record<string, unknown>) => SparkRendererLike;
-        };
-        const SplatMesh = Spark.SplatMesh;
-        if (!SplatMesh) throw new Error("@sparkjsdev/spark did not expose SplatMesh");
+        const Spark = debugMode
+          ? null
+          : ((await import("@sparkjsdev/spark") as unknown) as {
+              SplatMesh?: new (options: SplatMeshOptionsLike) => SplatMeshLike;
+              SparkRenderer?: new (options: Record<string, unknown>) => SparkRendererLike;
+            });
+        const SplatMesh = Spark?.SplatMesh;
+        if (!debugMode && !SplatMesh) throw new Error("@sparkjsdev/spark did not expose SplatMesh");
 
         const host = hostRef.current;
         if (!host || cancelled) return;
@@ -171,7 +194,7 @@ export function SplatViewer({ modelUrl, format = "spz" }: { modelUrl?: string | 
         };
 
         const initialQuality = QUALITY_LEVELS[qualityRef.current];
-        const sparkRenderer = Spark.SparkRenderer
+        const sparkRenderer = Spark?.SparkRenderer
           ? new Spark.SparkRenderer({
               renderer,
               lodSplatScale: initialQuality.lodSplatScale,
@@ -188,7 +211,7 @@ export function SplatViewer({ modelUrl, format = "spz" }: { modelUrl?: string | 
         modelPivot.add(splatGroup);
 
         const weakNetwork = isWeakNetwork();
-        const splats = loadedModels.map((model, index) => {
+        const splats = SplatMesh ? loadedModels.map((model, index) => {
           const splat = new SplatMesh({
             fileBytes: model.fileBytes,
             fileName: model.fileName,
@@ -198,7 +221,22 @@ export function SplatViewer({ modelUrl, format = "spz" }: { modelUrl?: string | 
           splatGroup.add(splat);
           applyQuality(renderer, sparkRenderer, splat, initialQuality, host);
           return splat;
-        });
+        }) : [];
+        let pointCloud: import("three").Points | null = null;
+        if (debugMode && debugPointsUrl) {
+          const { PLYLoader } = await import("three/examples/jsm/loaders/PLYLoader.js");
+          const geometry = await new PLYLoader().loadAsync(artifactUrl(debugPointsUrl));
+          geometry.computeBoundingBox();
+          pointCloud = new THREE.Points(
+            geometry,
+            new THREE.PointsMaterial({
+              size: 0.01,
+              vertexColors: Boolean(geometry.getAttribute("color")),
+              sizeAttenuation: true
+            })
+          );
+          splatGroup.add(pointCloud);
+        }
 
         resizeObserver = new ResizeObserver(() => {
           if (!host.clientWidth || !host.clientHeight) return;
@@ -214,6 +252,13 @@ export function SplatViewer({ modelUrl, format = "spz" }: { modelUrl?: string | 
           resizeObserver?.disconnect();
           controls?.dispose();
           for (const splat of splats) splat.dispose?.();
+          pointCloud?.geometry.dispose();
+          const pointMaterial = pointCloud?.material;
+          if (Array.isArray(pointMaterial)) {
+            pointMaterial.forEach((material) => material.dispose());
+          } else {
+            pointMaterial?.dispose();
+          }
           sparkRenderer?.dispose?.();
           renderer.dispose();
           host.innerHTML = "";
@@ -222,7 +267,11 @@ export function SplatViewer({ modelUrl, format = "spz" }: { modelUrl?: string | 
         await Promise.all(splats.map((splat) => splat.initialized ?? Promise.resolve(splat)));
         if (cancelled) return;
         scene.updateMatrixWorld(true);
-        const fit = fitCameraToSplats(THREE, camera, splats);
+        const fit = previewMeta
+          ? fitCameraToPreviewMeta(THREE, camera, previewMeta)
+          : pointCloud
+            ? fitCameraToObject(THREE, camera, pointCloud)
+            : fitCameraToSplats(THREE, camera, splats);
         if (controls) {
           modelPivot.position.copy(fit.center);
           splatGroup.position.copy(fit.center.clone().multiplyScalar(-1));
@@ -280,7 +329,7 @@ export function SplatViewer({ modelUrl, format = "spz" }: { modelUrl?: string | 
         animationFrame = requestAnimationFrame(render);
 
         setState("ready");
-        setMessage(`Spark Viewer 已加载真实 ${modelFormat.toUpperCase()} 产物。`);
+        setMessage(debugMode ? "Point Cloud Viewer 已加载原始点云。" : `Spark Viewer 已加载真实 ${modelFormat.toUpperCase()} 产物。`);
         setModelLoadProgress(null);
       } catch (error) {
         cleanup?.();
@@ -299,7 +348,7 @@ export function SplatViewer({ modelUrl, format = "spz" }: { modelUrl?: string | 
       setViewerReady(false);
       cleanup?.();
     };
-  }, [modelUrl, format]);
+  }, [modelUrl, format, previewMetaUrl, debugPointsUrl, viewMode]);
 
   const quality = QUALITY_LEVELS[qualityIndex] ?? QUALITY_LEVELS[0];
   return (
@@ -335,6 +384,11 @@ export function SplatViewer({ modelUrl, format = "spz" }: { modelUrl?: string | 
         <button className="icon-button" type="button" onClick={() => hostRef.current?.requestFullscreen?.()} aria-label="Fullscreen">
           <Maximize2 size={17} />
         </button>
+        {debugPointsUrl ? (
+          <button className="axis-button" type="button" onClick={() => setViewMode((value) => value === "splats" ? "points" : "splats")}>
+            {viewMode === "splats" ? "PLY" : "SPZ"}
+          </button>
+        ) : null}
         {modelLoadProgress ? <ViewerLoadProgress progress={modelLoadProgress} format={format ?? "spz"} /> : null}
       </div>
     </section>
@@ -389,6 +443,28 @@ async function fetchModelBytes(url: string, format: ModelFormat, signal: AbortSi
   return { fileBytes: concatChunks(chunks, loadedBytes), fileName: modelFileName(format) };
 }
 
+async function fetchPreviewMeta(url: string, signal: AbortSignal): Promise<PreviewMeta> {
+  const response = await fetch(artifactUrl(url), { cache: "no-store", signal });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `${response.status} ${response.statusText}`);
+  }
+  const meta = await response.json() as Partial<PreviewMeta>;
+  if (!isVec3(meta.center) || !isVec3(meta.bbox_min) || !isVec3(meta.bbox_max) || !Number.isFinite(meta.radius)) {
+    throw new Error("Invalid preview_meta.json");
+  }
+  return {
+    bbox_min: meta.bbox_min,
+    bbox_max: meta.bbox_max,
+    center: meta.center,
+    radius: Math.max(Number(meta.radius), 0.05)
+  };
+}
+
+function isVec3(value: unknown): value is [number, number, number] {
+  return Array.isArray(value) && value.length === 3 && value.every((item) => Number.isFinite(item));
+}
+
 function modelProgress(loadedBytes: number, totalBytes: number): ModelLoadProgress {
   const total = Math.max(0, totalBytes);
   const loaded = Math.max(0, Math.min(loadedBytes, total || loadedBytes));
@@ -440,6 +516,35 @@ function fitCameraToSplats(THREE: typeof import("three"), camera: PerspectiveCam
   camera.position.copy(center).addScaledVector(direction, distance);
   camera.near = Math.max(0.001, distance / 1000);
   camera.far = Math.max(1000, distance + radius * 8);
+  camera.lookAt(center);
+  camera.updateProjectionMatrix();
+  return { center, radius, distance };
+}
+
+function fitCameraToPreviewMeta(THREE: typeof import("three"), camera: PerspectiveCamera, meta: PreviewMeta): { center: Vector3; radius: number; distance: number } {
+  const center = new THREE.Vector3(...meta.center);
+  return fitCameraToCenter(THREE, camera, center, Math.max(meta.radius, 0.05));
+}
+
+function fitCameraToObject(THREE: typeof import("three"), camera: PerspectiveCamera, object: Object3D): { center: Vector3; radius: number; distance: number } {
+  const bounds = new THREE.Box3().setFromObject(object);
+  if (bounds.isEmpty()) {
+    return fitCameraToCenter(THREE, camera, new THREE.Vector3(0, 0, 0), DEFAULT_FIT_RADIUS);
+  }
+  const center = bounds.getCenter(new THREE.Vector3());
+  const size = bounds.getSize(new THREE.Vector3());
+  const radius = Math.max(Math.max(size.x, size.y, size.z) / 2, 0.05);
+  return fitCameraToCenter(THREE, camera, center, radius);
+}
+
+function fitCameraToCenter(THREE: typeof import("three"), camera: PerspectiveCamera, center: Vector3, radius: number): { center: Vector3; radius: number; distance: number } {
+  const fov = camera.fov * Math.PI / 180;
+  const distance = Math.max(0.35, (radius / Math.tan(fov / 2)) * FIT_PADDING);
+  const direction = new THREE.Vector3(0.18, -0.12, 1).normalize();
+
+  camera.position.copy(center).addScaledVector(direction, distance);
+  camera.near = Math.max(0.001, radius / 1000);
+  camera.far = Math.max(100, distance + radius * 100);
   camera.lookAt(center);
   camera.updateProjectionMatrix();
   return { center, radius, distance };

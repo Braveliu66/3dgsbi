@@ -15,7 +15,7 @@ import {
   MemoryStick,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { api, clearToken, getToken, isPublicPath } from "@/lib/api";
+import { api, clearToken } from "@/lib/api";
 import { formatEta, isActiveTask, taskStatusLabel, taskTypeLabel } from "@/lib/labels";
 import { readTrackedTaskIds, TRACKED_TASKS_EVENT, writeTrackedTaskIds } from "@/lib/taskTracking";
 import type { Task, User } from "@/lib/types";
@@ -43,20 +43,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [taskOpen, setTaskOpen] = useState(false);
 
   useEffect(() => {
-    if (!getToken()) {
-      setUser(null);
-      setTasks([]);
-      if (!isPublicPath(pathname)) router.replace("/login");
-      return;
-    }
     void api.me()
       .then(setUser)
       .catch(() => {
         setUser(null);
         setTasks([]);
-        if (!isPublicPath(pathname)) router.replace("/login");
       });
-  }, [pathname, router]);
+  }, [pathname]);
 
   useEffect(() => {
     if (!user) {
@@ -130,7 +123,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   function logout() {
     clearToken();
     setUser(null);
-    router.replace("/login");
+    router.replace("/");
   }
 
   return (

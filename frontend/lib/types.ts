@@ -111,6 +111,11 @@ export interface ViewerConfig {
   source?: "final" | "preview";
   artifact_id?: string;
   model_url?: string | null;
+  debug_points_ply_url?: string | null;
+  debug_splats_ply_url?: string | null;
+  preview_meta_url?: string | null;
+  quality_warning?: string | null;
+  point_source?: string | null;
   lods?: ViewerLod[];
   format?: "spz" | "rad";
   message?: string;

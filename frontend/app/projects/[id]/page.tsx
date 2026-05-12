@@ -271,7 +271,12 @@ export default function ProjectDetailPage() {
             {project ? <span className={`status-pill ${project.status}`}>{projectStatusLabel(project.status)}</span> : null}
           </div>
           <div className="panel-body scrollable" style={{ padding: 0 }}>
-            <SplatViewer modelUrl={viewer?.status === "ready" ? viewer.model_url : null} format={viewer?.format} />
+            <SplatViewer
+              modelUrl={viewer?.status === "ready" ? viewer.model_url : null}
+              format={viewer?.format}
+              previewMetaUrl={viewer?.status === "ready" ? viewer.preview_meta_url : null}
+              debugPointsUrl={viewer?.status === "ready" ? viewer.debug_points_ply_url : null}
+            />
           </div>
         </div>
 
@@ -291,6 +296,7 @@ export default function ProjectDetailPage() {
               {error ? <div className="error-box">{error}</div> : null}
               {project?.error_message ? <div className="error-box">{project.error_message}</div> : null}
               {viewer?.status === "unavailable" ? <div className="notice-box">{viewer.message}</div> : null}
+              {viewer?.status === "ready" && viewer.quality_warning ? <div className="notice-box">{viewer.quality_warning}</div> : null}
               <DownloadProgressBar progress={downloadProgress} />
 
               <section className="stack">

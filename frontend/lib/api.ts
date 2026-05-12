@@ -1,7 +1,6 @@
 import type { AlgorithmEntry, Artifact, AuthResponse, MediaAsset, Project, RuntimePreflight, Task, User, ViewerConfig } from "@/lib/types";
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
-export const UPLOAD_API_BASE = process.env.NEXT_PUBLIC_UPLOAD_API_BASE_URL ?? "";
 const TOKEN_KEY = "three_dgs_token";
 const UPLOAD_CHUNK_SIZE = 16 * 1024 * 1024;
 const UPLOAD_CONCURRENCY = 4;
@@ -19,6 +18,17 @@ export interface TransferProgress {
 }
 
 export type TransferProgressCallback = (progress: TransferProgress) => void;
+
+export class ApiError extends Error {
+  constructor(message: string, public status: number, public statusText: string) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+export function isAuthError(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 401;
+}
 
 export function getToken(): string | null {
   if (typeof window === "undefined") return null;
@@ -39,27 +49,23 @@ export function isPublicPath(pathname: string): boolean {
   return pathname === "/login" || pathname === "/about";
 }
 
-async function request<T>(path: string, init?: RequestInit & { auth?: boolean }, base = API_BASE): Promise<T> {
-  const auth = init?.auth ?? true;
+type ApiRequestInit = RequestInit & { auth?: boolean };
+
+async function request<T>(path: string, init?: ApiRequestInit, base = API_BASE): Promise<T> {
+  const { auth = true, ...fetchInit } = init ?? {};
   const token = auth ? getToken() : null;
   const response = await fetch(`${base}${path}`, {
-    ...init,
+    ...fetchInit,
     headers: {
-      ...(init?.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
+      ...(fetchInit.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...init?.headers
+      ...fetchInit.headers
     },
     cache: "no-store"
   });
-  if (response.status === 401) {
-    clearToken();
-    if (typeof window !== "undefined" && !isPublicPath(window.location.pathname)) {
-      window.location.assign("/login");
-    }
-  }
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(readErrorMessage(text, `${response.status} ${response.statusText}`));
+    throw new ApiError(readErrorMessage(text, `${response.status} ${response.statusText}`), response.status, response.statusText);
   }
   return (await response.json()) as T;
 }
@@ -170,10 +176,7 @@ async function uploadChunk(
 }
 
 function getUploadApiBase(): string {
-  if (!UPLOAD_API_BASE) {
-    throw new Error("NEXT_PUBLIC_UPLOAD_API_BASE_URL is not configured; direct upload API is required for large files.");
-  }
-  return UPLOAD_API_BASE.replace(/\/$/, "");
+  return API_BASE.replace(/\/$/, "");
 }
 
 function chunkByteSize(file: File, chunkIndex: number): number {
@@ -218,14 +221,8 @@ function xhrRequest<T>(
       onUploadProgress?.(event.loaded, event.lengthComputable ? event.total : 0);
     };
     xhr.onload = () => {
-      if (xhr.status === 401) {
-        clearToken();
-        if (typeof window !== "undefined" && !isPublicPath(window.location.pathname)) {
-          window.location.assign("/login");
-        }
-      }
       if (xhr.status < 200 || xhr.status >= 300) {
-        reject(new Error(readErrorMessage(xhr.responseText, `${xhr.status} ${xhr.statusText}`)));
+        reject(new ApiError(readErrorMessage(xhr.responseText, `${xhr.status} ${xhr.statusText}`), xhr.status, xhr.statusText));
         return;
       }
       try {

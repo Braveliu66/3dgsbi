@@ -943,14 +943,14 @@ def create_fine_task(
         raise HTTPException(status_code=409, detail="Project already has an active task")
     image_count = sum(1 for item in project.media if item.kind == "image")
     video_count = sum(1 for item in project.media if item.kind == "video")
-    if project.input_type == "images" and image_count < 3:
-        raise HTTPException(status_code=400, detail="Fine reconstruction requires at least 3 images")
+    if project.input_type == "images" and image_count < 8:
+        raise HTTPException(status_code=400, detail="LiteVGGT fine reconstruction requires at least 8 images")
     if project.input_type == "video" and (video_count != 1 or len(project.media) != 1):
         raise HTTPException(status_code=400, detail="Video fine reconstruction requires exactly one video file")
     if project.input_type not in {"images", "video"}:
         raise HTTPException(status_code=400, detail="Fine reconstruction input type is unsupported")
 
-    fine_pipeline = "video_artdeco_speed3r" if project.input_type == "video" else "mobilegs_lmrs"
+    fine_pipeline = "video_artdeco_speed3r" if project.input_type == "video" else "litevggt_fastgs_deblur_gsplat"
     eta_seconds = settings.fine_expected_seconds_video if project.input_type == "video" else settings.fine_expected_seconds_images
     payload_options = payload.options or {}
 
@@ -1165,6 +1165,10 @@ def viewer_config(project_id: str, user: User = Depends(get_current_user), db: S
     fresh = [item for item in preview_artifacts if item.source_version == project.source_version]
     if fresh:
         artifact = sorted(fresh, key=lambda item: item.created_at, reverse=True)[0]
+        task_artifacts = [item for item in project.artifacts if item.task_id == artifact.task_id]
+        debug_points = next((item for item in task_artifacts if item.kind == "original_ply"), None)
+        debug_splats = next((item for item in task_artifacts if item.kind == "debug_splats_ply"), None)
+        preview_meta = next((item for item in task_artifacts if item.kind == "preview_meta_json"), None)
         return {
             "status": "ready",
             "mode": "single",
@@ -1172,6 +1176,12 @@ def viewer_config(project_id: str, user: User = Depends(get_current_user), db: S
             "artifact_id": artifact.id,
             "model_url": artifact_url(artifact),
             "format": "spz",
+            "debug_points_ply_url": artifact_url(debug_points) if debug_points else None,
+            "debug_splats_ply_url": artifact_url(debug_splats) if debug_splats else None,
+            "preview_meta_url": artifact_url(preview_meta) if preview_meta else None,
+            "quality_warning": (artifact.metadata_json or {}).get("quality_warning"),
+            "point_source": (artifact.metadata_json or {}).get("point_source")
+            or (artifact.metadata_json or {}).get("lingbot_point_source"),
         }
     if final_artifacts:
         return {

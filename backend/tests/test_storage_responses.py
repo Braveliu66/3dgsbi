@@ -192,7 +192,7 @@ class StorageResponseTests(unittest.TestCase):
         with TestClient(app) as client, patch("app.main.enqueue_fine_task", return_value=None):
             headers = auth_headers(client)
             project_id = create_image_project(client, headers, "direct fine start")
-            for index in range(3):
+            for index in range(8):
                 upload_response = client.post(
                     f"/api/projects/{project_id}/media",
                     files={"file": (f"{index}.png", PNG_BYTES, "image/png")},
@@ -206,7 +206,7 @@ class StorageResponseTests(unittest.TestCase):
 
             self.assertEqual(payload["type"], "fine")
             self.assertEqual(payload["status"], "queued")
-            self.assertEqual(payload["options"]["fine_pipeline"], "mobilegs_lmrs")
+            self.assertEqual(payload["options"]["fine_pipeline"], "litevggt_fastgs_deblur_gsplat")
             self.assertEqual(payload["options"]["source_version"], 3)
             self.assertEqual(payload["options"]["fine_iterations"], 1000)
             self.assertNotIn("fine_amb3r_memory_device", payload["options"])
@@ -216,7 +216,7 @@ class StorageResponseTests(unittest.TestCase):
         with TestClient(app) as client, patch("app.main.enqueue_fine_task", return_value=None):
             headers = auth_headers(client)
             project_id = create_image_project(client, headers, "explicit pycolmap options")
-            for index in range(3):
+            for index in range(8):
                 upload_response = client.post(
                     f"/api/projects/{project_id}/media",
                     files={"file": (f"{index}.png", PNG_BYTES, "image/png")},
