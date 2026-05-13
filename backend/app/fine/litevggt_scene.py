@@ -30,12 +30,15 @@ def build_litevggt_scene(
         raise FineFailure("LITEVGGT_WEIGHT_MISSING", f"LiteVGGT weight is missing: {weight}")
 
     params = {
-        "keep_ratio": float(options.get("fine_litevggt_keep_ratio") or 0.90),
+        "keep_ratio": float(options.get("fine_litevggt_keep_ratio") or 1.0),
         "max_points": int(options.get("fine_litevggt_max_points") or 1_500_000),
         "spatial_keep_quantile": float(options.get("fine_litevggt_spatial_keep_quantile") or 0.999),
         "preserve_full_image": read_bool(options.get("fine_litevggt_preserve_full_image"), True),
         "letterbox_size": int(options.get("fine_litevggt_letterbox_size") or 518),
         "max_input_frames": read_optional_int(options.get("fine_litevggt_max_input_frames")),
+        "frame_stride": read_optional_int(options.get("fine_litevggt_frame_stride")),
+        "depth_conf_thresh": read_optional_float(options.get("fine_litevggt_depth_conf_thresh"), None),
+        "preprocess_mode": str(options.get("fine_litevggt_preprocess_mode") or "pad"),
         "frame_selection": str(options.get("fine_litevggt_frame_selection") or "all"),
         "min_scene_change": float(options.get("fine_litevggt_min_scene_change") or 0.0),
         "edge_keep_ratio": float(options.get("fine_litevggt_edge_keep_ratio") or 0.15),
@@ -75,6 +78,9 @@ def build_litevggt_scene(
             preserve_full_image=params["preserve_full_image"],
             letterbox_size=params["letterbox_size"],
             max_input_frames=params["max_input_frames"],
+            frame_stride=params["frame_stride"],
+            depth_conf_thresh=params["depth_conf_thresh"],
+            preprocess_mode=params["preprocess_mode"],
             frame_selection=params["frame_selection"],
             min_scene_change=params["min_scene_change"],
             edge_keep_ratio=params["edge_keep_ratio"],
@@ -255,6 +261,20 @@ def read_optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def read_optional_float(value: Any, fallback: float | None) -> float | None:
+    if value is None:
+        return fallback
+    normalized = str(value).strip().lower()
+    if normalized in {"", "auto"}:
+        return fallback
+    if normalized in {"none", "off", "false"}:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
 
 
 def read_int_list(value: Any, fallback: list[int]) -> list[int]:

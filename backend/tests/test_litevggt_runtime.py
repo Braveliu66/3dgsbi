@@ -53,7 +53,8 @@ class LiteVGGTSceneTests(unittest.TestCase):
                 )
 
         kwargs = run.call_args.kwargs
-        self.assertEqual(kwargs["keep_ratio"], 0.90)
+        self.assertEqual(kwargs["keep_ratio"], 1.0)
+        self.assertIsNone(kwargs["depth_conf_thresh"])
         self.assertEqual(kwargs["max_points"], 1_500_000)
         self.assertEqual(kwargs["frame_selection"], "all")
         self.assertEqual(result.metrics["litevggt_official_single_path"], True)

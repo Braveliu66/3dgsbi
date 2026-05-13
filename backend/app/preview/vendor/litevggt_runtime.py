@@ -54,6 +54,22 @@ class LiteVGGTQualitySettings:
     target_size_source: str
 
 
+@dataclass(slots=True)
+class LiteVGGTFrameSelection:
+    files: list[Path]
+    frame_indices: np.ndarray
+    frame_stride: int
+    frame_stride_source: str
+    frame_budget: int
+
+
+@dataclass(slots=True)
+class LiteVGGTImageBatch:
+    tensors: list[Any]
+    valid_masks: np.ndarray
+    preprocess_mode: str
+
+
 def resolve_litevggt_quality_settings(frame_count: int, options: dict[str, Any] | None = None) -> LiteVGGTQualitySettings:
     options = options or {}
     frame_count = int(frame_count)
@@ -61,23 +77,19 @@ def resolve_litevggt_quality_settings(frame_count: int, options: dict[str, Any] 
     if frame_count <= 16:
         profile = "small"
         target_size = 448
-        keep_ratio = 0.90
     elif frame_count <= 48:
         profile = "medium"
         target_size = 392
-        keep_ratio = 0.85
     elif frame_count <= 128:
         profile = "large"
         target_size = 336
-        keep_ratio = 0.75
     elif frame_count <= 256:
         profile = "xlarge"
         target_size = 308
-        keep_ratio = 0.60
     else:
         profile = "huge"
         target_size = 280
-        keep_ratio = 0.42
+    keep_ratio = 1.0
 
     target_size_source = "auto"
     if options.get("target_size") is not None:
@@ -108,17 +120,76 @@ def select_aligned_frames(
     *,
     multiple: int = 8,
     max_frames: int | None = None,
+    frame_stride: int | None = None,
 ) -> list[Path]:
+    return resolve_litevggt_frame_selection(
+        files,
+        multiple=multiple,
+        max_frames=max_frames,
+        frame_stride=frame_stride,
+    ).files
+
+
+def resolve_litevggt_frame_selection(
+    files: list[Path],
+    *,
+    multiple: int = 8,
+    max_frames: int | None = None,
+    frame_stride: int | None = None,
+) -> LiteVGGTFrameSelection:
     if multiple <= 0:
         raise PreviewFailure("LITEVGGT_INVALID_FRAME_MULTIPLE", "LiteVGGT frame multiple must be positive")
 
-    usable = len(files)
+    total = len(files)
+    if total <= 0:
+        return LiteVGGTFrameSelection([], np.empty((0,), dtype=np.int32), 1, "auto", 0)
+
+    requested_stride = int(frame_stride or 0)
+    if requested_stride > 0:
+        candidate_indices = list(range(0, total, requested_stride))
+        if candidate_indices[-1] != total - 1:
+            candidate_indices.append(total - 1)
+        stride_source = "user"
+        effective_budget = len(candidate_indices)
+    else:
+        candidate_indices = list(range(total))
+        stride_source = "auto"
+        effective_budget = int(max_frames or total)
+
     if max_frames is not None and max_frames > 0:
-        usable = min(usable, int(max_frames))
-    usable = (usable // multiple) * multiple
+        effective_budget = min(effective_budget, int(max_frames))
+    effective_budget = max(0, min(total, effective_budget))
+    usable = (effective_budget // multiple) * multiple
     if usable <= 0:
+        return LiteVGGTFrameSelection([], np.empty((0,), dtype=np.int32), max(1, requested_stride), stride_source, effective_budget)
+
+    selected_indices = _evenly_select_indices(candidate_indices, usable)
+    selected_files = [files[index] for index in selected_indices]
+    if requested_stride > 0:
+        effective_stride = requested_stride
+    elif len(selected_indices) > 1:
+        effective_stride = max(1, int(round((selected_indices[-1] - selected_indices[0]) / (len(selected_indices) - 1))))
+    else:
+        effective_stride = 1
+
+    return LiteVGGTFrameSelection(
+        selected_files,
+        np.asarray(selected_indices, dtype=np.int32),
+        effective_stride,
+        stride_source,
+        effective_budget,
+    )
+
+
+def _evenly_select_indices(indices: list[int], count: int) -> list[int]:
+    if count <= 0:
         return []
-    return files[:usable]
+    if count >= len(indices):
+        return list(indices)
+    if count == 1:
+        return [indices[0]]
+    positions = np.linspace(0, len(indices) - 1, num=count)
+    return [indices[int(np.floor(position))] for position in positions]
 
 
 def point_indices_to_frame_indices(
@@ -149,22 +220,18 @@ def select_points_by_confidence(
     width: int,
     keep_ratio: float,
     max_points: int,
+    depth_conf_thresh: float | None = None,
+    valid_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
-    rgb = np.clip(np.asarray(colors).reshape(-1, 3), 0, 255).astype(np.uint8)
-    conf = np.asarray(confidence, dtype=np.float32).reshape(-1)
-    if pts.shape[0] != rgb.shape[0] or pts.shape[0] != conf.shape[0]:
-        raise PreviewFailure("LITEVGGT_POINT_SHAPE_MISMATCH", "LiteVGGT points, colors and confidence must have equal length")
-
-    valid = np.isfinite(pts).all(axis=1) & np.isfinite(conf)
-    valid_indices = np.where(valid)[0]
-    if valid_indices.size == 0:
-        raise PreviewFailure("LITEVGGT_EMPTY_POINT_CLOUD", "LiteVGGT produced no valid points")
-
-    keep_ratio = float(np.clip(keep_ratio, 0.01, 1.0))
-    keep_count = max(1, int(valid_indices.size * keep_ratio))
-    if max_points > 0:
-        keep_count = min(keep_count, int(max_points))
+    pts, rgb, conf, valid_indices, keep_count = prepare_litevggt_point_selection(
+        points,
+        colors,
+        confidence,
+        keep_ratio=keep_ratio,
+        max_points=max_points,
+        depth_conf_thresh=depth_conf_thresh,
+        valid_mask=valid_mask,
+    )
 
     ranked = valid_indices[np.argsort(conf[valid_indices])[::-1]]
     selected = ranked[:keep_count]
@@ -175,6 +242,118 @@ def select_points_by_confidence(
         width=width,
     )
     return pts[selected], rgb[selected], conf[selected], point_frame_indices
+
+
+def select_points_by_scene_coverage(
+    points: np.ndarray,
+    colors: np.ndarray,
+    confidence: np.ndarray,
+    *,
+    frame_indices: list[int] | np.ndarray,
+    height: int,
+    width: int,
+    keep_ratio: float,
+    max_points: int,
+    depth_conf_thresh: float | None = None,
+    valid_mask: np.ndarray | None = None,
+    grid_size: int = 8,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    pts, rgb, conf, valid_indices, keep_count = prepare_litevggt_point_selection(
+        points,
+        colors,
+        confidence,
+        keep_ratio=keep_ratio,
+        max_points=max_points,
+        depth_conf_thresh=depth_conf_thresh,
+        valid_mask=valid_mask,
+    )
+    pixels_per_frame = int(height) * int(width)
+    original_frames = np.asarray(frame_indices, dtype=np.int32)
+    if pixels_per_frame <= 0 or original_frames.size <= 0:
+        raise PreviewFailure("LITEVGGT_INVALID_IMAGE_SHAPE", "LiteVGGT scene coverage selection requires positive frame dimensions")
+
+    local_frame_ids = valid_indices // pixels_per_frame
+    pixel_offsets = valid_indices % pixels_per_frame
+    rows = pixel_offsets // int(width)
+    cols = pixel_offsets % int(width)
+    grid_rows = max(1, min(int(grid_size), int(height)))
+    grid_cols = max(1, min(int(grid_size), int(width)))
+    tile_rows = np.minimum((rows * grid_rows) // int(height), grid_rows - 1)
+    tile_cols = np.minimum((cols * grid_cols) // int(width), grid_cols - 1)
+    bucket_ids = local_frame_ids * grid_rows * grid_cols + tile_rows * grid_cols + tile_cols
+    buckets = np.unique(bucket_ids)
+    if buckets.size == 0:
+        raise PreviewFailure("LITEVGGT_EMPTY_POINT_CLOUD", "LiteVGGT produced no valid points")
+
+    selected_parts: list[np.ndarray] = []
+    if buckets.size > keep_count:
+        bucket_positions = np.linspace(0, buckets.size - 1, num=keep_count)
+        buckets_to_use = buckets[np.asarray(np.floor(bucket_positions), dtype=np.int64)]
+        per_bucket = 1
+    else:
+        buckets_to_use = buckets
+        per_bucket = max(1, keep_count // int(buckets_to_use.size))
+
+    for bucket in buckets_to_use:
+        members = valid_indices[bucket_ids == bucket]
+        if members.size == 0:
+            continue
+        take = min(per_bucket, members.size)
+        order = np.argsort(conf[members])[::-1]
+        selected_parts.append(members[order[:take]])
+
+    selected = np.unique(np.concatenate(selected_parts)) if selected_parts else np.empty((0,), dtype=np.int64)
+    if selected.size < keep_count:
+        ranked = valid_indices[np.argsort(conf[valid_indices])[::-1]]
+        needed = keep_count - selected.size
+        filler = ranked[~np.isin(ranked, selected, assume_unique=False)][:needed]
+        selected = np.concatenate([selected, filler])
+    elif selected.size > keep_count:
+        ranked_selected = selected[np.argsort(conf[selected])[::-1]]
+        selected = ranked_selected[:keep_count]
+
+    point_frame_indices = point_indices_to_frame_indices(
+        selected,
+        frame_indices=frame_indices,
+        height=height,
+        width=width,
+    )
+    return pts[selected], rgb[selected], conf[selected], point_frame_indices
+
+
+def prepare_litevggt_point_selection(
+    points: np.ndarray,
+    colors: np.ndarray,
+    confidence: np.ndarray,
+    *,
+    keep_ratio: float,
+    max_points: int,
+    depth_conf_thresh: float | None = None,
+    valid_mask: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+    pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+    rgb = np.clip(np.asarray(colors).reshape(-1, 3), 0, 255).astype(np.uint8)
+    conf = np.asarray(confidence, dtype=np.float32).reshape(-1)
+    if pts.shape[0] != rgb.shape[0] or pts.shape[0] != conf.shape[0]:
+        raise PreviewFailure("LITEVGGT_POINT_SHAPE_MISMATCH", "LiteVGGT points, colors and confidence must have equal length")
+
+    valid = np.isfinite(pts).all(axis=1) & np.isfinite(conf)
+    if depth_conf_thresh is not None:
+        valid &= conf >= float(depth_conf_thresh)
+    if valid_mask is not None:
+        mask = np.asarray(valid_mask, dtype=bool).reshape(-1)
+        if mask.shape[0] != pts.shape[0]:
+            raise PreviewFailure("LITEVGGT_MASK_SHAPE_MISMATCH", "LiteVGGT valid mask must match point count")
+        valid &= mask
+    valid_indices = np.where(valid)[0]
+    if valid_indices.size == 0:
+        raise PreviewFailure("LITEVGGT_EMPTY_POINT_CLOUD", "LiteVGGT produced no valid points")
+
+    keep_ratio = float(np.clip(keep_ratio, 0.01, 1.0))
+    keep_count = max(1, int(valid_indices.size * keep_ratio))
+    if max_points > 0:
+        keep_count = min(keep_count, int(max_points))
+    return pts, rgb, conf, valid_indices, keep_count
 
 
 def reset_litevggt_aggregator_cache(model) -> None:
@@ -192,6 +371,59 @@ def load_litevggt_image_tensors(files: list[Path], load_image_file_crop, target_
     ]
 
 
+def load_litevggt_image_batch(
+    files: list[Path],
+    load_image_file_crop,
+    target_size: int,
+    *,
+    preprocess_mode: str = "pad",
+) -> LiteVGGTImageBatch:
+    import torch
+
+    mode = str(preprocess_mode or "pad").strip().lower()
+    if mode == "pad":
+        tensors = []
+        masks = []
+        for file in files:
+            image, mask = load_litevggt_padded_image(file, target_size)
+            tensors.append(torch.from_numpy(np.transpose(image, (2, 0, 1))).float())
+            masks.append(mask)
+        return LiteVGGTImageBatch(tensors=tensors, valid_masks=np.stack(masks, axis=0), preprocess_mode="pad")
+
+    tensors = load_litevggt_image_tensors(files, load_image_file_crop, target_size)
+    if not tensors:
+        return LiteVGGTImageBatch(tensors=[], valid_masks=np.empty((0, 0, 0), dtype=bool), preprocess_mode="crop")
+    masks = [np.ones((int(tensor.shape[-2]), int(tensor.shape[-1])), dtype=bool) for tensor in tensors]
+    return LiteVGGTImageBatch(tensors=tensors, valid_masks=np.stack(masks, axis=0), preprocess_mode="crop")
+
+
+def load_litevggt_padded_image(path: Path, target_size: int) -> tuple[np.ndarray, np.ndarray]:
+    from PIL import Image, ImageOps
+
+    with Image.open(path) as original:
+        original.load()
+        image = ImageOps.exif_transpose(original).convert("RGB")
+
+    width, height = image.size
+    if width <= 0 or height <= 0:
+        raise PreviewFailure("LITEVGGT_INVALID_IMAGE_SHAPE", f"invalid image dimensions: {path}")
+
+    target_size = _align_litevggt_target_size(target_size)
+    scale = target_size / float(max(width, height))
+    resized_width = max(1, min(target_size, int(round(width * scale))))
+    resized_height = max(1, min(target_size, int(round(height * scale))))
+    image = image.resize((resized_width, resized_height), Image.Resampling.BICUBIC)
+
+    canvas = np.ones((target_size, target_size, 3), dtype=np.float32)
+    mask = np.zeros((target_size, target_size), dtype=bool)
+    left = (target_size - resized_width) // 2
+    top = (target_size - resized_height) // 2
+    array = np.asarray(image, dtype=np.float32) / 255.0
+    canvas[top : top + resized_height, left : left + resized_width] = array
+    mask[top : top + resized_height, left : left + resized_width] = True
+    return canvas, mask
+
+
 def run_litevggt_reconstruction(
     *,
     input_dir: Path,
@@ -201,6 +433,9 @@ def run_litevggt_reconstruction(
     progress: Progress,
     max_input_frames: int | None = None,
     target_size: int | None = None,
+    frame_stride: int | None = None,
+    depth_conf_thresh: float | None = None,
+    preprocess_mode: str = "pad",
     spatial_keep_quantile: float = 1.0,
     preserve_full_image: bool = False,
     letterbox_size: int = 518,
@@ -209,7 +444,7 @@ def run_litevggt_reconstruction(
     edge_keep_ratio: float = 0.0,
     axis_trim_low_quantile: float = 0.0,
     axis_trim_high_quantile: float = 1.0,
-    selection_strategy: str = "global",
+    selection_strategy: str = "scene_coverage",
     **_unused_options,
 ) -> LiteVGGTReconstruction:
     import torch
@@ -228,7 +463,13 @@ def run_litevggt_reconstruction(
         if original_frame_count < 8:
             raise PreviewFailure("LITEVGGT_NOT_ENOUGH_IMAGES", "LiteVGGT preview requires at least 8 images")
 
-        files = select_aligned_frames(original_files, multiple=8, max_frames=max_input_frames)
+        frame_selection_result = resolve_litevggt_frame_selection(
+            original_files,
+            multiple=8,
+            max_frames=max_input_frames,
+            frame_stride=frame_stride,
+        )
+        files = frame_selection_result.files
         if len(files) < 8:
             raise PreviewFailure("LITEVGGT_NOT_ENOUGH_FRAMES", f"LiteVGGT requires at least 8 images, got {len(files)}")
 
@@ -239,8 +480,7 @@ def run_litevggt_reconstruction(
                 "keep_ratio": keep_ratio,
             },
         )
-        original_index_by_file = {file: index for index, file in enumerate(original_files)}
-        frame_indices = [original_index_by_file[file] for file in files]
+        frame_indices = frame_selection_result.frame_indices.tolist()
 
         if not torch.cuda.is_available():
             raise PreviewFailure("GPU_RESOURCE_UNAVAILABLE", "LiteVGGT requires CUDA")
@@ -250,10 +490,15 @@ def run_litevggt_reconstruction(
         progress(
             "litevggt_preprocess",
             28,
-            f"loading {len(files)} LiteVGGT images at target_size={quality.target_size}",
+            f"loading {len(files)} LiteVGGT images at target_size={quality.target_size}, stride={frame_selection_result.frame_stride}, mode={preprocess_mode}",
         )
-        image_tensors = load_litevggt_image_tensors(files, load_image_file_crop, quality.target_size)
-        image_batch = torch.stack(image_tensors, dim=0).to(device)
+        loaded_images = load_litevggt_image_batch(
+            files,
+            load_image_file_crop,
+            quality.target_size,
+            preprocess_mode=preprocess_mode,
+        )
+        image_batch = torch.stack(loaded_images.tensors, dim=0).to(device)
         height = int(image_batch.shape[-2])
         width = int(image_batch.shape[-1])
 
@@ -296,21 +541,41 @@ def run_litevggt_reconstruction(
                 )
 
             image_array = image_batch[0].permute(0, 2, 3, 1).detach().float().cpu().numpy()
-            valid_masks = np.ones((len(files), height, width), dtype=bool)
+            valid_masks = loaded_images.valid_masks
             points = np.asarray(points_3d, dtype=np.float32).reshape(-1, 3)
             colors = np.clip(image_array.reshape(-1, 3) * 255.0, 0, 255).astype(np.uint8)
             confidence = depth_conf.reshape(-1).detach().float().cpu().numpy()
+            valid_point_mask = valid_masks.reshape(-1)
 
-            selected_points, selected_colors, selected_confidence, point_frame_indices = select_points_by_confidence(
-                points,
-                colors,
-                confidence,
-                frame_indices=frame_indices,
-                height=height,
-                width=width,
-                keep_ratio=quality.keep_ratio,
-                max_points=max_points,
-            )
+            point_selection_strategy = str(selection_strategy or "scene_coverage").strip().lower()
+            if point_selection_strategy in {"global", "global_confidence"}:
+                selected_points, selected_colors, selected_confidence, point_frame_indices = select_points_by_confidence(
+                    points,
+                    colors,
+                    confidence,
+                    frame_indices=frame_indices,
+                    height=height,
+                    width=width,
+                    keep_ratio=quality.keep_ratio,
+                    max_points=max_points,
+                    depth_conf_thresh=depth_conf_thresh,
+                    valid_mask=valid_point_mask,
+                )
+                point_selection_metric = "global_confidence"
+            else:
+                selected_points, selected_colors, selected_confidence, point_frame_indices = select_points_by_scene_coverage(
+                    points,
+                    colors,
+                    confidence,
+                    frame_indices=frame_indices,
+                    height=height,
+                    width=width,
+                    keep_ratio=quality.keep_ratio,
+                    max_points=max_points,
+                    depth_conf_thresh=depth_conf_thresh,
+                    valid_mask=valid_point_mask,
+                )
+                point_selection_metric = "scene_coverage"
 
             w2c_array = w2c_pre.squeeze(0).detach().float().cpu().numpy()
             intrinsic_array = intrinsic.squeeze(0).detach().float().cpu().numpy()
@@ -332,10 +597,17 @@ def run_litevggt_reconstruction(
                     "input_frame_count": int(len(files)),
                     "aligned_frame_count": int(len(files)),
                     "skipped_frame_count": int(original_frame_count - len(files)),
-                    "frame_selection": "all",
-                    "point_selection_strategy": "global_confidence",
+                    "frame_selection": "scene_coverage",
+                    "litevggt_frame_stride": int(frame_selection_result.frame_stride),
+                    "litevggt_frame_stride_source": frame_selection_result.frame_stride_source,
+                    "litevggt_frame_budget": int(frame_selection_result.frame_budget),
+                    "litevggt_first_frame_index": int(frame_indices[0]),
+                    "litevggt_last_frame_index": int(frame_indices[-1]),
+                    "point_selection_strategy": point_selection_metric,
                     "keep_ratio": float(quality.keep_ratio),
                     "keep_ratio_source": quality.keep_ratio_source,
+                    "depth_conf_thresh": None if depth_conf_thresh is None else float(depth_conf_thresh),
+                    "litevggt_preprocess_mode": loaded_images.preprocess_mode,
                     "max_points": int(max_points),
                     "litevggt_target_size": int(quality.target_size),
                     "litevggt_target_size_source": quality.target_size_source,
@@ -343,7 +615,8 @@ def run_litevggt_reconstruction(
                     "litevggt_inference_mode": "single",
                     "litevggt_inference_mode_requested": "single",
                     "litevggt_inference_mode_effective": "single",
-                    "valid_pixel_count": int(np.isfinite(points).all(axis=1).sum()),
+                    "valid_pixel_count": int((np.isfinite(points).all(axis=1) & valid_point_mask).sum()),
+                    "valid_image_pixel_count": int(valid_masks.sum()),
                     "point_count_before_filter": int(points.shape[0]),
                     "point_count_after_filter": selected_count,
                     "point_count_before_downsample": selected_count,
@@ -375,6 +648,9 @@ def run_litevggt_pointcloud(
     max_points: int,
     max_input_frames: int | None = None,
     target_size: int | None = None,
+    frame_stride: int | None = None,
+    depth_conf_thresh: float | None = None,
+    preprocess_mode: str = "pad",
     progress: Progress,
     **unused_options,
 ) -> dict[str, int | float | str | bool]:
@@ -385,6 +661,9 @@ def run_litevggt_pointcloud(
         max_points=max_points,
         max_input_frames=max_input_frames,
         target_size=target_size,
+        frame_stride=frame_stride,
+        depth_conf_thresh=depth_conf_thresh,
+        preprocess_mode=preprocess_mode,
         progress=progress,
         **unused_options,
     )

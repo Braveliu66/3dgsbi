@@ -15,9 +15,12 @@ try:
     from app.preview.types import PreviewContext, PreviewFailure
     from app.preview.vendor.litevggt_runtime import (
         load_litevggt_image_tensors,
+        load_litevggt_padded_image,
         point_indices_to_frame_indices,
+        resolve_litevggt_frame_selection,
         resolve_litevggt_quality_settings,
         select_aligned_frames,
+        select_points_by_scene_coverage,
         select_points_by_confidence,
     )
 
@@ -31,11 +34,11 @@ except Exception as exc:  # pragma: no cover - local dependency guard
 class LiteVGGTOfficialPathTests(unittest.TestCase):
     def test_quality_settings_follow_frame_count_profiles(self) -> None:
         cases = [
-            (8, 448, 0.90, "small"),
-            (32, 392, 0.85, "medium"),
-            (80, 336, 0.75, "large"),
-            (200, 308, 0.60, "xlarge"),
-            (400, 280, 0.42, "huge"),
+            (8, 448, 1.0, "small"),
+            (32, 392, 1.0, "medium"),
+            (80, 336, 1.0, "large"),
+            (200, 308, 1.0, "xlarge"),
+            (400, 280, 1.0, "huge"),
         ]
 
         for frame_count, target_size, keep_ratio, profile in cases:
@@ -75,19 +78,59 @@ class LiteVGGTOfficialPathTests(unittest.TestCase):
         self.assertEqual(len(tensors), 2)
         self.assertEqual(tuple(tensors[0].shape), (3, 14, 336))
 
+    def test_padded_image_loading_preserves_full_image_with_valid_mask(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "wide.jpg"
+            from PIL import Image
+
+            Image.new("RGB", (40, 20), (20, 120, 200)).save(path)
+
+            image, mask = load_litevggt_padded_image(path, 28)
+
+        self.assertEqual(image.shape, (28, 28, 3))
+        self.assertEqual(mask.shape, (28, 28))
+        self.assertEqual(int(mask.sum()), 28 * 14)
+
     def test_select_aligned_frames_keeps_complete_ordered_scene(self) -> None:
         files = [Path(f"{index:03d}.jpg") for index in range(18)]
 
         selected = select_aligned_frames(files, multiple=8)
 
-        self.assertEqual(selected, files[:16])
+        self.assertEqual(len(selected), 16)
+        self.assertEqual(selected[0], files[0])
+        self.assertEqual(selected[-1], files[-1])
+        self.assertEqual(selected, sorted(selected, key=lambda path: path.name))
 
     def test_select_aligned_frames_respects_max_input_frames_as_upper_bound(self) -> None:
         files = [Path(f"{index:03d}.jpg") for index in range(30)]
 
         selected = select_aligned_frames(files, multiple=8, max_frames=17)
 
-        self.assertEqual(selected, files[:16])
+        self.assertEqual(len(selected), 16)
+        self.assertEqual(selected[0], files[0])
+        self.assertEqual(selected[-1], files[-1])
+
+    def test_frame_selection_auto_uses_large_inputs_across_full_scene(self) -> None:
+        files = [Path(f"{index:03d}.jpg") for index in range(400)]
+
+        selection = resolve_litevggt_frame_selection(files, multiple=8)
+
+        self.assertEqual(len(selection.files), 400)
+        self.assertEqual(selection.files[0], files[0])
+        self.assertEqual(selection.files[-1], files[-1])
+        self.assertEqual(selection.frame_stride, 1)
+        self.assertEqual(selection.frame_stride_source, "auto")
+
+    def test_frame_selection_allows_user_stride(self) -> None:
+        files = [Path(f"{index:03d}.jpg") for index in range(40)]
+
+        selection = resolve_litevggt_frame_selection(files, multiple=8, frame_stride=3)
+
+        self.assertEqual(len(selection.files), 8)
+        self.assertEqual(selection.files[0], files[0])
+        self.assertEqual(selection.files[-1], files[-1])
+        self.assertEqual(selection.frame_stride, 3)
+        self.assertEqual(selection.frame_stride_source, "user")
 
     def test_point_indices_map_to_original_frame_indices(self) -> None:
         selected = np.array([0, 3, 4, 7, 8, 11], dtype=np.int64)
@@ -115,6 +158,47 @@ class LiteVGGTOfficialPathTests(unittest.TestCase):
         np.testing.assert_array_equal(selected_colors, colors[[1, 3, 5]])
         np.testing.assert_array_equal(selected_confidence, confidence[[1, 3, 5]])
         np.testing.assert_array_equal(frame_indices, np.array([100, 200, 200], dtype=np.int32))
+
+    def test_scene_coverage_selection_keeps_image_regions(self) -> None:
+        points = np.arange(48, dtype=np.float32).reshape(16, 3)
+        colors = np.arange(48, dtype=np.uint8).reshape(16, 3)
+        confidence = np.array(
+            [
+                0.99,
+                0.98,
+                0.10,
+                0.09,
+                0.97,
+                0.96,
+                0.08,
+                0.07,
+                0.06,
+                0.05,
+                0.04,
+                0.03,
+                0.02,
+                0.01,
+                0.20,
+                0.19,
+            ],
+            dtype=np.float32,
+        )
+
+        selected_points, _, _, frame_indices = select_points_by_scene_coverage(
+            points,
+            colors,
+            confidence,
+            frame_indices=[7],
+            height=4,
+            width=4,
+            keep_ratio=0.25,
+            max_points=4,
+            grid_size=2,
+        )
+
+        selected_pixel_indices = (selected_points[:, 0] / 3).astype(np.int32)
+        self.assertEqual(set(selected_pixel_indices.tolist()), {0, 2, 8, 14})
+        np.testing.assert_array_equal(frame_indices, np.array([7, 7, 7, 7], dtype=np.int32))
 
     def test_confidence_selection_rejects_empty_valid_points(self) -> None:
         points = np.full((2, 3), np.nan, dtype=np.float32)
@@ -165,6 +249,7 @@ class LiteVGGTAdapterTests(unittest.TestCase):
                 options={
                     "litevggt_keep_ratio": 0.95,
                     "litevggt_target_size": 336,
+                    "litevggt_frame_stride": 2,
                     "preview_max_points": 1234,
                     "litevggt_inference_mode": "ignored",
                     "litevggt_chunk_size": 24,
@@ -186,16 +271,22 @@ class LiteVGGTAdapterTests(unittest.TestCase):
         self.assertEqual(result.splat_count, 9)
         self.assertEqual(run.call_args.kwargs["keep_ratio"], 0.95)
         self.assertEqual(run.call_args.kwargs["target_size"], 336)
+        self.assertEqual(run.call_args.kwargs["frame_stride"], 2)
+        self.assertIsNone(run.call_args.kwargs["depth_conf_thresh"])
+        self.assertEqual(run.call_args.kwargs["preprocess_mode"], "pad")
         self.assertEqual(run.call_args.kwargs["max_points"], 1234)
         self.assertEqual(
             sorted(run.call_args.kwargs),
             [
                 "checkpoint_path",
+                "depth_conf_thresh",
+                "frame_stride",
                 "input_dir",
                 "keep_ratio",
                 "max_input_frames",
                 "max_points",
                 "output_ply",
+                "preprocess_mode",
                 "progress",
                 "target_size",
             ],

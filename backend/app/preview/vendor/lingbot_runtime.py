@@ -53,6 +53,8 @@ def _log(message: str) -> None:
 @dataclass(frozen=True, slots=True)
 class LingBotInferenceProfile:
     image_size: int
+    target_width: int
+    target_height: int
     max_frames: int
     mode: str
     keyframe_interval: int | None
@@ -103,9 +105,12 @@ def run_lingbot_video_preview(
     output_points_ply: Path | None = None,
     output_splats_ply: Path | None = None,
     output_meta_json: Path | None = None,
+    output_official_predictions_npz: Path | None = None,
     fps: int,
     max_frames: int,
     image_size: int,
+    target_width: int,
+    target_height: int,
     mode: str,
     keyframe_interval: int | None,
     camera_iterations: int,
@@ -132,6 +137,7 @@ def run_lingbot_video_preview(
     _log(
         "runtime start "
         f"video={video_path} model={model_path} fps={fps} max_frames={max_frames} image_size={image_size} "
+        f"target_size={target_width}x{target_height} "
         f"mode={mode} keyframe_interval={keyframe_interval} camera_iterations={camera_iterations} "
         f"num_scale_frames={num_scale_frames} preprocess_mode={preprocess_mode} "
         f"window_size={window_size} overlap_keyframes={overlap_keyframes} "
@@ -170,6 +176,8 @@ def run_lingbot_video_preview(
     dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
     profile = LingBotInferenceProfile(
         image_size=image_size,
+        target_width=target_width,
+        target_height=target_height,
         max_frames=max_frames,
         mode=mode,
         keyframe_interval=keyframe_interval,
@@ -213,6 +221,8 @@ def run_lingbot_video_preview(
         closed_form_inverse_se3_general=closed_form_inverse_se3_general,
         torch_module=torch,
     )
+    if output_official_predictions_npz is not None:
+        save_official_predictions_npz(pred_np, output_official_predictions_npz)
     attach_depth_world_points(
         pred_np,
         unproject_depth_map_to_point_map=unproject_depth_map_to_point_map,
@@ -281,6 +291,7 @@ def run_lingbot_video_preview(
         "lingbot_min_conf": float(min_conf),
         "lingbot_max_points": int(max_points),
         "lingbot_save_predictions": bool(save_predictions),
+        "lingbot_official_predictions_npz": str(output_official_predictions_npz) if output_official_predictions_npz else None,
         "lingbot_keyframes_only_points": bool(keyframes_only_points),
         "lingbot_predictions_dir": str(predictions_dir) if predictions_dir else None,
         "quality_warning": point_metrics.get("quality_warning"),
@@ -306,29 +317,26 @@ def extract_video_frames(video_path: Path, output_dir: Path, *, fps: int, max_fr
         shutil.rmtree(tmp_dir)
     tmp_dir.mkdir(parents=True, exist_ok=True)
     pattern = tmp_dir / "%06d.jpg"
+    target_fps = str(fps) if fps > 0 else "native"
     _log(
         "video decode "
-        f"path={video_path} decoder=ffmpeg target_fps={fps} max_frames={max_frames} autorotate=true"
+        f"path={video_path} decoder=ffmpeg target_fps={target_fps} max_frames={max_frames} autorotate=true"
     )
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(video_path),
+    ]
+    if fps > 0:
+        command.extend(["-vf", f"fps={fps}"])
+    command.extend(["-q:v", "2", str(pattern)])
 
     try:
-        subprocess.run(
-            [
-                ffmpeg,
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-i",
-                str(video_path),
-                "-vf",
-                f"fps={fps}",
-                "-q:v",
-                "2",
-                str(pattern),
-            ],
-            check=True,
-        )
+        subprocess.run(command, check=True)
     except subprocess.CalledProcessError as exc:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise PreviewFailure("VIDEO_DECODE_FAILED", f"ffmpeg could not decode video: {exc}") from exc
@@ -363,7 +371,7 @@ def extract_video_frames(video_path: Path, output_dir: Path, *, fps: int, max_fr
     _log(
         "video sampled "
         f"written_frames={len(selected)} decoded_frames={len(all_frames)} size={width}x{height} "
-        f"target_fps={fps} max_frames={max_frames} autorotate=true"
+        f"target_fps={target_fps} max_frames={max_frames} autorotate=true"
     )
     return ExtractedLingBotFrames(output_dir, len(selected), None, fps, width, height)
 
@@ -398,6 +406,91 @@ def resolve_keyframe_interval(value: int | None, mode: str, frame_count: int) ->
 def resolve_preprocess_mode(mode: str, width: int, height: int) -> str:
     normalized = (mode or "auto").strip().lower()
     return normalized if normalized in {"crop", "pad"} else "crop"
+
+
+def resolve_lingbot_target_dimensions(
+    width: int,
+    height: int,
+    *,
+    target_width: int,
+    target_height: int,
+    patch_size: int,
+) -> tuple[int, int]:
+    if width <= 0 or height <= 0:
+        return align_to_patch(target_width, patch_size), align_to_patch(target_height, patch_size)
+
+    max_width = align_to_patch(target_width, patch_size)
+    max_height = align_to_patch(target_height, patch_size)
+    scale = min(max_width / width, max_height / height)
+    new_width = max(patch_size, int(round(width * scale / patch_size)) * patch_size)
+    new_height = max(patch_size, int(round(height * scale / patch_size)) * patch_size)
+    return min(new_width, max_width), min(new_height, max_height)
+
+
+def align_to_patch(value: int, patch_size: int) -> int:
+    return max(patch_size, int(value) // patch_size * patch_size)
+
+
+def load_and_preprocess_images_to_target_box(
+    image_path_list: list[str],
+    *,
+    target_width: int,
+    target_height: int,
+    patch_size: int,
+):
+    if not image_path_list:
+        raise ValueError("At least 1 image is required")
+
+    try:
+        import torch
+        from PIL import Image, ImageOps
+    except Exception as exc:
+        raise PreviewFailure("LINGBOT_RUNTIME_UNAVAILABLE", f"LingBot-Map image preprocessing import failed: {exc}") from exc
+
+    images = []
+    for image_path in image_path_list:
+        img = Image.open(image_path)
+        img = ImageOps.exif_transpose(img)
+        if img.mode == "RGBA":
+            background = Image.new("RGBA", img.size, (255, 255, 255, 255))
+            img = Image.alpha_composite(background, img)
+        img = img.convert("RGB")
+
+        width, height = img.size
+        new_width, new_height = resolve_lingbot_target_dimensions(
+            width,
+            height,
+            target_width=target_width,
+            target_height=target_height,
+            patch_size=patch_size,
+        )
+        img = img.resize((new_width, new_height), Image.Resampling.BICUBIC)
+        array = np.asarray(img, dtype=np.float32) / 255.0
+        images.append(torch.from_numpy(array).permute(2, 0, 1).contiguous())
+
+    shapes = {(int(img.shape[1]), int(img.shape[2])) for img in images}
+    if len(shapes) > 1:
+        max_height = max(shape[0] for shape in shapes)
+        max_width = max(shape[1] for shape in shapes)
+        padded = []
+        for img in images:
+            h_padding = max_height - int(img.shape[1])
+            w_padding = max_width - int(img.shape[2])
+            if h_padding > 0 or w_padding > 0:
+                pad_top = h_padding // 2
+                pad_bottom = h_padding - pad_top
+                pad_left = w_padding // 2
+                pad_right = w_padding - pad_left
+                img = torch.nn.functional.pad(
+                    img,
+                    (pad_left, pad_right, pad_top, pad_bottom),
+                    mode="constant",
+                    value=1.0,
+                )
+            padded.append(img)
+        images = padded
+
+    return torch.stack(images)
 
 
 def select_lingbot_frame_paths(frame_paths: list[Path], max_frames: int) -> list[Path]:
@@ -456,22 +549,34 @@ def run_lingbot_inference_profile(
         source_width = 0
         source_height = 0
     resolved_preprocess_mode = resolve_preprocess_mode(profile.preprocess_mode, source_width, source_height)
+    target_width = align_to_patch(profile.target_width, 14)
+    target_height = align_to_patch(profile.target_height, 14)
     progress(
         "lingbot_preprocess",
         34,
-        f"preprocessing {len(selected_frame_paths)} frames at image size {profile.image_size} using {resolved_preprocess_mode}",
+        f"preprocessing {len(selected_frame_paths)} frames to <= {target_width}x{target_height} using {resolved_preprocess_mode}",
     )
     try:
-        images = load_and_preprocess_images(
-            [str(path) for path in selected_frame_paths],
-            mode=resolved_preprocess_mode,
-            image_size=profile.image_size,
-            patch_size=14,
-        )
+        if resolved_preprocess_mode == "crop":
+            images = load_and_preprocess_images_to_target_box(
+                [str(path) for path in selected_frame_paths],
+                target_width=target_width,
+                target_height=target_height,
+                patch_size=14,
+            )
+        else:
+            images = load_and_preprocess_images(
+                [str(path) for path in selected_frame_paths],
+                mode=resolved_preprocess_mode,
+                image_size=profile.image_size,
+                patch_size=14,
+            )
     except Exception as exc:
         raise PreviewFailure("LINGBOT_PREPROCESS_FAILED", f"LingBot-Map preprocessing failed: {exc}") from exc
 
     frame_count = int(images.shape[0])
+    preprocessed_height = int(images.shape[-2])
+    preprocessed_width = int(images.shape[-1])
     resolved_mode = resolve_mode(profile.mode, frame_count)
     resolved_keyframe_interval = resolve_keyframe_interval(profile.keyframe_interval, resolved_mode, frame_count)
     _log(
@@ -480,6 +585,7 @@ def run_lingbot_inference_profile(
         f"requested_max_frames={profile.max_frames} requested_mode={profile.mode} "
         f"resolved_mode={resolved_mode} resolved_keyframe_interval={resolved_keyframe_interval} "
         f"preprocess_mode={resolved_preprocess_mode} source_size={source_width}x{source_height} "
+        f"target_size={target_width}x{target_height} preprocessed_size={preprocessed_width}x{preprocessed_height} "
         f"image_size={profile.image_size} camera_iterations={profile.camera_iterations} "
         f"num_scale_frames={profile.num_scale_frames} window_size={profile.window_size} "
         f"overlap_keyframes={profile.overlap_keyframes} kv_cache_sliding_window={profile.kv_cache_sliding_window} "
@@ -571,6 +677,10 @@ def run_lingbot_inference_profile(
 
     metrics = {
         "lingbot_image_size": int(profile.image_size),
+        "lingbot_target_width": int(target_width),
+        "lingbot_target_height": int(target_height),
+        "lingbot_preprocessed_width": int(preprocessed_width),
+        "lingbot_preprocessed_height": int(preprocessed_height),
         "lingbot_model_image_size": model_image_size,
         "lingbot_inference_frames": frame_count,
         "lingbot_inference_mode": resolved_mode,
@@ -951,6 +1061,13 @@ def save_predictions_npz(predictions: dict[str, np.ndarray], output_dir: Path) -
     if metadata:
         np.savez(output_dir / "meta.npz", **metadata)
     return output_dir
+
+
+def save_official_predictions_npz(predictions: dict[str, np.ndarray], output_path: Path) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    arrays = {key: value for key, value in predictions.items() if isinstance(value, np.ndarray)}
+    np.savez_compressed(output_path, **arrays)
+    return output_path
 
 
 def prediction_frame_count(predictions: dict[str, np.ndarray]) -> int | None:

@@ -480,6 +480,7 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
                 for metric_key, kind, file_name in (
                     ("intermediate_splats_ply", "debug_splats_ply", "preview_splats.ply"),
                     ("preview_meta_json", "preview_meta_json", "preview_meta.json"),
+                    ("lingbot_official_predictions_npz", "lingbot_official_predictions_npz", "official_predictions.npz"),
                 ):
                     path_value = result.metrics.get(metric_key)
                     path = Path(path_value) if isinstance(path_value, str) else None
@@ -723,6 +724,10 @@ def preview_artifact_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "lingbot_frame_width",
         "lingbot_frame_height",
         "lingbot_image_size",
+        "lingbot_target_width",
+        "lingbot_target_height",
+        "lingbot_preprocessed_width",
+        "lingbot_preprocessed_height",
         "lingbot_model_image_size",
         "lingbot_inference_frames",
         "lingbot_inference_mode",
@@ -778,6 +783,7 @@ def preview_artifact_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "intermediate_points_ply_size",
         "intermediate_splats_ply_size",
         "preview_meta_json_size",
+        "lingbot_official_predictions_npz_size",
         "fixed_splat_base_point_radius",
         "fixed_splat_point_radius_scale",
         "fixed_splat_point_radius",

@@ -20,16 +20,22 @@ def run(ctx: PreviewContext) -> PreviewResult:
 
     keep_ratio_value = ctx.options.get("litevggt_keep_ratio")
     keep_ratio = float(keep_ratio_value) if keep_ratio_value is not None else None
-    max_points = int(ctx.options.get("preview_max_points") or 3_000_000)
+    max_points = int(ctx.options.get("preview_max_points") or 15_000_000)
     max_input_frames_value = ctx.options.get("litevggt_max_input_frames")
     max_input_frames = int(max_input_frames_value) if max_input_frames_value else None
     target_size_value = ctx.options.get("litevggt_target_size")
     target_size = int(target_size_value) if target_size_value else None
+    frame_stride = _read_optional_int(ctx.options.get("litevggt_frame_stride"))
+    depth_conf_thresh = _read_optional_float(ctx.options.get("litevggt_depth_conf_thresh"), None)
+    preprocess_mode = str(ctx.options.get("litevggt_preprocess_mode") or "pad")
     params: dict[str, Any] = {
         "keep_ratio": keep_ratio if keep_ratio is not None else "auto",
         "max_points": max_points,
         "max_input_frames": max_input_frames,
         "target_size": target_size if target_size is not None else "auto",
+        "frame_stride": frame_stride if frame_stride is not None else "auto",
+        "depth_conf_thresh": depth_conf_thresh,
+        "preprocess_mode": preprocess_mode,
     }
     print(
         "[litevggt-preview] adapter params "
@@ -56,6 +62,9 @@ def run(ctx: PreviewContext) -> PreviewResult:
         max_points=max_points,
         max_input_frames=max_input_frames,
         target_size=target_size,
+        frame_stride=frame_stride,
+        depth_conf_thresh=depth_conf_thresh,
+        preprocess_mode=preprocess_mode,
         progress=report,
     )
     timer.mark("litevggt_inference")
@@ -99,3 +108,30 @@ def _first_names(paths, limit: int = 8) -> str:
 
 def _format_metrics(metrics: dict[str, Any]) -> str:
     return " ".join(f"{key}={value}" for key, value in sorted(metrics.items()))
+
+
+def _read_optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized in {"", "auto", "none"}:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _read_optional_float(value: Any, fallback: float | None) -> float | None:
+    if value is None:
+        return fallback
+    normalized = str(value).strip().lower()
+    if normalized in {"", "auto"}:
+        return fallback
+    if normalized in {"none", "off", "false"}:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
