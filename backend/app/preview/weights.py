@@ -34,70 +34,18 @@ LINGBOT_MAP_LONG_WEIGHT = ModelWeight(
     "lingbot/lingbot-map-long.pt",
     "https://huggingface.co/robbyant/lingbot-map/resolve/main/lingbot-map-long.pt",
 )
-ROMA_OUTDOOR_WEIGHT = ModelWeight(
-    "roma/roma_outdoor.pth",
-    "https://huggingface.co/xmanifold/roma/resolve/main/roma_outdoor.pth",
-)
-ROMA_INDOOR_WEIGHT = ModelWeight(
-    "roma/roma_indoor.pth",
-    "https://huggingface.co/xmanifold/roma/resolve/main/roma_indoor.pth",
-)
-ROMA_DINOV2_WEIGHT = ModelWeight(
-    "roma/dinov2_vitl14_pretrain.pth",
-    "https://huggingface.co/Dominoc/dinov2_vitl14_pretrain/resolve/main/dinov2_vitl14_pretrain.pth",
-)
-SPEED3R_PI3_CONFIG = ModelWeight(
-    "speed3r_pi3/config.json",
-    "https://huggingface.co/weining17/Speed3R_Pi3/resolve/main/config.json",
-)
-SPEED3R_PI3_WEIGHT = ModelWeight(
-    "speed3r_pi3/model.safetensors",
-    "https://huggingface.co/weining17/Speed3R_Pi3/resolve/main/model.safetensors",
-)
-MAST3R_WEIGHT = ModelWeight(
-    "mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth",
-    "https://download.europe.naverlabs.com/ComputerVision/MASt3R/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth",
-)
-MAST3R_RETRIEVAL_WEIGHT = ModelWeight(
-    "mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth",
-    "https://download.europe.naverlabs.com/ComputerVision/MASt3R/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth",
-)
-MAST3R_RETRIEVAL_CODEBOOK = ModelWeight(
-    "mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl",
-    "https://download.europe.naverlabs.com/ComputerVision/MASt3R/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl",
-)
 
 MODEL_WEIGHTS: tuple[ModelWeight, ...] = (
     LITEVGGT_WEIGHT,
     LINGBOT_MAP_LONG_WEIGHT,
-    ROMA_OUTDOOR_WEIGHT,
-    ROMA_INDOOR_WEIGHT,
-    ROMA_DINOV2_WEIGHT,
-    SPEED3R_PI3_CONFIG,
-    SPEED3R_PI3_WEIGHT,
-    MAST3R_WEIGHT,
-    MAST3R_RETRIEVAL_WEIGHT,
-    MAST3R_RETRIEVAL_CODEBOOK,
 )
 WEIGHT_BY_RELATIVE_PATH = {item.relative_path: item for item in MODEL_WEIGHTS}
 
 PIPELINE_WEIGHT_PATHS: dict[str, tuple[str, ...]] = {
     "litevggt_spz": ("litevggt/te_dict.pt",),
     "lingbot_map_spz": ("lingbot/lingbot-map-long.pt",),
-    "mobilegs_lmrs": (
-        "roma/roma_outdoor.pth",
-        "roma/roma_indoor.pth",
-        "roma/dinov2_vitl14_pretrain.pth",
-    ),
     "litevggt_fastgs_deblur_gsplat": (
         "litevggt/te_dict.pt",
-    ),
-    "video_artdeco_speed3r": (
-        "speed3r_pi3/config.json",
-        "speed3r_pi3/model.safetensors",
-        "mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth",
-        "mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth",
-        "mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl",
     ),
 }
 

@@ -89,39 +89,37 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("cached_wheel_install diff-gaussian-rasterization-fastgs", dockerfile)
         self.assertIn("backend/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/simple-knn", dockerfile)
         self.assertIn("cached_wheel_install diff-gaussian-rasterization /app/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/diff-gaussian-rasterization", dockerfile)
-        self.assertNotIn("cached_wheel_install simple-knn-local", dockerfile)
-        self.assertIn("cached_wheel_install simple-knn-artdeco", dockerfile)
+        self.assertIn("cached_wheel_install simple-knn /app/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/simple-knn", dockerfile)
+        self.assertNotIn("cached_wheel_install simple-knn-artdeco", dockerfile)
         self.assertIn("retry_pip --force-reinstall --no-deps \"$wheel\"", dockerfile)
-        self.assertIn("ARTDECO simple-knn distIndex2 import ok", dockerfile)
         self.assertIn("libc10.so", dockerfile)
         self.assertIn("/etc/ld.so.conf.d/pytorch.conf", dockerfile)
         self.assertIn("retry_git", dockerfile)
         self.assertIn("libeigen3-dev", dockerfile)
-        self.assertIn("test -f /usr/include/eigen3/Eigen/Sparse", dockerfile)
-        self.assertIn('"/usr/include/eigen3"', dockerfile)
+        self.assertNotIn("test -f /usr/include/eigen3/Eigen/Sparse", dockerfile)
+        self.assertNotIn('"/usr/include/eigen3"', dockerfile)
         self.assertNotIn("submodule update --init --recursive VSLAM/thirdparty/eigen", dockerfile)
-        self.assertIn("D11.scalar_type()", dockerfile)
-        self.assertIn("dx.pow(2).sum().sqrt()", dockerfile)
+        self.assertNotIn("D11.scalar_type()", dockerfile)
+        self.assertNotIn("dx.pow(2).sum().sqrt()", dockerfile)
         self.assertIn("ensure_git_checkout", dockerfile)
         self.assertIn("cat-file -e", dockerfile)
         self.assertIn("three-dgs-worker-lingbot-map-git-cache", dockerfile)
         self.assertIn("CACHED_LINGBOT_MAP", dockerfile)
+        self.assertNotIn("ARTDECO_REPO_URL", dockerfile)
+        self.assertNotIn("SPEED3R_REPO_URL", dockerfile)
         self.assertNotIn('retry_pip --no-deps "git+$LINGBOT_MAP_REPO_URL@$LINGBOT_MAP_REPO_COMMIT"', dockerfile)
         self.assertNotIn("source.trainer", dockerfile)
         self.assertNotIn("lm-rs", (BACKEND_ROOT.parent / "scripts" / "bootstrap-repos.sh").read_text(encoding="utf-8").lower())
         self.assertNotIn("lm-rs", (BACKEND_ROOT.parent / "scripts" / "bootstrap-repos.ps1").read_text(encoding="utf-8").lower())
 
-    def test_artdeco_command_uses_official_quality_defaults_without_gaussian_cap(self) -> None:
-        trainer_source = (BACKEND_ROOT / "app" / "fine" / "video" / "artdeco_trainer.py").read_text(encoding="utf-8")
-        entrypoint_source = (BACKEND_ROOT / "app" / "fine" / "video" / "artdeco_entrypoint.py").read_text(encoding="utf-8")
+    def test_video_fine_runtime_is_not_registered(self) -> None:
+        algorithms_source = (BACKEND_ROOT / "app" / "algorithms.py").read_text(encoding="utf-8")
+        runner_source = (BACKEND_ROOT / "app" / "fine" / "runner.py").read_text(encoding="utf-8")
 
-        self.assertNotIn("ARTDECO_MAX_GAUSSIANS", trainer_source)
-        self.assertNotIn("gaussian cap pruned", entrypoint_source)
-        self.assertIn("gaussian_total_cap=disabled", entrypoint_source)
-        self.assertIn('options.get("fine_artdeco_gs_add_ratio"), 1.0', trainer_source)
-        self.assertIn('options.get("fine_artdeco_visible_threshold"), 0.0', trainer_source)
-        self.assertIn('options.get("fine_artdeco_sh_degree"), 3', trainer_source)
-        self.assertIn('options.get("fine_artdeco_max_active_keyframes"), 400', trainer_source)
+        self.assertNotIn("Video Fine ARTDECO + Speed3R-Pi3", algorithms_source)
+        self.assertNotIn("video_fine_runtime", algorithms_source)
+        self.assertNotIn("artdeco_video_runtime_status", algorithms_source)
+        self.assertNotIn("run_video_artdeco_speed3r_pipeline", runner_source)
 
     def test_fine_code_is_split_by_integration_boundary(self) -> None:
         fine_root = BACKEND_ROOT / "app" / "fine"
@@ -139,8 +137,8 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertTrue((fine_root / "option_utils.py").exists())
         self.assertFalse((fine_root / "amb3r_sfm.py").exists())
         self.assertFalse((fine_root / "amb3r_runtime").exists())
-        self.assertTrue((fine_root / "edgs_init.py").exists())
-        self.assertTrue((fine_root / "edgs_runtime" / "corr_init.py").exists())
+        self.assertFalse((fine_root / "edgs_init.py").exists())
+        self.assertFalse((fine_root / "edgs_runtime" / "corr_init.py").exists())
 
     def test_compose_uses_one_worker_image(self) -> None:
         compose_source = (BACKEND_ROOT.parent / "docker-compose.yml").read_text(encoding="utf-8")
@@ -165,56 +163,35 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertEqual(normalize_fine_pipeline("video_litevggt"), "video_artdeco_speed3r")
         self.assertEqual(normalize_fine_pipeline("artdeco_litevggt"), "video_artdeco_speed3r")
 
-    def test_video_fine_does_not_route_through_image_training(self) -> None:
+    def test_video_fine_does_not_route_to_runtime(self) -> None:
         runner_source = (BACKEND_ROOT / "app" / "fine" / "runner.py").read_text(encoding="utf-8")
-        video_block = runner_source.split("if pipeline == VIDEO_PIPELINE_NAME:", 1)[1].split("if pipeline != PIPELINE_NAME:", 1)[0]
 
-        self.assertIn("run_video_artdeco_speed3r_pipeline", video_block)
-        self.assertNotIn("train_mobile_3dgs", video_block)
-        self.assertNotIn("build_scene", video_block)
+        self.assertNotIn("if pipeline == VIDEO_PIPELINE_NAME:", runner_source)
+        self.assertNotIn("run_video_artdeco_speed3r_pipeline", runner_source)
+        self.assertIn("Unsupported fine pipeline", runner_source)
 
-        video_source = "\n".join(path.read_text(encoding="utf-8") for path in (BACKEND_ROOT / "app" / "fine" / "video").glob("*.py"))
-        for forbidden in ("train_mobile_3dgs", "build_scene(", "AMB3R", "MobileGS", "LM-RS", "DeblurMLP"):
-            self.assertNotIn(forbidden, video_source)
-
-    def test_fine_worker_splits_image_and_video_inputs(self) -> None:
+    def test_fine_worker_rejects_video_inputs(self) -> None:
         source = (BACKEND_ROOT / "app" / "fine_worker.py").read_text(encoding="utf-8")
 
         self.assertIn('project.input_type == "images"', source)
         self.assertIn('project.input_type == "video"', source)
-        self.assertIn("download_single_video", source)
-        self.assertIn("len(video_items) != 1 or len(project.media) != 1", source)
-        self.assertIn("ensure_video_artdeco_weights", source)
+        self.assertIn("Video fine reconstruction is disabled", source)
+        self.assertNotIn("ensure_video_artdeco_weights", source)
 
-    def test_video_artdeco_mock_output_becomes_final_artifacts(self) -> None:
-        from app.fine.video.types import ArtdecoTrainingResult, ExtractedVideoFrames
-        import app.fine.video.pipeline as video_pipeline
+    def test_video_fine_pipeline_raises_unsupported(self) -> None:
+        try:
+            from app.fine.runner import run_fine_pipeline
+        except Exception as exc:
+            raise unittest.SkipTest(f"fine runner dependencies unavailable: {exc}") from exc
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            input_video = root / "clip.mp4"
-            input_video.write_bytes(b"video")
-            dataset_root = root / "dataset"
-            (dataset_root / "images").mkdir(parents=True)
-            gs_ply = root / "artdeco_output" / "point_clouds" / "gs.ply"
-            gs_ply.parent.mkdir(parents=True)
-            gs_ply.write_bytes(b"ply\nformat ascii 1.0\nend_header\n")
-            frames = ExtractedVideoFrames(
-                frames_dir=dataset_root / "images",
-                dataset_root=dataset_root,
-                count=3,
-                width=640,
-                height=480,
-                fps=30.0,
-                source_video=input_video,
-            )
-            training = ArtdecoTrainingResult(output_dir=root / "artdeco_output", gs_ply=gs_ply, metrics={"artdeco_metric": 1})
             ctx = FineContext(
                 task_id="task",
                 project_id="project",
                 pipeline="video_artdeco_speed3r",
-                input_dir=input_video.parent,
-                input_video=input_video,
+                input_dir=root,
+                input_video=root / "clip.mp4",
                 work_dir=root / "work",
                 model_cache_dir=root / "model-cache",
                 final_ply=root / "work" / "final.ply",
@@ -225,20 +202,10 @@ class FineRuntimeTests(unittest.TestCase):
                 options={},
             )
 
-            with patch.object(video_pipeline, "extract_video_frames", return_value=frames), patch.object(
-                video_pipeline, "run_artdeco_speed3r_training", return_value=training
-            ), patch.object(video_pipeline, "convert_ply_to_spz", side_effect=lambda _ply, spz: (spz.write_bytes(b"spz"), 11)[1]):
-                result = video_pipeline.run_video_artdeco_speed3r_pipeline(
-                    ctx,
-                    settings=SimpleNamespace(),
-                    lod_builder=lambda _ctx: None,
-                )
+            with self.assertRaises(FineFailure) as raised:
+                run_fine_pipeline(ctx)
 
-            self.assertEqual(ctx.final_ply.read_bytes(), gs_ply.read_bytes())
-            self.assertEqual(ctx.final_spz.read_bytes(), b"spz")
-            self.assertEqual(result.metrics["pipeline"], "video_artdeco_speed3r")
-            self.assertEqual(result.metrics["splat_count"], 11)
-            self.assertEqual(result.metrics["artdeco_metric"], 1)
+        self.assertEqual(raised.exception.code, "UNSUPPORTED_FINE_PIPELINE")
 
     def test_blur_summary_reports_kept_images(self) -> None:
         BlurScore, _, summarize_blur_scores, *_ = import_fine_runtime()
@@ -254,8 +221,8 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("0.jpg", summary.per_frame_blur)
 
     def test_prepare_mobile_images_writes_normalized_blur_registry(self) -> None:
-        from PIL import Image
         try:
+            from PIL import Image
             from app.fine.preprocess import BlurScore, prepare_mobile_images
         except Exception as exc:
             raise unittest.SkipTest(f"fine preprocess dependencies unavailable: {exc}") from exc
@@ -355,10 +322,13 @@ class FineRuntimeTests(unittest.TestCase):
 
     def test_fine_weight_registration_uses_litevggt_by_default(self) -> None:
         fine_worker_source = (BACKEND_ROOT / "app" / "fine_worker.py").read_text(encoding="utf-8")
+        weights_source = (BACKEND_ROOT / "app" / "preview" / "weights.py").read_text(encoding="utf-8")
         self.assertIn("download_model_weights", fine_worker_source)
         self.assertIn("weights_for_pipeline", fine_worker_source)
-        self.assertIn("ensure_roma_weights", fine_worker_source)
-        self.assertIn('"litevggt/te_dict.pt"', (BACKEND_ROOT / "app" / "preview" / "weights.py").read_text(encoding="utf-8"))
+        self.assertNotIn("ensure_roma_weights", fine_worker_source)
+        self.assertIn('"litevggt/te_dict.pt"', weights_source)
+        self.assertNotIn("roma_outdoor.pth", weights_source)
+        self.assertNotIn("speed3r_pi3/model.safetensors", weights_source)
         self.assertNotIn("ensure_amb3r_weight", fine_worker_source)
 
     def test_preview_litevggt_and_fine_runner_imports_are_isolated(self) -> None:
@@ -432,22 +402,15 @@ class FineRuntimeTests(unittest.TestCase):
 
         self.assertAlmostEqual(dummy.optimizer.param_groups[0]["lr"], 0.001)
 
-    def test_edgs_initializes_before_training_setup_and_disables_densification(self) -> None:
+    def test_edgs_option_is_rejected_before_training(self) -> None:
         trainer_source = (BACKEND_ROOT / "app" / "fine" / "mobilegs_trainer.py").read_text(encoding="utf-8")
         runner_source = (BACKEND_ROOT / "app" / "fine" / "runner.py").read_text(encoding="utf-8")
-        edgs_source = (BACKEND_ROOT / "app" / "fine" / "edgs_init.py").read_text(encoding="utf-8")
-        corr_source = (BACKEND_ROOT / "app" / "fine" / "edgs_runtime" / "corr_init.py").read_text(encoding="utf-8")
 
-        self.assertLess(trainer_source.index("initialize_edgs_if_enabled"), trainer_source.index("gaussians.training_setup(opt)"))
-        self.assertIn("fine_edgs_enabled", trainer_source)
-        self.assertIn("matches_per_ref=read_int(options.get(\"fine_edgs_matches_per_ref\")", trainer_source)
-        self.assertIn("opt.densify_until_iter = 0", trainer_source)
-        self.assertIn("densification_disabled_by_edgs", trainer_source)
-        self.assertIn("disabled_by_edgs", runner_source)
-        self.assertIn("EDGS_RUNTIME_UNAVAILABLE", edgs_source)
-        self.assertIn("init_gaussians_with_corr", corr_source)
-        self.assertIn("roma.match", corr_source)
-        self.assertNotIn("gradio", corr_source.lower())
+        self.assertIn("fine_edgs_enabled", runner_source)
+        self.assertIn("EDGS/RoMA dense initialization has been removed", runner_source)
+        self.assertNotIn("initialize_edgs_if_enabled", trainer_source)
+        self.assertNotIn("matches_per_ref=read_int", trainer_source)
+        self.assertNotIn("opt.densify_until_iter = 0", trainer_source)
 
     def test_deblur_auto_controls_lmrs_default(self) -> None:
         *_, deblur_mlp_enabled_by_default, _ = import_fine_runtime()
@@ -471,7 +434,7 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertNotIn("spconv-cu118==2.3.8", dockerfile)
         self.assertNotIn("torch-scatter==2.1.2", dockerfile)
         self.assertIn("cython==0.29.37", requirements)
-        self.assertIn("romatch==0.1.2", requirements)
+        self.assertNotIn("romatch==0.1.2", requirements)
         self.assertIn("scikit-learn==1.6.1", requirements)
         self.assertIn("seaborn==0.13.2", requirements)
         self.assertIn("evo==1.36.4", requirements)
@@ -484,7 +447,7 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("trimesh[easy]", requirements)
         self.assertIn("hf_endpoint", dockerfile)
         self.assertIn("https://hf-mirror.com", dockerfile)
-        self.assertIn("/model-cache/roma", dockerfile)
+        self.assertNotIn("/model-cache/roma", dockerfile)
         self.assertNotIn("compvis/edgs", dockerfile)
         constraints = (worker_root / "constraints.txt").read_text(encoding="utf-8").lower()
         self.assertIn("torch==2.8.0", constraints)
@@ -497,42 +460,42 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("addict==2.4.0", requirements)
         self.assertIn("gsplat==1.5.3", requirements)
         self.assertIn("safetensors==0.7.0", requirements)
-        self.assertIn("pypose==0.7.3", requirements)
-        self.assertIn("natsort==8.4.0", requirements)
+        self.assertNotIn("pypose==0.7.3", requirements)
+        self.assertNotIn("natsort==8.4.0", requirements)
         self.assertNotIn("/model-cache/amb3r", dockerfile)
-        self.assertIn("/model-cache/speed3r_pi3", dockerfile)
-        self.assertIn("/model-cache/mast3r", dockerfile)
-        self.assertIn("artdeco_repo_commit", dockerfile)
-        self.assertIn("speed3r_repo_commit", dockerfile)
+        self.assertNotIn("/model-cache/speed3r_pi3", dockerfile)
+        self.assertNotIn("/model-cache/mast3r", dockerfile)
+        self.assertNotIn("artdeco_repo_commit", dockerfile)
+        self.assertNotIn("speed3r_repo_commit", dockerfile)
         self.assertIn("fastgs_repo_commit", dockerfile)
         self.assertIn("cached_wheel_install diff-gaussian-rasterization-fastgs", dockerfile)
-        self.assertIn("env pythonpath=${artdeco_root}/vslam/thirdparty/mast3r/dust3r/croco", dockerfile)
+        self.assertNotIn("env pythonpath=${artdeco_root}/vslam/thirdparty/mast3r/dust3r/croco", dockerfile)
         self.assertIn("three-dgs-worker-extension-wheel-cache", dockerfile)
         self.assertNotIn("three-dgs-worker-lmrs-git-cache", dockerfile)
         self.assertNotIn("lmrs_repo_url", dockerfile)
         self.assertNotIn("lmrs_root", dockerfile)
-        self.assertNotIn("cached_wheel_install simple-knn-local", dockerfile)
+        self.assertIn("cached_wheel_install simple-knn /app/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/simple-knn", dockerfile)
         self.assertIn("retry_pip --force-reinstall --no-deps \"$wheel\"", dockerfile)
         self.assertIn("libc10.so", dockerfile)
         self.assertIn("/etc/ld.so.conf.d/pytorch.conf", dockerfile)
         self.assertNotIn("copy backend/app/fine/video/artdeco_optimizer_compat.py /tmp", dockerfile)
-        self.assertIn("cached_wheel_install simple-knn-artdeco", dockerfile)
-        self.assertIn("cached_wheel_install pyimgui", dockerfile)
-        self.assertIn("cached_wheel_install curope", dockerfile)
-        self.assertIn("artdeco pi3 rope2d patch did not apply", dockerfile)
-        self.assertIn("artdeco simple-knn distindex2 import ok", dockerfile)
+        self.assertNotIn("cached_wheel_install simple-knn-artdeco", dockerfile)
+        self.assertNotIn("cached_wheel_install pyimgui", dockerfile)
+        self.assertNotIn("cached_wheel_install curope", dockerfile)
+        self.assertNotIn("artdeco pi3 rope2d patch did not apply", dockerfile)
+        self.assertNotIn("artdeco simple-knn distindex2 import ok", dockerfile)
         self.assertNotIn("artdeco vslam visualization dependencies import ok", dockerfile)
         self.assertNotIn("artdeco mapping entrypoint imports ok", dockerfile)
         self.assertNotIn("artdeco rope2d cuda extension import ok", dockerfile)
         self.assertNotIn("speed3r rope2d cuda extension import ok", dockerfile)
-        self.assertIn("cached_wheel_install artdeco-vslam \"$artdeco_root/vslam\"", dockerfile)
+        self.assertNotIn("cached_wheel_install artdeco-vslam", dockerfile)
         self.assertLess(
             dockerfile.index("copy backend/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/fused-ssim"),
             dockerfile.index("cached_wheel_install fused-ssim"),
         )
         self.assertGreater(
             dockerfile.index("copy backend/app ./app"),
-            dockerfile.index("cached_wheel_install artdeco-vslam"),
+            dockerfile.index("cached_wheel_install lingbot-map"),
         )
         self.assertIn("import pycolmap", dockerfile)
         self.assertIn("'einops==0.8.0' 'transformer-engine[pytorch]==2.4.0'", dockerfile)

@@ -246,6 +246,27 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(payload["options"]["fine_sfm_backend"], "colmap")
             self.assertEqual(payload["options"]["fine_colmap_threads"], 4)
 
+    def test_fine_task_rejects_edgs_option(self) -> None:
+        with TestClient(app) as client, patch("app.main.enqueue_fine_task", return_value=None):
+            headers = auth_headers(client)
+            project_id = create_image_project(client, headers, "removed edgs option")
+            for index in range(8):
+                upload_response = client.post(
+                    f"/api/projects/{project_id}/media",
+                    files={"file": (f"{index}.png", PNG_BYTES, "image/png")},
+                    headers=headers,
+                )
+                upload_response.raise_for_status()
+
+            response = client.post(
+                f"/api/projects/{project_id}/tasks/fine",
+                json={"options": {"fine_edgs_enabled": True}},
+                headers=headers,
+            )
+
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("EDGS/RoMA dense initialization has been removed", response.text)
+
     def test_preview_rejects_legacy_edgs_pipeline(self) -> None:
         with TestClient(app) as client:
             headers = auth_headers(client)
@@ -283,22 +304,16 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.json()["options"]["preview_pipeline"], "litevggt_spz")
 
-    def test_video_fine_task_uses_artdeco_speed3r_pipeline(self) -> None:
+    def test_video_fine_task_is_disabled(self) -> None:
         with TestClient(app) as client, patch("app.main.enqueue_fine_task", return_value=None):
             headers = auth_headers(client)
             project_id = create_video_project(client, headers, "direct video fine start")
             upload_video(client, headers, project_id, b"not-a-real-video")
 
             response = client.post(f"/api/projects/{project_id}/tasks/fine", json={"options": {}}, headers=headers)
-            response.raise_for_status()
-            payload = response.json()
 
-            self.assertEqual(payload["type"], "fine")
-            self.assertEqual(payload["status"], "queued")
-            self.assertEqual(payload["options"]["fine_pipeline"], "video_artdeco_speed3r")
-            self.assertEqual(payload["options"]["source_version"], 1)
-            self.assertNotIn("fine_amb3r_memory_device", payload["options"])
-            self.assertNotIn("fine_amb3r_init_candidates", payload["options"])
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("Video fine reconstruction is disabled", response.text)
 
     def test_video_preview_task_uses_lingbot_pipeline(self) -> None:
         fake_redis = FakeRedis()

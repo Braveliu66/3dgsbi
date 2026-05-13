@@ -948,12 +948,16 @@ def create_fine_task(
         raise HTTPException(status_code=400, detail="LiteVGGT fine reconstruction requires at least 8 images")
     if project.input_type == "video" and (video_count != 1 or len(project.media) != 1):
         raise HTTPException(status_code=400, detail="Video fine reconstruction requires exactly one video file")
+    if project.input_type == "video":
+        raise HTTPException(status_code=400, detail="Video fine reconstruction is disabled; use video preview instead")
     if project.input_type not in {"images", "video"}:
         raise HTTPException(status_code=400, detail="Fine reconstruction input type is unsupported")
 
-    fine_pipeline = "video_artdeco_speed3r" if project.input_type == "video" else "litevggt_fastgs_deblur_gsplat"
-    eta_seconds = settings.fine_expected_seconds_video if project.input_type == "video" else settings.fine_expected_seconds_images
+    fine_pipeline = "litevggt_fastgs_deblur_gsplat"
+    eta_seconds = settings.fine_expected_seconds_images
     payload_options = payload.options or {}
+    if str(payload_options.get("fine_edgs_enabled", "")).strip().lower() in {"1", "true", "yes", "on"}:
+        raise HTTPException(status_code=400, detail="EDGS/RoMA dense initialization has been removed")
 
     options = {
         **payload_options,

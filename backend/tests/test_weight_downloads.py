@@ -141,24 +141,8 @@ class WeightDownloadTests(unittest.TestCase):
         self.assertEqual([item.relative_path for item in weights_for_pipeline("litevggt_edgs")], [])
         self.assertEqual([item.relative_path for item in weights_for_pipeline("lingbot_map_spz")], ["lingbot/lingbot-map-long.pt"])
         self.assertEqual([item.relative_path for item in weights_for_pipeline("litevggt_fastgs_deblur_gsplat")], ["litevggt/te_dict.pt"])
-        self.assertEqual(
-            [item.relative_path for item in weights_for_pipeline("mobilegs_lmrs")],
-            [
-                "roma/roma_outdoor.pth",
-                "roma/roma_indoor.pth",
-                "roma/dinov2_vitl14_pretrain.pth",
-            ],
-        )
-        self.assertEqual(
-            [item.relative_path for item in weights_for_pipeline("video_artdeco_speed3r")],
-            [
-                "speed3r_pi3/config.json",
-                "speed3r_pi3/model.safetensors",
-                "mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth",
-                "mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth",
-                "mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl",
-            ],
-        )
+        self.assertEqual([item.relative_path for item in weights_for_pipeline("mobilegs_lmrs")], [])
+        self.assertEqual([item.relative_path for item in weights_for_pipeline("video_artdeco_speed3r")], [])
 
     def test_seed_model_weights_copies_missing_weight_from_image_seed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

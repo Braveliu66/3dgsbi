@@ -10,7 +10,6 @@ from typing import Callable, Any
 import torch
 
 from app.fine.deblur_mlp import attach_deblur_mlp_optimizer, build_deblur_mlp_state, render_with_deblur_mlp
-from app.fine.edgs_init import EDGSDenseInit, make_edgs_cfg
 from app.fine.fastgs_policy import FastGSPolicy
 from app.fine.local_3dgs.cg_optimizer import LocalCGOptimizer
 from app.fine.local_3dgs.cg_state import BatchState, CGSolverState
@@ -103,19 +102,6 @@ def train_mobile_3dgs(
             ),
         )
 
-        progress("fine_edgs_init", 43, "[mobilegs] checking EDGS dense initialization settings")
-        edgs_metrics = initialize_edgs_if_enabled(gaussians, scene, opt, options)
-        progress(
-            "fine_edgs_ready",
-            44,
-            (
-                "[mobilegs] EDGS initialization result: "
-                f"enabled={edgs_metrics.get('edgs_enabled', True)}, "
-                f"failed={edgs_metrics.get('edgs_failed', False)}, "
-                f"gaussians={gaussian_count(gaussians)}, "
-                f"densification_disabled={edgs_metrics.get('densification_disabled_by_edgs', False)}"
-            ),
-        )
         progress(
             "fine_optimizer_setup",
             44,
@@ -429,7 +415,6 @@ def train_mobile_3dgs(
                 "deblur_densify_disabled_after_activation": deblur_densify_disabled,
                 "deblur_last_transform_regularization": last_deblur_reg,
                 **deblur_state.metrics(),
-                **edgs_metrics,
                 "lm_optimizer": lm_status,
                 "lmrs_phase_iterations": lm_iterations,
                 "lmrs_phase_elapsed_seconds": round(lm_elapsed, 3),
@@ -475,120 +460,6 @@ def build_optimization_options(iterations: int, options: dict[str, Any]) -> Simp
         random_background=False,
         optimizer_type=str(options.get("fine_optimizer_type") or "default"),
     )
-
-
-def initialize_edgs_if_enabled(gaussians: Any, scene: Any, opt: SimpleNamespace, options: dict[str, Any]) -> dict[str, Any]:
-    if not read_bool(options.get("fine_edgs_enabled"), True):
-        return {
-            "edgs_enabled": False,
-            "densification_disabled_by_edgs": False,
-        }
-
-    cfg = make_edgs_cfg(
-        matches_per_ref=read_int(options.get("fine_edgs_matches_per_ref"), 15_000, minimum=1_000, maximum=50_000),
-        nns_per_ref=read_int(options.get("fine_edgs_nns_per_ref"), 3, minimum=1, maximum=8),
-        num_refs=read_optional_int(options.get("fine_edgs_num_refs")),
-        scene=scene,
-        roma_model=str(options.get("fine_edgs_roma_model") or "outdoor"),
-        roma_coarse_res=read_roma_resolution_option(
-            options.get("fine_edgs_roma_coarse_res"),
-            560,
-            minimum=224,
-            maximum=1344,
-            require_multiple_14=True,
-        ),
-        roma_upsample_res=read_roma_resolution_option(
-            options.get("fine_edgs_roma_upsample_res"),
-            864,
-            minimum=224,
-            maximum=2048,
-            require_multiple_14=False,
-        ),
-        roma_sample_thresh=read_float(options.get("fine_edgs_roma_sample_thresh"), 0.05, minimum=0.0, maximum=1.0),
-        roma_sample_mode=str(options.get("fine_edgs_roma_sample_mode") or "threshold_balanced"),
-        roma_symmetric=read_bool(options.get("fine_edgs_roma_symmetric"), True),
-        roma_use_custom_corr=read_bool(options.get("fine_edgs_roma_use_custom_corr"), True),
-        roma_upsample_preds=read_bool(options.get("fine_edgs_roma_upsample_preds"), True),
-        roma_with_padding=read_bool(options.get("fine_edgs_roma_with_padding"), False),
-        max_points=read_int(options.get("fine_edgs_max_points"), 500_000, minimum=10_000, maximum=2_000_000),
-        reprojection_error=read_float(options.get("fine_edgs_reprojection_error"), 4.0, minimum=0.5, maximum=32.0),
-    )
-    before = int(gaussians.get_xyz.shape[0])
-    edgs = EDGSDenseInit(device="cuda", roma_model_name=cfg.roma_model)
-    try:
-        edgs.initialize(gaussians, scene, cfg)
-    except FineFailure as exc:
-        if read_bool(options.get("fine_edgs_required"), False):
-            raise
-        return {
-            "edgs_enabled": False,
-            "edgs_failed": True,
-            "edgs_failure_code": exc.code,
-            "edgs_failure_reason": exc.message,
-            "edgs_sparse_gaussians_before": before,
-            "densification_disabled_by_edgs": False,
-        }
-    opt.densify_until_iter = 0
-    return {
-        **edgs.last_metrics,
-        "edgs_sparse_gaussians_before": before,
-        "densification_disabled_by_edgs": True,
-    }
-
-
-def read_optional_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    normalized = str(value).strip().lower()
-    if normalized in {"", "auto", "none"}:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def read_roma_resolution_option(
-    value: Any,
-    fallback: int | tuple[int, int],
-    *,
-    minimum: int,
-    maximum: int,
-    require_multiple_14: bool,
-) -> int | tuple[int, int]:
-    if value is None or str(value).strip().lower() in {"", "auto", "none"}:
-        return fallback
-    if isinstance(value, (list, tuple)) and len(value) == 2:
-        try:
-            width, height = int(value[0]), int(value[1])
-            return (
-                normalize_roma_resolution_dim(height, minimum, maximum, require_multiple_14),
-                normalize_roma_resolution_dim(width, minimum, maximum, require_multiple_14),
-            )
-        except (TypeError, ValueError):
-            return fallback
-
-    normalized = str(value).strip().lower().replace("*", "x").replace(",", "x")
-    parts = [part for part in normalized.split("x") if part]
-    try:
-        if len(parts) == 1:
-            return normalize_roma_resolution_dim(int(parts[0]), minimum, maximum, require_multiple_14)
-        if len(parts) == 2:
-            width, height = int(parts[0]), int(parts[1])
-            return (
-                normalize_roma_resolution_dim(height, minimum, maximum, require_multiple_14),
-                normalize_roma_resolution_dim(width, minimum, maximum, require_multiple_14),
-            )
-    except (TypeError, ValueError):
-        return fallback
-    return fallback
-
-
-def normalize_roma_resolution_dim(value: int, minimum: int, maximum: int, require_multiple_14: bool) -> int:
-    value = max(minimum, min(maximum, int(value)))
-    if require_multiple_14:
-        value = max(14, int(round(value / 14.0)) * 14)
-    return value
 
 
 def training_log_interval(iterations: int) -> int:

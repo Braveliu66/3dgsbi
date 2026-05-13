@@ -29,7 +29,7 @@ ENV HF_HUB_CACHE=/model-cache/huggingface/hub
 ENV XDG_CACHE_HOME=/model-cache/xdg
 ENV TORCH_EXTENSIONS_DIR=/model-cache/torch_extensions
 
-RUN mkdir -p /model-cache/lingbot /model-cache/speed3r_pi3 /model-cache/mast3r /model-cache/roma /opt/model-cache-seed/lingbot
+RUN mkdir -p /model-cache/lingbot /opt/model-cache-seed/lingbot
 
 RUN --mount=type=cache,id=three-dgs-worker-apt-cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-apt-lists,target=/var/lib/apt/lists,sharing=locked \
@@ -106,19 +106,12 @@ ENV SPARK_SPZ_CLI=/opt/preview-tools/spark_transcode_spz.mjs
 
 FROM worker-common AS worker
 
-ARG ARTDECO_REPO_URL=https://github.com/InternRobotics/ARTDECO.git
-ARG ARTDECO_REPO_COMMIT=bb654395826e50ac9e4671682d901377115a24ce
-ARG SPEED3R_REPO_URL=https://github.com/Visual-AI/speed3r.git
-ARG SPEED3R_REPO_COMMIT=5460f7309c87e5daac36385ff6611627de7d7267
 ARG LINGBOT_MAP_REPO_URL=https://github.com/Robbyant/lingbot-map.git
 ARG LINGBOT_MAP_REPO_COMMIT=4cd986009b9adeded8a4e740919221940dedeffe
 ARG FASTGS_REPO_URL=https://github.com/fastgs/FastGS.git
 ARG FASTGS_REPO_COMMIT=44e02a5c1d5e9ed64d2ecd4af1cbba14ac92150f
 
 ENV FINE_RECONSTRUCTION_ENABLED=true
-ENV ARTDECO_ROOT=/opt/artdeco-runtime
-ENV SPEED3R_ROOT=/opt/speed3r-runtime
-ENV PYTHONPATH=${ARTDECO_ROOT}/VSLAM/thirdparty/mast3r/dust3r/croco:${ARTDECO_ROOT}/VSLAM/thirdparty/in3d
 ENV MAX_JOBS=2
 ENV CUDA_PATH=/usr/local/cuda
 ENV NVTE_FRAMEWORK=pytorch
@@ -264,10 +257,8 @@ COPY backend/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/fused-ssim
 
 RUN --mount=type=cache,id=three-dgs-worker-runtime-extension-pip-cache,target=/root/.cache/pip,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-extension-wheel-cache,target=/root/.cache/three-dgs-wheels,sharing=locked \
-    --mount=type=cache,id=three-dgs-worker-artdeco-git-cache,target=/repo-cache/artdeco,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-fastgs-git-cache,target=/repo-cache/fastgs,sharing=locked \
-    --mount=type=cache,id=three-dgs-worker-lingbot-map-git-cache,target=/repo-cache/lingbot-map,sharing=locked \
-    --mount=type=cache,id=three-dgs-worker-speed3r-git-cache,target=/repo-cache/speed3r,sharing=locked <<'EOF'
+    --mount=type=cache,id=three-dgs-worker-lingbot-map-git-cache,target=/repo-cache/lingbot-map,sharing=locked <<'EOF'
 set -eu
 retry_pip() {
   attempt=1
@@ -350,8 +341,8 @@ ensure_git_checkout() {
   fi
   retry_git -C "$repo_path" checkout "$repo_commit"
 }
-retry_pip 'faiss-cpu==1.12.0'
 cached_wheel_install diff-gaussian-rasterization /app/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/diff-gaussian-rasterization --no-deps --no-build-isolation
+cached_wheel_install simple-knn /app/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/simple-knn --no-deps --no-build-isolation
 CACHED_FASTGS=/repo-cache/fastgs/source
 ensure_git_checkout "$FASTGS_REPO_URL" "$CACHED_FASTGS" "$FASTGS_REPO_COMMIT"
 cached_wheel_install diff-gaussian-rasterization-fastgs "$CACHED_FASTGS/submodules/diff-gaussian-rasterization_fastgs" --no-deps --no-build-isolation
@@ -359,56 +350,6 @@ cached_wheel_install fused-ssim /app/app/fine/local_3dgs/vendor/gaussian_splatti
 CACHED_LINGBOT_MAP=/repo-cache/lingbot-map/source
 ensure_git_checkout "$LINGBOT_MAP_REPO_URL" "$CACHED_LINGBOT_MAP" "$LINGBOT_MAP_REPO_COMMIT"
 cached_wheel_install lingbot-map "$CACHED_LINGBOT_MAP" --no-deps
-CACHED_ARTDECO=/repo-cache/artdeco/source
-export GIT_LFS_SKIP_SMUDGE=1
-ensure_git_checkout "$ARTDECO_REPO_URL" "$CACHED_ARTDECO" "$ARTDECO_REPO_COMMIT"
-test -f /usr/include/eigen3/Eigen/Sparse
-rm -rf "$ARTDECO_ROOT"
-mkdir -p "$(dirname "$ARTDECO_ROOT")"
-cp -a "$CACHED_ARTDECO" "$ARTDECO_ROOT"
-cached_wheel_install simple-knn-artdeco "$ARTDECO_ROOT/Reconstruct/submodules/simple-knn" --no-deps --no-build-isolation
-python - <<'PY'
-import simple_knn._C as simple_knn_c
-
-missing = [name for name in ("distCUDA2", "distIndex2") if not hasattr(simple_knn_c, name)]
-if missing:
-    raise RuntimeError(f"ARTDECO simple-knn missing symbols: {', '.join(missing)}")
-print("ARTDECO simple-knn distIndex2 import ok")
-PY
-cached_wheel_install pyimgui "$ARTDECO_ROOT/VSLAM/thirdparty/in3d/thirdparty/pyimgui" --no-deps --no-build-isolation
-cached_wheel_install asmk "$ARTDECO_ROOT/VSLAM/thirdparty/mast3r/asmk" --no-deps --no-build-isolation
-cached_wheel_install curope "$ARTDECO_ROOT/VSLAM/thirdparty/mast3r/dust3r/croco/models/curope" --no-deps --no-build-isolation
-python - <<'PY'
-from pathlib import Path
-import sys
-
-sys.path.insert(0, "/opt/artdeco-runtime")
-sys.path.insert(0, "/opt/artdeco-runtime/VSLAM")
-sys.path.insert(0, "/opt/artdeco-runtime/VSLAM/thirdparty/mast3r/dust3r/croco")
-pos_embed = Path("/opt/artdeco-runtime/VSLAM/thirdparty/Pi3/pi3/models/layers/pos_embed.py")
-source = pos_embed.read_text(encoding="utf-8")
-patched = source.replace(
-    "try:\n    raise ImportError\nexcept ImportError:",
-    "try:\n    from models.curope import cuRoPE2D\n    RoPE2D = cuRoPE2D\nexcept ImportError:",
-)
-if patched == source:
-    raise RuntimeError(f"ARTDECO Pi3 RoPE2D patch did not apply: {pos_embed}")
-pos_embed.write_text(patched, encoding="utf-8")
-PY
-sed -i 's/if not (torch.cuda.is_available() and CUDA_HOME):/if not CUDA_HOME:/' "$ARTDECO_ROOT/VSLAM/setup.py"
-sed -i 's|str(ROOT / "thirdparty/eigen")|"/usr/include/eigen3"|' "$ARTDECO_ROOT/VSLAM/setup.py"
-sed -i 's/D11.type()/D11.scalar_type()/' "$ARTDECO_ROOT/VSLAM/backend/src/matching_kernels.cu"
-sed -i 's|torch::linalg::linalg_norm(dx, std::optional<c10::Scalar>(), {}, false, {})|dx.pow(2).sum().sqrt()|g' "$ARTDECO_ROOT/VSLAM/backend/src/gn_kernels.cu"
-cached_wheel_install artdeco-vslam "$ARTDECO_ROOT/VSLAM" --no-deps --no-build-isolation
-CACHED_SPEED3R=/repo-cache/speed3r/source
-ensure_git_checkout "$SPEED3R_REPO_URL" "$CACHED_SPEED3R" "$SPEED3R_REPO_COMMIT"
-rm -rf "$SPEED3R_ROOT"
-mkdir -p "$(dirname "$SPEED3R_ROOT")"
-cp -a "$CACHED_SPEED3R" "$SPEED3R_ROOT"
-find "$ARTDECO_ROOT" -name .git -prune -exec rm -rf {} +
-find "$ARTDECO_ROOT" -name .git -type f -delete
-find "$SPEED3R_ROOT" -name .git -prune -exec rm -rf {} +
-find "$SPEED3R_ROOT" -name .git -type f -delete
 EOF
 
 COPY backend/app ./app

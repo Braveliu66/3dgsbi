@@ -14,10 +14,8 @@ from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.database import SessionLocal, initialize_database_schema
-from app.fine.edgs_init import ensure_roma_weights
 from app.fine.runner import PIPELINE_NAME, VIDEO_PIPELINE_NAME, normalize_fine_pipeline, run_fine_pipeline
 from app.fine.types import FineContext, FineFailure
-from app.fine.video.speed3r_pi3 import ensure_video_artdeco_weights
 from app.models import Artifact, Project, Task, utc_now
 from app.preview.image_preprocess import normalize_image_directory
 from app.preview.weights import ModelDownloadError, download_model_weights, weights_for_pipeline
@@ -287,6 +285,8 @@ def prepare_fine_inputs(db, task: Task, project: Project, work_dir: Path, starte
         pipeline = normalize_fine_pipeline(str(options.get("fine_pipeline") or PIPELINE_NAME))
         if pipeline != PIPELINE_NAME:
             raise FineFailure("UNSUPPORTED_FINE_PIPELINE", f"Image fine reconstruction only supports {PIPELINE_NAME}")
+        if read_bool(options.get("fine_edgs_enabled"), False):
+            raise FineFailure("UNSUPPORTED_FINE_OPTION", "EDGS/RoMA dense initialization has been removed from this worker image")
         input_dir = download_media(project, work_dir)
         update_task(db, task, project, "input_downloaded", 12, started, f"downloaded {len(project.media)} media files")
         max_side = read_positive_int(options.get("fine_image_max_side"), settings.fine_image_max_side)
@@ -303,16 +303,7 @@ def prepare_fine_inputs(db, task: Task, project: Project, work_dir: Path, starte
         return pipeline, normalized.output_dir, None, normalized.metrics(), "checking LiteVGGT + FastGS/Deblur runtime"
 
     if project.input_type == "video":
-        video_items = [media for media in project.media if media.kind == "video"]
-        if len(video_items) != 1 or len(project.media) != 1:
-            raise FineFailure("INVALID_VIDEO_INPUT", "Video fine reconstruction requires exactly one uploaded video file")
-        pipeline = normalize_fine_pipeline(str(options.get("fine_pipeline") or VIDEO_PIPELINE_NAME))
-        if pipeline != VIDEO_PIPELINE_NAME:
-            raise FineFailure("UNSUPPORTED_FINE_PIPELINE", f"Video fine reconstruction only supports {VIDEO_PIPELINE_NAME}")
-        input_video = download_single_video(video_items[0], work_dir)
-        input_dir = input_video.parent
-        update_task(db, task, project, "input_ready", 16, started, f"downloaded video file {video_items[0].file_name}")
-        return pipeline, input_dir, input_video, {"input_videos": 1}, "checking ARTDECO VSLAM + Speed3R-Pi3 runtime"
+        raise FineFailure("UNSUPPORTED_FINE_INPUT", "Video fine reconstruction is disabled; use video preview instead")
 
     raise FineFailure("UNSUPPORTED_FINE_INPUT", f"Unsupported fine reconstruction input type: {project.input_type}")
 
@@ -327,8 +318,6 @@ def download_single_video(media, work_dir: Path) -> Path:
 
 def ensure_fine_weights(db, task: Task, project: Project, started: float, pipeline: str) -> None:
     specs = weights_for_pipeline(pipeline)
-    if pipeline == PIPELINE_NAME and read_bool((task.options or {}).get("fine_edgs_enabled"), False):
-        specs = specs + weights_for_pipeline("mobilegs_lmrs")
     update_task(db, task, project, "weights_checking", 8, started, f"checking {len(specs)} model weights for {pipeline}")
     if settings.model_auto_download:
         try:
@@ -341,11 +330,6 @@ def ensure_fine_weights(db, task: Task, project: Project, started: float, pipeli
             )
         except ModelDownloadError as exc:
             raise FineFailure("MODEL_WEIGHT_DOWNLOAD_FAILED", str(exc)) from exc
-    if pipeline == PIPELINE_NAME:
-        if read_bool((task.options or {}).get("fine_edgs_enabled"), False):
-            ensure_roma_weights(Path(settings.model_cache_dir))
-    elif pipeline == VIDEO_PIPELINE_NAME:
-        ensure_video_artdeco_weights(Path(settings.model_cache_dir))
     update_task(db, task, project, "weights_ready", 12, started, f"model weights ready for {pipeline}")
 
 

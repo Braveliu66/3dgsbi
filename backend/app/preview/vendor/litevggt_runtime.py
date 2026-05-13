@@ -562,6 +562,227 @@ def voxel_downsample_points(
     return points[selected], colors[selected], confidence[selected]
 
 
+def reset_litevggt_aggregator_cache(model) -> None:
+    aggregator = getattr(model, "aggregator", None)
+    if aggregator is not None and hasattr(aggregator, "m_u"):
+        aggregator.m_u = None
+
+
+def _select_litevggt_points(
+    *,
+    points: np.ndarray,
+    colors: np.ndarray,
+    confidence: np.ndarray,
+    valid_pixels: np.ndarray,
+    frame_count: int,
+    keep_ratio: float,
+    edge_keep_ratio: float,
+    height: int,
+    width: int,
+    selection_strategy: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if selection_strategy == "global":
+        return select_points_global(
+            points,
+            colors,
+            confidence,
+            valid_pixels,
+            keep_ratio=keep_ratio,
+        )
+    return select_points_per_frame(
+        points,
+        colors,
+        confidence,
+        valid_pixels,
+        frame_count=frame_count,
+        keep_ratio=keep_ratio,
+        edge_keep_ratio=edge_keep_ratio,
+        height=height,
+        width=width,
+    )
+
+
+def _run_litevggt_window(
+    *,
+    model,
+    image_tensors: list,
+    valid_mask_tensors: list,
+    start: int,
+    end: int,
+    device: str,
+    dtype,
+    keep_ratio: float,
+    edge_keep_ratio: float,
+    selection_strategy: str,
+    te,
+    DelayedScaling,
+    Format,
+    unproject_depth_map_to_point_map,
+    pose_encoding_to_extri_intri,
+) -> LiteVGGTWindowResult:
+    import torch
+
+    reset_litevggt_aggregator_cache(model)
+
+    image_batch = None
+    valid_mask_batch = None
+    aggregated_tokens_list = None
+    pose_enc = None
+    w2c_pre = None
+    intrinsic = None
+    depth_map = None
+    depth_conf = None
+    points_3d = None
+
+    try:
+        window_images = image_tensors[start:end]
+        window_masks = valid_mask_tensors[start:end]
+        image_batch = torch.stack(window_images, dim=0).to(device)
+        valid_mask_batch = torch.stack(window_masks, dim=0).to(device)
+        patch_width = image_batch.shape[-1] // 14
+        patch_height = image_batch.shape[-2] // 14
+        model.update_patch_dimensions(patch_width, patch_height)
+        image_batch = image_batch[None]
+
+        with torch.no_grad():
+            fp8_recipe = DelayedScaling(fp8_format=Format.E4M3, amax_history_len=80, amax_compute_algo="max")
+            with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+                aggregated_tokens_list, patch_start_idx = model.aggregator(image_batch)
+
+            with torch.amp.autocast("cuda", enabled=True, dtype=dtype):
+                pose_enc = model.camera_head(aggregated_tokens_list)[-1]
+                w2c_pre, intrinsic = pose_encoding_to_extri_intri(pose_enc, image_batch.shape[-2:])
+                depth_map, depth_conf = model.depth_head(aggregated_tokens_list, image_batch, patch_start_idx)
+
+            points_3d = unproject_depth_map_to_point_map(depth_map.squeeze(0), w2c_pre.squeeze(0), intrinsic.squeeze(0))
+            points = points_3d.reshape(-1, 3)
+            image_array = image_batch[0].permute(0, 2, 3, 1).detach().cpu().numpy()
+            color_image = image_array.reshape(-1, 3)
+            colors = np.clip(color_image * 255.0, 0, 255).astype(np.uint8)
+
+            confidence = depth_conf.reshape(-1).detach().cpu().numpy()
+            valid_mask_array = valid_mask_batch.detach().cpu().numpy().astype(bool)
+            valid_pixels = valid_mask_array.reshape(-1)
+            finite = np.isfinite(points).all(axis=1) & np.isfinite(confidence)
+            valid_pixels = valid_pixels & finite
+
+            height = int(image_batch.shape[-2])
+            width = int(image_batch.shape[-1])
+            selected_points, selected_colors, selected_confidence = _select_litevggt_points(
+                points=points,
+                colors=colors,
+                confidence=confidence,
+                valid_pixels=valid_pixels,
+                frame_count=end - start,
+                keep_ratio=keep_ratio,
+                edge_keep_ratio=edge_keep_ratio,
+                height=height,
+                width=width,
+                selection_strategy=selection_strategy,
+            )
+            w2c_array = w2c_pre.squeeze(0).detach().float().cpu().numpy()
+            intrinsic_array = intrinsic.squeeze(0).detach().float().cpu().numpy()
+
+            return LiteVGGTWindowResult(
+                start=start,
+                end=end,
+                images=image_array,
+                valid_masks=valid_mask_array,
+                w2c=w2c_array,
+                intrinsics=intrinsic_array,
+                points=selected_points,
+                colors=selected_colors,
+                confidence=selected_confidence,
+                valid_pixel_count=int(valid_pixels.sum()),
+                point_count_before_filter=int(points.shape[0]),
+                point_count_after_filter=int(selected_points.shape[0]),
+            )
+    finally:
+        if image_batch is not None:
+            del image_batch
+        if valid_mask_batch is not None:
+            del valid_mask_batch
+        aggregated_tokens_list = None
+        pose_enc = None
+        w2c_pre = None
+        intrinsic = None
+        depth_map = None
+        depth_conf = None
+        points_3d = None
+        reset_litevggt_aggregator_cache(model)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
+def _merge_litevggt_windows(
+    window_results: list[LiteVGGTWindowResult],
+    frame_count: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if not window_results:
+        raise PreviewFailure("LITEVGGT_EMPTY_WINDOWS", "LiteVGGT windowed inference produced no windows")
+
+    images_by_frame: list[np.ndarray | None] = [None] * frame_count
+    masks_by_frame: list[np.ndarray | None] = [None] * frame_count
+    w2c_by_frame: list[np.ndarray | None] = [None] * frame_count
+    intrinsics_by_frame: list[np.ndarray | None] = [None] * frame_count
+    centers_by_frame: list[np.ndarray | None] = [None] * frame_count
+    merged_points: list[np.ndarray] = []
+    merged_colors: list[np.ndarray] = []
+    merged_confidence: list[np.ndarray] = []
+
+    for window_index, result in enumerate(window_results):
+        local_w2c = result.w2c
+        local_points = result.points
+
+        if window_index == 0:
+            scale = 1.0
+            rotation = np.eye(3, dtype=np.float32)
+            translation = np.zeros(3, dtype=np.float32)
+        else:
+            local_centers = camera_centers_from_w2c(local_w2c)
+            source_centers = []
+            target_centers = []
+            for local_index, frame_index in enumerate(range(result.start, result.end)):
+                global_center = centers_by_frame[frame_index]
+                if global_center is not None:
+                    source_centers.append(local_centers[local_index])
+                    target_centers.append(global_center)
+            scale, rotation, translation = estimate_sim3_umeyama(
+                np.asarray(source_centers, dtype=np.float32),
+                np.asarray(target_centers, dtype=np.float32),
+            )
+
+        transformed_w2c = transform_w2c_sim3(local_w2c, scale, rotation, translation)
+        transformed_centers = camera_centers_from_w2c(transformed_w2c)
+        transformed_points = transform_points_sim3(local_points, scale, rotation, translation)
+
+        for local_index, frame_index in enumerate(range(result.start, result.end)):
+            if images_by_frame[frame_index] is None:
+                images_by_frame[frame_index] = result.images[local_index]
+                masks_by_frame[frame_index] = result.valid_masks[local_index]
+                w2c_by_frame[frame_index] = transformed_w2c[local_index]
+                intrinsics_by_frame[frame_index] = result.intrinsics[local_index]
+                centers_by_frame[frame_index] = transformed_centers[local_index]
+
+        merged_points.append(transformed_points)
+        merged_colors.append(result.colors)
+        merged_confidence.append(result.confidence)
+
+    missing = [index for index, image in enumerate(images_by_frame) if image is None]
+    if missing:
+        raise PreviewFailure("LITEVGGT_WINDOW_COVERAGE_FAILED", f"LiteVGGT windows did not cover frames: {missing[:8]}")
+
+    return (
+        np.stack([image for image in images_by_frame if image is not None], axis=0),
+        np.stack([mask for mask in masks_by_frame if mask is not None], axis=0),
+        np.stack([matrix for matrix in w2c_by_frame if matrix is not None], axis=0),
+        np.stack([intrinsic for intrinsic in intrinsics_by_frame if intrinsic is not None], axis=0),
+        np.concatenate(merged_points, axis=0),
+        np.concatenate(merged_colors, axis=0),
+        np.concatenate(merged_confidence, axis=0),
+    )
+
+
 def run_litevggt_reconstruction(
     *,
     input_dir: Path,
@@ -579,6 +800,10 @@ def run_litevggt_reconstruction(
     axis_trim_high_quantile: float,
     selection_strategy: str,
     progress: Progress,
+    inference_mode: str = "single",
+    window_size: int = 48,
+    window_overlap: int = 16,
+    oom_window_sizes: list[int] | None = None,
 ) -> LiteVGGTReconstruction:
     """执行 LiteVGGT 直接点云预览。
 
@@ -651,8 +876,8 @@ def run_litevggt_reconstruction(
         model.to(torch.bfloat16)
         model.eval()
 
-        images = []
-        valid_masks = []
+        image_tensors = []
+        valid_mask_tensors = []
         for index, image_path in enumerate(files):
             if preserve_full_image:
                 image, valid_mask = load_image_file_letterbox(
@@ -665,101 +890,133 @@ def run_litevggt_reconstruction(
 
             image_tensor = torch.from_numpy(np.transpose(image, (2, 0, 1))).float()
             mask_tensor = torch.from_numpy(valid_mask)
-            images.append(image_tensor)
-            valid_masks.append(mask_tensor)
+            image_tensors.append(image_tensor)
+            valid_mask_tensors.append(mask_tensor)
             if index % 4 == 0:
                 progress("litevggt_preprocess", 28 + int(index / max(1, len(files)) * 8), f"preprocessed {index + 1}/{len(files)} images")
 
-        image_batch = torch.stack(images, dim=0).to(device)
-        valid_mask_batch = torch.stack(valid_masks, dim=0).to(device)
-        patch_width = image_batch.shape[-1] // 14
-        patch_height = image_batch.shape[-2] // 14
-        model.update_patch_dimensions(patch_width, patch_height)
-        image_batch = image_batch[None]
+        resolved_mode = "windowed" if str(inference_mode).strip().lower() == "windowed" else "single"
+        configured_overlap = int(window_overlap)
+        attempts = resolve_litevggt_window_attempts(window_size, oom_window_sizes or [32, 16, 8])
+        if resolved_mode == "single":
+            attempts = [aligned_count]
 
-        progress("litevggt_inference", 40, f"running LiteVGGT on {aligned_count} aligned images")
-        with torch.no_grad():
-            fp8_recipe = DelayedScaling(fp8_format=Format.E4M3, amax_history_len=80, amax_compute_algo="max")
-            with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
-                aggregated_tokens_list, patch_start_idx = model.aggregator(image_batch)
+        last_oom: RuntimeError | None = None
+        selected_attempt = attempts[-1]
+        selected_overlap = 0
+        selected_window_count = 1
+        oom_retry_count = 0
+        window_results: list[LiteVGGTWindowResult] = []
 
-            with torch.amp.autocast("cuda", enabled=True, dtype=dtype):
-                pose_enc = model.camera_head(aggregated_tokens_list)[-1]
-                w2c_pre, intrinsic = pose_encoding_to_extri_intri(pose_enc, image_batch.shape[-2:])
-                depth_map, depth_conf = model.depth_head(aggregated_tokens_list, image_batch, patch_start_idx)
-
-            progress("litevggt_unproject", 58, "unprojecting depth maps to world point cloud")
-            points_3d = unproject_depth_map_to_point_map(depth_map.squeeze(0), w2c_pre.squeeze(0), intrinsic.squeeze(0))
-            points = points_3d.reshape(-1, 3)
-            image_array = image_batch[0].permute(0, 2, 3, 1).detach().cpu().numpy()
-            color_image = image_array.reshape(-1, 3)
-            colors = np.clip(color_image * 255.0, 0, 255).astype(np.uint8)
-
-            confidence = depth_conf.reshape(-1).detach().cpu().numpy()
-            valid_mask_array = valid_mask_batch.detach().cpu().numpy().astype(bool)
-            valid_pixels = valid_mask_array.reshape(-1)
-            finite = np.isfinite(points).all(axis=1) & np.isfinite(confidence)
-            valid_pixels = valid_pixels & finite
-
-            height = int(image_batch.shape[-2])
-            width = int(image_batch.shape[-1])
-
-            if selection_strategy == "global":
-                selected_points, selected_colors, selected_confidence = select_points_global(
-                    points,
-                    colors,
-                    confidence,
-                    valid_pixels,
-                    keep_ratio=keep_ratio,
-                )
+        for attempt_index, attempt_window_size in enumerate(attempts):
+            selected_attempt = min(int(attempt_window_size), aligned_count)
+            selected_overlap = effective_litevggt_overlap(selected_attempt, configured_overlap)
+            if resolved_mode == "single":
+                windows = [(0, aligned_count)]
+                selected_overlap = 0
             else:
-                selected_points, selected_colors, selected_confidence = select_points_per_frame(
-                    points,
-                    colors,
-                    confidence,
-                    valid_pixels,
-                    frame_count=aligned_count,
-                    keep_ratio=keep_ratio,
-                    edge_keep_ratio=edge_keep_ratio,
-                    height=height,
-                    width=width,
-                )
+                windows = build_litevggt_windows(aligned_count, selected_attempt, selected_overlap)
 
-            if spatial_keep_quantile >= 1.0:
-                trimmed_points, trimmed_colors, trimmed_confidence = trim_axis_quantile_outliers(
-                    selected_points,
-                    selected_colors,
-                    selected_confidence,
-                    low_quantile=axis_trim_low_quantile,
-                    high_quantile=axis_trim_high_quantile,
-                )
-            else:
-                trimmed_points, trimmed_colors, trimmed_confidence = trim_spatial_outliers(
-                    selected_points,
-                    selected_colors,
-                    selected_confidence,
-                    keep_quantile=spatial_keep_quantile,
-                )
-
-            point_count_after_spatial_trim = int(trimmed_points.shape[0])
-            point_count_before_downsample = int(trimmed_points.shape[0])
-
-            trimmed_points, trimmed_colors, trimmed_confidence = voxel_downsample_points(
-                trimmed_points,
-                trimmed_colors,
-                trimmed_confidence,
-                max_points=max_points,
+            selected_window_count = len(windows)
+            progress(
+                "litevggt_inference",
+                40,
+                f"running LiteVGGT {resolved_mode} on {aligned_count} aligned images "
+                f"(window_size={selected_attempt}, overlap={selected_overlap}, windows={selected_window_count})",
             )
 
-            point_count_after_downsample = int(trimmed_points.shape[0])
+            try:
+                window_results = []
+                for window_index, (start, end) in enumerate(windows):
+                    progress(
+                        "litevggt_inference",
+                        40 + int(window_index / max(1, selected_window_count) * 14),
+                        f"running LiteVGGT window {window_index + 1}/{selected_window_count}: frames {start + 1}-{end}",
+                    )
+                    window_results.append(
+                        _run_litevggt_window(
+                            model=model,
+                            image_tensors=image_tensors,
+                            valid_mask_tensors=valid_mask_tensors,
+                            start=start,
+                            end=end,
+                            device=device,
+                            dtype=dtype,
+                            keep_ratio=keep_ratio,
+                            edge_keep_ratio=edge_keep_ratio,
+                            selection_strategy=selection_strategy,
+                            te=te,
+                            DelayedScaling=DelayedScaling,
+                            Format=Format,
+                            unproject_depth_map_to_point_map=unproject_depth_map_to_point_map,
+                            pose_encoding_to_extri_intri=pose_encoding_to_extri_intri,
+                        )
+                    )
+                last_oom = None
+                break
+            except RuntimeError as exc:
+                if resolved_mode == "windowed" and is_cuda_oom_error(exc) and attempt_index < len(attempts) - 1:
+                    last_oom = exc
+                    oom_retry_count += 1
+                    window_results = []
+                    reset_litevggt_aggregator_cache(model)
+                    torch.cuda.empty_cache()
+                    next_size = attempts[attempt_index + 1]
+                    progress(
+                        "litevggt_inference",
+                        40,
+                        f"LiteVGGT CUDA OOM at window_size={selected_attempt}; retrying with window_size={next_size}",
+                    )
+                    continue
+                raise
+
+        if last_oom is not None:
+            raise last_oom
+
+        progress("litevggt_unproject", 58, "aligning LiteVGGT windows and merging point clouds")
+        image_array, valid_mask_array, w2c_array, intrinsic_array, selected_points, selected_colors, selected_confidence = _merge_litevggt_windows(
+            window_results,
+            aligned_count,
+        )
+
+        if spatial_keep_quantile >= 1.0:
+            trimmed_points, trimmed_colors, trimmed_confidence = trim_axis_quantile_outliers(
+                selected_points,
+                selected_colors,
+                selected_confidence,
+                low_quantile=axis_trim_low_quantile,
+                high_quantile=axis_trim_high_quantile,
+            )
+        else:
+            trimmed_points, trimmed_colors, trimmed_confidence = trim_spatial_outliers(
+                selected_points,
+                selected_colors,
+                selected_confidence,
+                keep_quantile=spatial_keep_quantile,
+            )
+
+        point_count_after_spatial_trim = int(trimmed_points.shape[0])
+        point_count_before_downsample = int(trimmed_points.shape[0])
+
+        trimmed_points, trimmed_colors, trimmed_confidence = voxel_downsample_points(
+            trimmed_points,
+            trimmed_colors,
+            trimmed_confidence,
+            max_points=max_points,
+        )
+
+        point_count_after_downsample = int(trimmed_points.shape[0])
+        valid_pixel_count = sum(result.valid_pixel_count for result in window_results)
+        point_count_before_filter = sum(result.point_count_before_filter for result in window_results)
+        point_count_after_filter = sum(result.point_count_after_filter for result in window_results)
 
         peak_mb = int(torch.cuda.max_memory_allocated() / 1024 / 1024) if torch.cuda.is_available() else 0
         return LiteVGGTReconstruction(
             files=files,
             images=image_array,
             valid_masks=valid_mask_array,
-            w2c=w2c_pre.squeeze(0).detach().float().cpu().numpy(),
-            intrinsics=intrinsic.squeeze(0).detach().float().cpu().numpy(),
+            w2c=w2c_array,
+            intrinsics=intrinsic_array,
             points=trimmed_points,
             colors=trimmed_colors,
             confidence=trimmed_confidence,
@@ -776,11 +1033,19 @@ def run_litevggt_reconstruction(
                 "axis_trim_high_quantile": float(axis_trim_high_quantile),
                 "preserve_full_image": bool(preserve_full_image),
                 "letterbox_size": int(letterbox_size),
-                "valid_pixel_count": int(valid_pixels.sum()),
+                "litevggt_inference_mode": resolved_mode,
+                "litevggt_window_size_effective": int(selected_attempt),
+                "litevggt_window_overlap": int(selected_overlap),
+                "litevggt_window_count": int(selected_window_count),
+                "litevggt_oom_retry_count": int(oom_retry_count),
+                "valid_pixel_count": int(valid_pixel_count),
+                "point_count_before_filter": int(point_count_before_filter),
+                "point_count_after_filter": int(point_count_after_filter),
                 "point_count_before_spatial_trim": int(selected_points.shape[0]),
                 "point_count_after_spatial_trim": point_count_after_spatial_trim,
                 "point_count_before_downsample": point_count_before_downsample,
                 "point_count_after_downsample": point_count_after_downsample,
+                "point_count_after_voxel_downsample": point_count_after_downsample,
                 "cuda_memory_peak_mb": float(peak_mb),
             },
         )
@@ -803,6 +1068,10 @@ def run_litevggt_pointcloud(
     axis_trim_low_quantile: float = 0.0005,
     axis_trim_high_quantile: float = 0.9995,
     selection_strategy: str = "per_frame",
+    inference_mode: str = "single",
+    window_size: int = 48,
+    window_overlap: int = 16,
+    oom_window_sizes: list[int] | None = None,
     progress: Progress,
 ) -> dict[str, int | float | str | bool]:
     reconstruction = run_litevggt_reconstruction(
@@ -820,6 +1089,10 @@ def run_litevggt_pointcloud(
         axis_trim_low_quantile=axis_trim_low_quantile,
         axis_trim_high_quantile=axis_trim_high_quantile,
         selection_strategy=selection_strategy,
+        inference_mode=inference_mode,
+        window_size=window_size,
+        window_overlap=window_overlap,
+        oom_window_sizes=oom_window_sizes,
         progress=progress,
     )
     point_count = write_gaussian_splat_ply(

@@ -24,21 +24,24 @@ def run(ctx: PreviewContext) -> PreviewResult:
         spatial_keep_quantile = float(ctx.options.get("litevggt_spatial_keep_quantile") or 1.0)
         preserve_full_image = _read_bool(ctx.options.get("litevggt_preserve_full_image"), True)
         frame_selection = str(ctx.options.get("litevggt_frame_selection") or "scene")
-        max_points = int(ctx.options.get("preview_max_points") or 25_000_000)
+        max_points = int(ctx.options.get("preview_max_points") or 3_000_000)
     elif coverage_mode == "balanced":
         keep_ratio = float(ctx.options.get("litevggt_keep_ratio") or 0.75)
         spatial_keep_quantile = float(ctx.options.get("litevggt_spatial_keep_quantile") or 0.999)
         preserve_full_image = _read_bool(ctx.options.get("litevggt_preserve_full_image"), True)
         frame_selection = str(ctx.options.get("litevggt_frame_selection") or "scene")
-        max_points = int(ctx.options.get("preview_max_points") or 15_000_000)
+        max_points = int(ctx.options.get("preview_max_points") or 2_000_000)
     else:
         keep_ratio = float(ctx.options.get("litevggt_keep_ratio") or 0.42)
         spatial_keep_quantile = float(ctx.options.get("litevggt_spatial_keep_quantile") or 0.995)
         preserve_full_image = _read_bool(ctx.options.get("litevggt_preserve_full_image"), True)
         frame_selection = str(ctx.options.get("litevggt_frame_selection") or "head")
-        max_points = int(ctx.options.get("preview_max_points") or 10_000_000)
+        max_points = int(ctx.options.get("preview_max_points") or 1_000_000)
 
     letterbox_size = int(ctx.options.get("litevggt_letterbox_size") or 518)
+    window_size = int(ctx.options.get("litevggt_window_size") or 48)
+    window_overlap = int(ctx.options.get("litevggt_window_overlap") or 16)
+    oom_window_sizes = _read_int_list(ctx.options.get("litevggt_oom_window_sizes"), [32, 16, 8])
 
     max_input_frames_value = ctx.options.get("litevggt_max_input_frames")
     max_input_frames = int(max_input_frames_value) if max_input_frames_value else None
@@ -68,6 +71,10 @@ def run(ctx: PreviewContext) -> PreviewResult:
         axis_trim_low_quantile=axis_trim_low_quantile,
         axis_trim_high_quantile=axis_trim_high_quantile,
         selection_strategy=selection_strategy,
+        inference_mode="windowed",
+        window_size=window_size,
+        window_overlap=window_overlap,
+        oom_window_sizes=oom_window_sizes,
         progress=report,
     )
     timer.mark("litevggt_inference")
@@ -100,3 +107,20 @@ def _read_bool(value, fallback: bool) -> bool:
     if normalized in {"1", "true", "yes", "on"}:
         return True
     return fallback
+
+
+def _read_int_list(value, fallback: list[int]) -> list[int]:
+    if value is None:
+        return fallback
+    if isinstance(value, (list, tuple)):
+        values = value
+    else:
+        values = str(value).replace(";", ",").split(",")
+
+    parsed: list[int] = []
+    for item in values:
+        try:
+            parsed.append(int(str(item).strip()))
+        except (TypeError, ValueError):
+            continue
+    return parsed or fallback

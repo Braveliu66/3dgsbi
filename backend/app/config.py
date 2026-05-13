@@ -61,8 +61,6 @@ class Settings(BaseSettings):
     three_dgs_lm_repo_commit: str = "d6db64b1844b4303caa2f6e9a0a1ba107b96d6c9"
     lmrs_repo_commit: str = "cb40c7c06c2a60f8314ce095ad7b4513fbb33319"
     lmrs_rasterizer_repo_commit: str = "c2529d3bb13bc38271710785c015a89d9d623237"
-    artdeco_repo_commit: str = "bb654395826e50ac9e4671682d901377115a24ce"
-    speed3r_repo_commit: str = "5460f7309c87e5daac36385ff6611627de7d7267"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

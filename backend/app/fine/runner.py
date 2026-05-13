@@ -14,7 +14,6 @@ from app.fine.local_3dgs.sparse_compensation import compensate_sparse_point_clou
 from app.fine.option_utils import read_float, read_int
 from app.fine.preprocess import build_pycolmap_scene, prepare_mobile_images
 from app.fine.types import FineContext, FineFailure, FineResult
-from app.fine.video.pipeline import VIDEO_PIPELINE_NAME, run_video_artdeco_speed3r_pipeline
 from app.preview.io.spz import convert_ply_to_spz
 from app.preview.types import SOURCE_COMMITS
 from app.preview.types import PreviewFailure
@@ -23,6 +22,7 @@ from app.preview.utils import image_files
 
 PIPELINE_NAME = "litevggt_fastgs_deblur_gsplat"
 LEGACY_PIPELINE_NAME = "mobilegs_lmrs"
+VIDEO_PIPELINE_NAME = "video_artdeco_speed3r"
 
 SOURCE_COMMITS_FINE = {
     "LiteVGGT": SOURCE_COMMITS["LiteVGGT"],
@@ -35,10 +35,10 @@ SOURCE_COMMITS_FINE = {
 def run_fine_pipeline(ctx: FineContext) -> FineResult:
     settings = get_settings()
     pipeline = normalize_fine_pipeline(ctx.pipeline)
-    if pipeline == VIDEO_PIPELINE_NAME:
-        return run_video_artdeco_speed3r_pipeline(ctx, settings=settings, lod_builder=build_lod_rad_if_available)
     if pipeline != PIPELINE_NAME:
         raise FineFailure("UNSUPPORTED_FINE_PIPELINE", f"Unsupported fine pipeline: {ctx.pipeline}")
+    if read_bool(ctx.options.get("fine_edgs_enabled"), False):
+        raise FineFailure("UNSUPPORTED_FINE_OPTION", "EDGS/RoMA dense initialization has been removed from this worker image")
     assert_runtime_ready()
 
     image_count = len(image_files(ctx.input_dir))
@@ -75,21 +75,12 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
                 "sparse_compensation_reason": "litevggt_initialization",
             }
         )
-    elif read_bool(ctx.options.get("fine_edgs_enabled"), False):
-        scene_result.metrics.update(
-            {
-                "sparse_compensation_enabled": False,
-                "sparse_compensation_reason": "disabled_by_edgs",
-            }
-        )
     else:
         scene_result.metrics.update(compensate_sparse_point_cloud(scene_result.scene_dir, ctx.options).metrics)
 
     ctx_progress(ctx, "fine_gaussian_train_start", 42, f"training Gaussian model with {scene_result.backend} initialization")
     from app.fine.mobilegs_trainer import train_mobile_3dgs
     train_options = {**ctx.options}
-    if scene_result.backend == "litevggt" and "fine_edgs_enabled" not in train_options:
-        train_options["fine_edgs_enabled"] = False
 
     train_result = train_mobile_3dgs(
         scene_dir=scene_result.scene_dir,

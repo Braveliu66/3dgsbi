@@ -72,27 +72,8 @@ ALGORITHMS: list[dict[str, Any]] = [
         ],
         "commands": {},
         "source_type": "system",
-        "license_notice": "Image fine reconstruction uses LiteVGGT as the geometry initializer and keeps Deblurring-3DGS GTnet ideas. RoMA/EDGS is optional and off by default.",
+        "license_notice": "Image fine reconstruction uses LiteVGGT as the geometry initializer and keeps Deblurring-3DGS GTnet ideas.",
         "notes": "Default image fine reconstruction pipeline: JPG/PNG normalization, LiteVGGT camera/depth/point initialization, local Gaussian training with FastGS-style densify/prune, DeblurMLP refinement, and Spark SPZ conversion.",
-    },
-    {
-        "name": "Video Fine ARTDECO + Speed3R-Pi3",
-        "repo_url": "https://github.com/InternRobotics/ARTDECO",
-        "license": "ARTDECO/MASt3R/Speed3R-Pi3 research and non-commercial restrictions; verify upstream terms before commercial use",
-        "commit_hash_setting": "artdeco_repo_commit",
-        "local_path": FINE_ROOT / "video",
-        "enabled": True,
-        "weight_paths": [
-            "speed3r_pi3/config.json",
-            "speed3r_pi3/model.safetensors",
-            "mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth",
-            "mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth",
-            "mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl",
-        ],
-        "commands": {},
-        "source_type": "adapted_module",
-        "license_notice": "Video fine integrates ARTDECO VSLAM/Reconstruct at commit bb654395826e50ac9e4671682d901377115a24ce and replaces Pi3 loop-closure inference with Speed3R-Pi3 from commit 5460f7309c87e5daac36385ff6611627de7d7267. Speed3R-Pi3 weights are CC BY-NC 4.0.",
-        "notes": "Canonical video pipeline video_artdeco_speed3r. It accepts exactly one video, extracts frames, writes pinhole intrinsics when absent, runs ARTDECO h3dgsv3 training, validates point_clouds/gs.ply, and only then converts final.ply to Spark SPZ. It does not call the image fine stack.",
     },
     {
         "name": "Deblurring-3DGS GTnet",
@@ -212,11 +193,6 @@ def runtime_preflight(db: Session, settings: Settings | None = None) -> dict[str
                 extensions_ready = bool(lingbot_runtime["available"] or preview_worker_status(db)["available"])
                 if not extensions_ready:
                     issues.append("worker-preview heartbeat missing and backend LingBot-Map runtime unavailable")
-            if item.name == "Video Fine ARTDECO + Speed3R-Pi3":
-                video_runtime = artdeco_video_runtime_status()
-                extensions_ready = bool(video_runtime["available"] or fine_workers["available"])
-                if not extensions_ready:
-                    issues.append("worker-fine heartbeat missing and backend ARTDECO video runtime unavailable")
             if item.name == "Spark SPZ":
                 if not spz_converter_ready["available"]:
                     issues.append(f"Spark SPZ converter unavailable: {spz_converter_ready['error']}")
@@ -258,7 +234,6 @@ def runtime_preflight(db: Session, settings: Settings | None = None) -> dict[str
         "transformer_engine": import_check("transformer_engine"),
         "preview_runtime": {"lingbot_map": lingbot_preview_runtime_status(), "worker_preview": preview_worker_status(db)},
         "fine_runtime": {**fine_runtime_status(), "worker_fine": fine_workers},
-        "video_fine_runtime": {**artdeco_video_runtime_status(), "worker_fine": fine_workers},
         "spz_converter": spark_converter_status(),
         "algorithms": algorithms,
         "errors": errors,
@@ -339,7 +314,6 @@ def bundled_module_status(name: str) -> dict[str, Any]:
         "LiteVGGT": "app.preview.vendor.litevggt_runtime",
         "LingBot-Map Video Preview": "app.preview.adapters.lingbot",
         "Image Fine (LiteVGGT + FastGS/Deblur)": "app.fine.runner",
-        "Video Fine ARTDECO + Speed3R-Pi3": "app.fine.video.pipeline",
         "Deblurring-3DGS GTnet": "app.fine.deblur_mlp",
         "Spark SPZ": "app.preview.io.spz",
     }
@@ -420,53 +394,6 @@ def lingbot_preview_runtime_status() -> dict[str, Any]:
         "sdpa_fallback": not modules["flashinfer"].get("available"),
         "error": None if available else "CUDA torch/Spark SPZ/LingBot-Map core runtime check failed",
     }
-
-
-def artdeco_video_runtime_status() -> dict[str, Any]:
-    torch_status = torch_info()
-    spark_status = spark_converter_status()
-    modules = {
-        "video_pipeline": import_check("app.fine.video.pipeline"),
-        "speed3r_pi3": import_check("app.fine.video.speed3r_pi3"),
-        "gsplat": import_check("gsplat"),
-        "safetensors": import_check("safetensors"),
-        "pypose": import_check("pypose"),
-        "natsort": import_check("natsort"),
-        "mast3r_slam_backends": import_check("mast3r_slam_backends"),
-        "diff_gaussian_rasterization": import_check("diff_gaussian_rasterization"),
-        "simple_knn": import_check("simple_knn"),
-        "fused_ssim": import_check("fused_ssim"),
-    }
-    modules["artdeco_adam"] = artdeco_adam_status(modules["diff_gaussian_rasterization"])
-    available = bool(
-        torch_status.get("available")
-        and torch_status.get("cuda_available")
-        and spark_status.get("available")
-        and all(item.get("available") for item in modules.values())
-    )
-    return {
-        "available": available,
-        "torch_cuda": torch_status,
-        "spark_spz": spark_status,
-        **modules,
-        "error": None if available else "CUDA torch/Spark SPZ/ARTDECO VSLAM backend/Speed3R-Pi3/MASt3R runtime check failed",
-    }
-
-
-def artdeco_adam_status(raster_status: dict[str, Any]) -> dict[str, Any]:
-    if not raster_status.get("available"):
-        return {"available": False, "error": "diff_gaussian_rasterization import failed"}
-    try:
-        from app.fine.video.artdeco_optimizer_compat import install_artdeco_adam_compat
-
-        install_artdeco_adam_compat()
-        module = __import__("diff_gaussian_rasterization")
-        missing = [name for name in ("adamUpdate", "adamUpdateBasic") if not hasattr(module, name)]
-        if missing:
-            return {"available": False, "error": f"missing ARTDECO Adam symbols: {', '.join(missing)}"}
-        return {"available": True, "symbols": ["adamUpdate", "adamUpdateBasic"]}
-    except Exception as exc:
-        return {"available": False, "error": str(exc)}
 
 
 def litevggt_runtime_status() -> dict[str, Any]:
