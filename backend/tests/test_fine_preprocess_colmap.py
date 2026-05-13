@@ -14,10 +14,10 @@ from app.fine.types import FineFailure  # noqa: E402
 
 def import_preprocess():
     try:
-        from app.fine.preprocess import build_pycolmap_scene
+        from app.fine import preprocess
     except Exception as exc:
         raise unittest.SkipTest(f"fine preprocess import unavailable: {exc}") from exc
-    return build_pycolmap_scene
+    return preprocess
 
 
 class FinePreprocessColmapTests(unittest.TestCase):
@@ -25,8 +25,10 @@ class FinePreprocessColmapTests(unittest.TestCase):
         result, pycolmap = self._run_scene(image_count=100)
 
         self.assertEqual(result.metrics["colmap_matcher"], "exhaustive")
+        self.assertTrue(result.metrics["sfm_undistorted"])
         pycolmap.match_exhaustive.assert_called_once()
         pycolmap.match_sequential.assert_not_called()
+        pycolmap.undistort_images.assert_called_once()
 
     def test_pycolmap_matcher_auto_uses_sequential_over_250(self) -> None:
         result, pycolmap = self._run_scene(image_count=1000)
@@ -36,7 +38,7 @@ class FinePreprocessColmapTests(unittest.TestCase):
         pycolmap.match_exhaustive.assert_not_called()
 
     def test_pycolmap_rejects_low_registered_ratio(self) -> None:
-        build_pycolmap_scene = import_preprocess()
+        preprocess = import_preprocess()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             input_dir = root / "input"
@@ -48,7 +50,7 @@ class FinePreprocessColmapTests(unittest.TestCase):
 
             with patch.dict(sys.modules, {"pycolmap": pycolmap}):
                 with self.assertRaises(FineFailure) as raised:
-                    build_pycolmap_scene(
+                    preprocess.build_pycolmap_scene(
                         input_dir,
                         scene_dir,
                         max_num_features=8192,
@@ -61,9 +63,29 @@ class FinePreprocessColmapTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "COLMAP_RECONSTRUCTION_INCOMPLETE")
         self.assertIn("below threshold", raised.exception.message)
+        pycolmap.undistort_images.assert_not_called()
+
+    def test_fastgs_camera_validation_rejects_misordered_pinhole_params(self) -> None:
+        preprocess = import_preprocess()
+        reconstruction = SimpleNamespace(
+            cameras={
+                1: SimpleNamespace(
+                    model="PINHOLE",
+                    width=2400,
+                    height=1599,
+                    params=[2467.5, 1200.0, 799.5, 0.0023],
+                )
+            }
+        )
+
+        with self.assertRaises(FineFailure) as raised:
+            preprocess.validate_fastgs_colmap_scene(reconstruction)
+
+        self.assertEqual(raised.exception.code, "COLMAP_CAMERA_INVALID")
+        self.assertIn("principal point", raised.exception.message)
 
     def _run_scene(self, *, image_count: int):
-        build_pycolmap_scene = import_preprocess()
+        preprocess = import_preprocess()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             input_dir = root / "input"
@@ -74,7 +96,7 @@ class FinePreprocessColmapTests(unittest.TestCase):
             pycolmap = self._pycolmap_stub(scene_dir, registered=image_count)
 
             with patch.dict(sys.modules, {"pycolmap": pycolmap}):
-                result = build_pycolmap_scene(
+                result = preprocess.build_pycolmap_scene(
                     input_dir,
                     scene_dir,
                     max_num_features=8192,
@@ -87,10 +109,16 @@ class FinePreprocessColmapTests(unittest.TestCase):
         return result, pycolmap
 
     def _pycolmap_stub(self, scene_dir: Path, *, registered: int):
+        camera = SimpleNamespace(
+            model="PINHOLE",
+            width=2400,
+            height=1599,
+            params=[2467.5, 2467.5, 1200.0, 799.5],
+        )
         reconstruction = SimpleNamespace(
             images={index: object() for index in range(registered)},
             points3D={index: object() for index in range(42)},
-            cameras={},
+            cameras={1: camera},
             write=Mock(),
         )
 
@@ -99,11 +127,17 @@ class FinePreprocessColmapTests(unittest.TestCase):
             model.mkdir(parents=True, exist_ok=True)
             (model / "images.bin").write_bytes(b"images")
 
+        def undistort_images(*, output_path: str, **_kwargs):
+            sparse = Path(output_path) / "sparse"
+            sparse.mkdir(parents=True, exist_ok=True)
+            (sparse / "images.bin").write_bytes(b"images")
+
         return SimpleNamespace(
             extract_features=Mock(),
             match_exhaustive=Mock(),
             match_sequential=Mock(),
             incremental_mapping=Mock(side_effect=incremental_mapping),
+            undistort_images=Mock(side_effect=undistort_images),
             IncrementalPipelineOptions=lambda: SimpleNamespace(mapper=SimpleNamespace()),
             Reconstruction=Mock(return_value=reconstruction),
         )

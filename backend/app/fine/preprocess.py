@@ -303,15 +303,16 @@ def build_pycolmap_scene(
 
     if scene_dir.exists():
         shutil.rmtree(scene_dir)
-    images_dir = scene_dir / "images"
-    sparse_dir = scene_dir / "sparse"
+    distorted_dir = scene_dir / "distorted"
+    images_dir = distorted_dir / "images"
+    sparse_dir = distorted_dir / "sparse"
     images_dir.mkdir(parents=True, exist_ok=True)
     sparse_dir.mkdir(parents=True, exist_ok=True)
     for index, path in enumerate(files):
         shutil.copy2(path, images_dir / f"{index:06d}.jpg")
 
     started = time.monotonic()
-    database_path = scene_dir / "database.db"
+    database_path = distorted_dir / "database.db"
     progress("fine_colmap_features", 24, f"extracting COLMAP features from {len(files)} images")
     pycolmap.extract_features(
         database_path,
@@ -345,16 +346,7 @@ def build_pycolmap_scene(
     recon_path = select_best_colmap_model(sparse_dir)
     if recon_path is None:
         raise FineFailure("COLMAP_RECONSTRUCTION_FAILED", "COLMAP did not produce a sparse reconstruction")
-    if recon_path.name != "0":
-        target = sparse_dir / "0"
-        if target.exists():
-            shutil.rmtree(target)
-        shutil.copytree(recon_path, target)
-        recon_path = target
-
     reconstruction = pycolmap.Reconstruction(recon_path)
-    normalize_colmap_cameras(reconstruction)
-    reconstruction.write(recon_path)
     registered = len(reconstruction.images)
     registered_ratio = registered / len(files)
     threshold = _resolve_min_registered_ratio(len(files), min_registered_ratio)
@@ -365,6 +357,16 @@ def build_pycolmap_scene(
         )
 
     point_count = len(reconstruction.points3D)
+    progress("fine_colmap_undistort", 40, "undistorting COLMAP images for FastGS")
+    pycolmap.undistort_images(
+        output_path=str(scene_dir),
+        input_path=str(recon_path),
+        image_path=str(images_dir),
+        output_type="COLMAP",
+    )
+    fastgs_sparse_dir = ensure_fastgs_sparse_zero(scene_dir / "sparse")
+    fastgs_reconstruction = pycolmap.Reconstruction(fastgs_sparse_dir)
+    validate_fastgs_colmap_scene(fastgs_reconstruction)
     elapsed = round(time.monotonic() - started, 3)
     return SceneBuildResult(
         scene_dir=scene_dir,
@@ -379,6 +381,7 @@ def build_pycolmap_scene(
             "sfm_registered_ratio": registered_ratio,
             "sfm_min_registered_ratio": threshold,
             "sfm_sparse_points": point_count,
+            "sfm_undistorted": True,
             "colmap_matcher": matcher,
             "colmap_sift_max_num_features": max_num_features,
             "colmap_max_image_size": max_image_size,
@@ -403,23 +406,49 @@ def select_best_colmap_model(sparse_dir: Path) -> Path | None:
     return max(candidates, key=lambda path: (path / "images.bin").stat().st_size)
 
 
-def normalize_colmap_cameras(reconstruction) -> None:
-    if np is None:
-        if getattr(reconstruction, "cameras", None):
-            raise FineFailure("IMAGE_ANALYSIS_UNAVAILABLE", "NumPy is required for COLMAP camera normalization")
-        return
+def ensure_fastgs_sparse_zero(sparse_dir: Path) -> Path:
+    model_dir = sparse_dir / "0"
+    if (model_dir / "images.bin").exists():
+        return model_dir
+    if (sparse_dir / "images.bin").exists():
+        model_dir.mkdir(parents=True, exist_ok=True)
+        for path in sparse_dir.iterdir():
+            if path.is_file():
+                shutil.move(str(path), model_dir / path.name)
+        return model_dir
+    raise FineFailure("COLMAP_UNDISTORT_FAILED", f"COLMAP undistortion did not create a sparse model in {sparse_dir}")
 
-    for camera in reconstruction.cameras.values():
-        model = str(camera.model)
-        params = np.asarray(camera.params, dtype=np.float64)
-        if model in {"SIMPLE_PINHOLE", "SIMPLE_RADIAL", "RADIAL"} and params.size >= 3:
-            camera.model = "SIMPLE_PINHOLE"
-            camera.params = params[:3]
-        elif model == "PINHOLE" and params.size >= 4:
-            continue
-        elif params.size >= 4:
-            camera.model = "PINHOLE"
-            camera.params = params[:4]
-        elif params.size >= 3:
-            camera.model = "SIMPLE_PINHOLE"
-            camera.params = params[:3]
+
+def validate_fastgs_colmap_scene(reconstruction) -> None:
+    cameras = getattr(reconstruction, "cameras", None) or {}
+    for camera in cameras.values():
+        model = _camera_model_name(getattr(camera, "model", ""))
+        params = [float(value) for value in getattr(camera, "params", [])]
+        width = float(getattr(camera, "width", 0) or 0)
+        height = float(getattr(camera, "height", 0) or 0)
+        if model == "SIMPLE_PINHOLE" and len(params) >= 3:
+            fov_params = params[:1]
+            cx, cy = params[1], params[2]
+        elif model == "PINHOLE" and len(params) >= 4:
+            fov_params = params[:2]
+            cx, cy = params[2], params[3]
+        else:
+            raise FineFailure(
+                "COLMAP_CAMERA_MODEL_UNSUPPORTED",
+                f"FastGS requires undistorted SIMPLE_PINHOLE/PINHOLE cameras, got {model or camera.model}",
+            )
+        if width <= 0 or height <= 0 or any(value <= 0 for value in fov_params):
+            raise FineFailure("COLMAP_CAMERA_INVALID", f"Invalid FastGS camera intrinsics for model {model}")
+        if not _principal_point_is_plausible(cx, cy, width, height):
+            raise FineFailure(
+                "COLMAP_CAMERA_INVALID",
+                f"Invalid FastGS principal point for {model}: cx={cx:.6g}, cy={cy:.6g}, size={width:.0f}x{height:.0f}",
+            )
+
+
+def _camera_model_name(model: object) -> str:
+    return str(model).split(".")[-1].upper()
+
+
+def _principal_point_is_plausible(cx: float, cy: float, width: float, height: float) -> bool:
+    return width * 0.05 <= cx <= width * 0.95 and height * 0.05 <= cy <= height * 0.95

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
 
-from app.preview.io.ply import write_gaussian_splat_ply
+from app.preview.io.ply import fixed_preview_radius, write_point_cloud_ply
 from app.preview.types import PreviewFailure
 from app.preview.utils import VENDOR_ROOT, image_files, prepend_sys_path
 
@@ -26,7 +27,7 @@ class LiteVGGTReconstruction:
     colors: np.ndarray
     confidence: np.ndarray
     point_frame_indices: np.ndarray
-    metrics: dict[str, int | float | str | bool]
+    metrics: dict[str, Any]
 
 
 @dataclass(slots=True)
@@ -683,11 +684,66 @@ def run_litevggt_reconstruction(
                 torch.cuda.empty_cache()
 
 
+LITEVGGT_POINT_SOURCE = "litevggt_depth_unprojected"
+
+
+def litevggt_preview_bounds(points: Any) -> dict[str, Any]:
+    pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+    finite = pts[np.isfinite(pts).all(axis=1)]
+    if finite.shape[0] == 0:
+        raise PreviewFailure(
+            "LITEVGGT_EMPTY_POINT_CLOUD",
+            "LiteVGGT produced no finite points for preview",
+        )
+
+    bbox_min = np.percentile(finite, 1, axis=0).astype(np.float32)
+    bbox_max = np.percentile(finite, 99, axis=0).astype(np.float32)
+    bbox_center = ((bbox_min + bbox_max) * 0.5).astype(np.float32)
+    bbox_radius = max(float(np.linalg.norm(bbox_max - bbox_min) * 0.5), 0.05)
+    return {
+        "bbox_min": [float(value) for value in bbox_min],
+        "bbox_max": [float(value) for value in bbox_max],
+        "bbox_center": [float(value) for value in bbox_center],
+        "bbox_radius": bbox_radius,
+    }
+
+
+def write_litevggt_preview_meta_json(
+    output_meta_json: Path,
+    *,
+    point_count_raw: int,
+    point_count_exported: int,
+    bounds: dict[str, Any],
+) -> None:
+    payload = {
+        "asset_type": "litevggt_preview_points",
+        "point_source": LITEVGGT_POINT_SOURCE,
+        "num_points": int(point_count_exported),
+        "point_count_raw": int(point_count_raw),
+        "point_count_exported": int(point_count_exported),
+        "bbox_min": bounds["bbox_min"],
+        "bbox_max": bounds["bbox_max"],
+        "bbox_center": bounds["bbox_center"],
+        "bbox_radius": bounds["bbox_radius"],
+        "center": bounds["bbox_center"],
+        "radius": bounds["bbox_radius"],
+        "scale_applied": 1.0,
+        "coordinate_system": "litevggt_world",
+        "recommended_frontend": {
+            "default_view_mode": "points",
+            "default_point_size": 2.0,
+        },
+    }
+    output_meta_json.parent.mkdir(parents=True, exist_ok=True)
+    output_meta_json.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
 def run_litevggt_pointcloud(
     *,
     input_dir: Path,
     checkpoint_path: Path,
     output_ply: Path,
+    output_meta_json: Path | None = None,
     keep_ratio: float | None,
     max_points: int,
     max_input_frames: int | None = None,
@@ -697,7 +753,7 @@ def run_litevggt_pointcloud(
     preprocess_mode: str = "pad",
     progress: Progress,
     **unused_options,
-) -> dict[str, int | float | str | bool]:
+) -> dict[str, Any]:
     reconstruction = run_litevggt_reconstruction(
         input_dir=input_dir,
         checkpoint_path=checkpoint_path,
@@ -711,14 +767,35 @@ def run_litevggt_pointcloud(
         progress=progress,
         **unused_options,
     )
-    point_count = write_gaussian_splat_ply(
+    bounds = litevggt_preview_bounds(reconstruction.points)
+    point_count_raw = int(reconstruction.metrics.get("point_count_before_filter", reconstruction.points.shape[0]))
+    point_count = write_point_cloud_ply(
         reconstruction.points,
         reconstruction.colors,
         output_ply,
         confidence=reconstruction.confidence,
         max_points=max_points,
     )
-    return {**reconstruction.metrics, "point_count": point_count}
+    if output_meta_json is not None:
+        write_litevggt_preview_meta_json(
+            output_meta_json,
+            point_count_raw=point_count_raw,
+            point_count_exported=point_count,
+            bounds=bounds,
+        )
+    return {
+        **reconstruction.metrics,
+        "point_count": point_count,
+        "point_count_raw": point_count_raw,
+        "point_count_exported": point_count,
+        "point_source": LITEVGGT_POINT_SOURCE,
+        "litevggt_ply_format": "point_cloud",
+        "litevggt_preview_point_radius": fixed_preview_radius(reconstruction.points),
+        "bbox_min": bounds["bbox_min"],
+        "bbox_max": bounds["bbox_max"],
+        "bbox_center": bounds["bbox_center"],
+        "bbox_radius": bounds["bbox_radius"],
+    }
 
 
 def require_transformer_engine() -> None:

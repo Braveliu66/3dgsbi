@@ -18,7 +18,7 @@ from app.preview.types import PreviewFailure
 
 Progress = Callable[[str, int, str], None]
 LINGBOT_MAP_COMMIT = "4cd986009b9adeded8a4e740919221940dedeffe"
-POINT_KEYS = ("world_points_from_depth", "world_points", "points")
+POINT_KEYS = ("world_points", "points")
 COLOR_KEYS = ("images", "image", "rgb", "colors")
 CONF_KEYS_BY_POINT = {
     "world_points": ("world_points_conf", "conf"),
@@ -419,6 +419,7 @@ def resolve_lingbot_target_dimensions(
     if width <= 0 or height <= 0:
         return align_to_patch(target_width, patch_size), align_to_patch(target_height, patch_size)
 
+    width, height = crop_portrait_to_square_size(width, height)
     max_width = align_to_patch(target_width, patch_size)
     max_height = align_to_patch(target_height, patch_size)
     scale = min(max_width / width, max_height / height)
@@ -429,6 +430,20 @@ def resolve_lingbot_target_dimensions(
 
 def align_to_patch(value: int, patch_size: int) -> int:
     return max(patch_size, int(value) // patch_size * patch_size)
+
+
+def crop_portrait_to_square_size(width: int, height: int) -> tuple[int, int]:
+    if height > width:
+        return width, width
+    return width, height
+
+
+def crop_portrait_to_square_image(img: Any) -> Any:
+    width, height = img.size
+    if height <= width:
+        return img
+    top = (height - width) // 2
+    return img.crop((0, top, width, top + width))
 
 
 def load_and_preprocess_images_to_target_box(
@@ -455,6 +470,7 @@ def load_and_preprocess_images_to_target_box(
             background = Image.new("RGBA", img.size, (255, 255, 255, 255))
             img = Image.alpha_composite(background, img)
         img = img.convert("RGB")
+        img = crop_portrait_to_square_image(img)
 
         width, height = img.size
         new_width, new_height = resolve_lingbot_target_dimensions(
@@ -1302,14 +1318,10 @@ def write_lingbot_preview_assets(
             bbox=bbox,
         )
 
-    quality_warning = (
-        "LingBot depth reprojection was unavailable; preview used model world_points and may differ from the official viewer path."
-        if point_source != "world_points_from_depth"
-        else None
-    )
+    quality_warning = "LingBot preview used depth-reprojected world_points_from_depth fallback." if point_source == "world_points_from_depth" else None
     _log(
         "export metrics "
-        f"source={point_source} depth_fallback={point_source != 'world_points_from_depth'} "
+        f"source={point_source} depth_fallback={point_source == 'world_points_from_depth'} "
         f"source_frames={source_frame_count if source_frame_count is not None else frame_count} "
         f"used_frames={frame_count} skipped_frames={skipped_frame_count} "
         f"raw_points={raw_point_count if raw_point_count is not None else total_points} "
@@ -1324,7 +1336,7 @@ def write_lingbot_preview_assets(
         "point_count_raw": int(raw_point_count if raw_point_count is not None else total_points),
         "point_count_exported": int(points_count),
         "lingbot_point_source": point_source,
-        "lingbot_depth_reprojection_fallback": bool(point_source != "world_points_from_depth"),
+        "lingbot_depth_reprojection_fallback": bool(point_source == "world_points_from_depth"),
         "lingbot_ply_format": "point_cloud",
         "lingbot_point_source_frames": int(source_frame_count if source_frame_count is not None else frame_count),
         "lingbot_point_frame_count": int(frame_count),

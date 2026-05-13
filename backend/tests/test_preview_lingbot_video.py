@@ -65,7 +65,7 @@ class LingBotVideoPreviewTests(unittest.TestCase):
                 self.assertEqual(kwargs["max_frames"], 0)
                 self.assertEqual(kwargs["image_size"], 518)
                 self.assertEqual(kwargs["target_width"], 518)
-                self.assertEqual(kwargs["target_height"], 378)
+                self.assertEqual(kwargs["target_height"], 518)
                 self.assertEqual(kwargs["mode"], "windowed")
                 self.assertEqual(kwargs["preprocess_mode"], "crop")
                 self.assertEqual(kwargs["camera_iterations"], 1)
@@ -108,7 +108,7 @@ class LingBotVideoPreviewTests(unittest.TestCase):
                     "lingbot_inference_mode": "streaming",
                     "lingbot_keyframe_interval": 1,
                     "lingbot_inference_fps": 3.25,
-                    "lingbot_point_source": "world_points_from_depth",
+                    "lingbot_point_source": "world_points",
                     "lingbot_preview_point_radius": 0.001,
                     "point_count": 42,
                     "cuda_memory_peak_mb": 123.0,
@@ -125,7 +125,7 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             self.assertTrue(result.intermediate_ply and result.intermediate_ply.exists())
             self.assertEqual(result.splat_count, 11)
             self.assertEqual(result.metrics["adapter"], "lingbot_map_spz")
-            self.assertEqual(result.metrics["point_source"], "world_points_from_depth")
+            self.assertEqual(result.metrics["point_source"], "world_points")
             self.assertEqual(result.metrics["fixed_splat_ply_count"], 1)
             self.assertEqual(result.metrics["fixed_splat_base_point_radius"], 0.001)
             self.assertAlmostEqual(result.metrics["fixed_splat_point_radius"], 0.001)
@@ -189,14 +189,17 @@ class LingBotVideoPreviewTests(unittest.TestCase):
         self.assertEqual(resolve_preprocess_mode("crop", 720, 1280), "crop")
         self.assertEqual(resolve_preprocess_mode("pad", 1280, 720), "pad")
 
-    def test_lingbot_target_resolution_preserves_aspect_inside_518x378(self) -> None:
+    def test_lingbot_target_resolution_crops_portrait_before_resize(self) -> None:
         from app.preview.vendor.lingbot_runtime import resolve_lingbot_target_dimensions
 
         kwargs = {"target_width": 518, "target_height": 378, "patch_size": 14}
 
         self.assertEqual(resolve_lingbot_target_dimensions(1920, 1080, **kwargs), (518, 294))
         self.assertEqual(resolve_lingbot_target_dimensions(1600, 1200, **kwargs), (504, 378))
-        self.assertEqual(resolve_lingbot_target_dimensions(720, 1280, **kwargs), (210, 378))
+        self.assertEqual(resolve_lingbot_target_dimensions(720, 1280, **kwargs), (378, 378))
+
+        square_kwargs = {"target_width": 518, "target_height": 518, "patch_size": 14}
+        self.assertEqual(resolve_lingbot_target_dimensions(720, 1280, **square_kwargs), (518, 518))
 
     def test_lingbot_video_frame_extraction_uses_ffmpeg_autorotate(self) -> None:
         from app.preview.vendor import lingbot_runtime
@@ -405,7 +408,7 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             self.assertEqual(metrics["lingbot_point_frame_count"], 2)
             self.assertEqual(metrics["lingbot_point_skipped_frames"], 0)
 
-    def test_lingbot_npz_to_pointcloud_ply_prefers_depth_reprojection_points(self) -> None:
+    def test_lingbot_npz_to_pointcloud_ply_prefers_model_world_points(self) -> None:
         from app.preview.io.ply import POINT_CLOUD_PLY_DTYPE
         from app.preview.vendor.lingbot_runtime import write_spark_plain_ply_from_npz
 
@@ -434,6 +437,7 @@ class LingBotVideoPreviewTests(unittest.TestCase):
                 predictions / "frame_000000.npz",
                 world_points_from_depth=world_points_from_depth,
                 world_points=world_points,
+                world_points_conf=depth_conf,
                 images=image,
                 depth_conf=depth_conf,
             )
@@ -456,17 +460,18 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             self.assertNotIn(b"property float scale_2", header)
             self.assertEqual(metrics["point_count"], 2)
             self.assertEqual(metrics["lingbot_ply_format"], "point_cloud")
-            self.assertEqual(metrics["lingbot_point_source"], "world_points_from_depth")
+            self.assertEqual(metrics["lingbot_point_source"], "world_points")
 
             records = np.frombuffer(
                 body,
                 dtype=POINT_CLOUD_PLY_DTYPE,
             )
             self.assertEqual(records.shape[0], 2)
-            np.testing.assert_allclose(records["x"], np.array([3, 4], dtype=np.float32))
+            np.testing.assert_allclose(records["x"], np.array([99, 99], dtype=np.float32))
             np.testing.assert_allclose(records["confidence"], np.array([0.3, 0.4], dtype=np.float32))
 
-    def test_lingbot_depth_points_are_not_marked_as_fallback(self) -> None:
+    def test_lingbot_depth_points_are_not_used_as_export_source(self) -> None:
+        from app.preview.types import PreviewFailure
         from app.preview.vendor.lingbot_runtime import write_spark_plain_ply_from_npz
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -480,19 +485,18 @@ class LingBotVideoPreviewTests(unittest.TestCase):
                 depth_conf=np.ones((2, 2), dtype=np.float32),
             )
 
-            metrics = write_spark_plain_ply_from_npz(
-                predictions,
-                root / "preview_splats.ply",
-                frame_stride=1,
-                pixel_stride=1,
-                conf_percentile=0,
-                min_conf=0,
-                max_points=0,
-            )
+            with self.assertRaises(PreviewFailure) as raised:
+                write_spark_plain_ply_from_npz(
+                    predictions,
+                    root / "preview_splats.ply",
+                    frame_stride=1,
+                    pixel_stride=1,
+                    conf_percentile=0,
+                    min_conf=0,
+                    max_points=0,
+                )
 
-            self.assertEqual(metrics["lingbot_point_source"], "world_points_from_depth")
-            self.assertFalse(metrics["lingbot_depth_reprojection_fallback"])
-            self.assertIsNone(metrics["quality_warning"])
+            self.assertEqual(raised.exception.code, "LINGBOT_POINT_FIELD_MISSING")
 
     def test_pointcloud_ply_converts_to_fixed_splat_ply_with_log_scale(self) -> None:
         from app.preview.io.ply import (
