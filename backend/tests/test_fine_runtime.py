@@ -30,13 +30,17 @@ def import_fine_runtime():
 
 
 class FineRuntimeTests(unittest.TestCase):
-    def test_fine_runtime_registers_litevggt_runtime(self) -> None:
+    def test_fine_runtime_registers_official_fastgs_runtime(self) -> None:
         algorithms_source = (BACKEND_ROOT / "app" / "algorithms.py").read_text(encoding="utf-8")
         fine_status_block = algorithms_source.split("def fine_runtime_status", 1)[1].split("def ", 1)[0]
 
-        self.assertIn("litevggt_runtime", fine_status_block)
-        self.assertIn("transformer_engine", fine_status_block)
+        self.assertIn("pycolmap", fine_status_block)
         self.assertIn("diff_gaussian_rasterization_fastgs", fine_status_block)
+        self.assertIn("simple_knn", fine_status_block)
+        self.assertIn("fused_ssim", fine_status_block)
+        self.assertNotIn("litevggt_runtime", fine_status_block)
+        self.assertNotIn("deblur_mlp", fine_status_block)
+        self.assertNotIn('"diff_gaussian_rasterization"', fine_status_block)
         self.assertNotIn('"gsplat"', fine_status_block)
         self.assertNotIn("amb3r", fine_status_block)
 
@@ -66,30 +70,34 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertNotIn("/opt/lm-rs", trainer_source)
         self.assertNotIn("gauss_newton_step", trainer_source)
 
-    def test_lmrs_is_isolated_by_default(self) -> None:
+    def test_image_fine_runner_uses_official_fastgs_big_not_lmrs(self) -> None:
         runner_source = (BACKEND_ROOT / "app" / "fine" / "runner.py").read_text(encoding="utf-8")
         trainer_source = (BACKEND_ROOT / "app" / "fine" / "mobilegs_trainer.py").read_text(encoding="utf-8")
 
-        self.assertIn("lm_default = iterations", runner_source)
+        self.assertIn("train_official_fastgs_big", runner_source)
+        self.assertNotIn("train_mobile_3dgs", runner_source)
+        self.assertNotIn("fine_lm_start_iter", runner_source)
+        self.assertNotIn("lm_default = iterations", runner_source)
         self.assertNotIn("min(15_000, iterations)", runner_source)
         self.assertIn('read_bool((options or {}).get("fine_lmrs_enabled"), False)', trainer_source)
         self.assertIn('"active": False', trainer_source)
         self.assertIn("LM-RS temporarily isolated due to unstable local backend", trainer_source)
 
-    def test_worker_builds_vendored_3dgs_extensions_without_lmrs(self) -> None:
+    def test_worker_builds_vendored_3dgs_extensions_without_runtime_fastgs_clone(self) -> None:
         dockerfile = (BACKEND_ROOT.parent / "worker" / "Dockerfile").read_text(encoding="utf-8")
 
         self.assertNotIn("lm-rs", dockerfile.lower())
         self.assertNotIn("LMRS_ROOT", dockerfile)
         self.assertNotIn("lmrs-fastgs-compact-box.patch", dockerfile)
         self.assertNotIn("fastgs-cuda-metric-accumulation.patch", dockerfile)
-        self.assertIn("backend/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/diff-gaussian-rasterization", dockerfile)
-        self.assertIn("FASTGS_REPO_URL=https://github.com/fastgs/FastGS.git", dockerfile)
-        self.assertIn("FASTGS_REPO_COMMIT=44e02a5c1d5e9ed64d2ecd4af1cbba14ac92150f", dockerfile)
-        self.assertIn("cached_wheel_install diff-gaussian-rasterization-fastgs", dockerfile)
-        self.assertIn("backend/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/simple-knn", dockerfile)
-        self.assertIn("cached_wheel_install diff-gaussian-rasterization /app/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/diff-gaussian-rasterization", dockerfile)
-        self.assertIn("cached_wheel_install simple-knn /app/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/simple-knn", dockerfile)
+        self.assertNotIn("FASTGS_REPO_URL", dockerfile)
+        self.assertNotIn("github.com/fastgs/FastGS.git", dockerfile)
+        self.assertNotIn('ensure_git_checkout "$FASTGS_REPO_URL"', dockerfile)
+        self.assertIn("COPY backend/app/fine/vendor/fastgs ./app/fine/vendor/fastgs", dockerfile)
+        self.assertIn("ENV FASTGS_VENDOR_ROOT=/app/app/fine/vendor/fastgs", dockerfile)
+        self.assertIn("cached_wheel_install diff-gaussian-rasterization-fastgs /app/app/fine/vendor/fastgs/submodules/diff-gaussian-rasterization_fastgs", dockerfile)
+        self.assertIn("cached_wheel_install simple-knn /app/app/fine/vendor/fastgs/submodules/simple-knn", dockerfile)
+        self.assertIn("cached_wheel_install fused-ssim /app/app/fine/vendor/fastgs/submodules/fused-ssim", dockerfile)
         self.assertNotIn("cached_wheel_install simple-knn-artdeco", dockerfile)
         self.assertIn("retry_pip --force-reinstall --no-deps \"$wheel\"", dockerfile)
         self.assertIn("libc10.so", dockerfile)
@@ -101,7 +109,6 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertNotIn("submodule update --init --recursive VSLAM/thirdparty/eigen", dockerfile)
         self.assertNotIn("D11.scalar_type()", dockerfile)
         self.assertNotIn("dx.pow(2).sum().sqrt()", dockerfile)
-        self.assertIn("ensure_git_checkout", dockerfile)
         self.assertIn("cat-file -e", dockerfile)
         self.assertIn("three-dgs-worker-lingbot-map-git-cache", dockerfile)
         self.assertIn("CACHED_LINGBOT_MAP", dockerfile)
@@ -148,12 +155,21 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertNotIn("target: worker-preview", compose_source)
         self.assertNotIn("target: worker-fine", compose_source)
 
-    def test_legacy_fine_pipeline_aliases_to_litevggt_fastgs(self) -> None:
+    def test_normalize_fine_pipeline_maps_legacy_to_official_fastgs_big(self) -> None:
         *_, normalize_fine_pipeline = import_fine_runtime()
 
-        self.assertEqual(normalize_fine_pipeline("fused_quality_3dgs"), "litevggt_fastgs_deblur_gsplat")
-        self.assertEqual(normalize_fine_pipeline("mobilegs_lmrs"), "litevggt_fastgs_deblur_gsplat")
-        self.assertEqual(normalize_fine_pipeline(None), "litevggt_fastgs_deblur_gsplat")
+        aliases = [
+            "fused_quality_3dgs",
+            "fine_fused_quality",
+            "fused_quality",
+            "mobilegs_lmrs",
+            "litevggt_fastgs",
+            "litevggt_fastgs_deblur",
+            "litevggt_fastgs_deblur_gsplat",
+            None,
+        ]
+        for alias in aliases:
+            self.assertEqual(normalize_fine_pipeline(alias), "official_fastgs_big")
 
     def test_video_fine_pipeline_aliases_to_artdeco_speed3r(self) -> None:
         *_, normalize_fine_pipeline = import_fine_runtime()
@@ -289,21 +305,14 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertEqual(result.backend, "pycolmap")
         pycolmap.assert_called_once()
 
-    def test_pycolmap_default_can_fallback_to_litevggt(self) -> None:
-        _, SceneBuildResult, _, build_scene, *_ = import_fine_runtime()
-        expected = SceneBuildResult(Path("scene"), "litevggt", 8, 8, 100, {"sfm_backend": "litevggt"})
-        ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={}, progress=None)
-        with tempfile.TemporaryDirectory() as tmp, patch(
-            "app.fine.runner.build_pycolmap_scene",
-            side_effect=FineFailure("COLMAP_FAILED", "no model"),
-        ) as pycolmap, patch("app.fine.runner.build_litevggt_scene", return_value=expected) as litevggt:
-            result = build_scene(ctx, Path(tmp), Path(tmp) / "scene", 8192, 1600, 8)
+    def test_build_scene_rejects_litevggt_for_image_fine(self) -> None:
+        *_, build_scene, _, _ = import_fine_runtime()
+        ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={"fine_sfm_backend": "litevggt"}, progress=None)
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(FineFailure) as raised:
+                build_scene(ctx, Path(tmp), Path(tmp) / "scene", 8192, 1600, 8)
 
-        self.assertEqual(result.backend, "litevggt")
-        self.assertEqual(result.metrics["sfm_backend_requested"], "pycolmap")
-        self.assertEqual(result.metrics["sfm_fallback_reason"], "COLMAP_FAILED")
-        pycolmap.assert_called_once()
-        litevggt.assert_called_once()
+        self.assertEqual(raised.exception.code, "UNSUPPORTED_FINE_SFM_BACKEND")
 
     def test_explicit_pycolmap_backend_uses_same_default_path(self) -> None:
         _, SceneBuildResult, _, build_scene, *_ = import_fine_runtime()
@@ -336,13 +345,13 @@ class FineRuntimeTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "UNSUPPORTED_FINE_SFM_BACKEND")
 
-    def test_fine_weight_registration_uses_litevggt_by_default(self) -> None:
+    def test_fine_weight_registration_uses_official_fastgs_without_litevggt_weights(self) -> None:
         fine_worker_source = (BACKEND_ROOT / "app" / "fine_worker.py").read_text(encoding="utf-8")
         weights_source = (BACKEND_ROOT / "app" / "preview" / "weights.py").read_text(encoding="utf-8")
         self.assertIn("download_model_weights", fine_worker_source)
         self.assertIn("weights_for_pipeline", fine_worker_source)
         self.assertNotIn("ensure_roma_weights", fine_worker_source)
-        self.assertIn('"litevggt/te_dict.pt"', weights_source)
+        self.assertIn('"official_fastgs_big": ()', weights_source)
         self.assertNotIn("roma_outdoor.pth", weights_source)
         self.assertNotIn("speed3r_pi3/model.safetensors", weights_source)
         self.assertNotIn("ensure_amb3r_weight", fine_worker_source)
@@ -484,14 +493,16 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertNotIn("/model-cache/mast3r", dockerfile)
         self.assertNotIn("artdeco_repo_commit", dockerfile)
         self.assertNotIn("speed3r_repo_commit", dockerfile)
-        self.assertIn("fastgs_repo_commit", dockerfile)
+        self.assertIn("fastgs_vendor_root=/app/app/fine/vendor/fastgs", dockerfile)
+        self.assertNotIn("fastgs_repo_commit", dockerfile)
+        self.assertNotIn("fastgs_repo_url", dockerfile)
         self.assertIn("cached_wheel_install diff-gaussian-rasterization-fastgs", dockerfile)
         self.assertNotIn("env pythonpath=${artdeco_root}/vslam/thirdparty/mast3r/dust3r/croco", dockerfile)
         self.assertIn("three-dgs-worker-extension-wheel-cache", dockerfile)
         self.assertNotIn("three-dgs-worker-lmrs-git-cache", dockerfile)
         self.assertNotIn("lmrs_repo_url", dockerfile)
         self.assertNotIn("lmrs_root", dockerfile)
-        self.assertIn("cached_wheel_install simple-knn /app/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/simple-knn", dockerfile)
+        self.assertIn("cached_wheel_install simple-knn /app/app/fine/vendor/fastgs/submodules/simple-knn", dockerfile)
         self.assertIn("retry_pip --force-reinstall --no-deps \"$wheel\"", dockerfile)
         self.assertIn("libc10.so", dockerfile)
         self.assertIn("/etc/ld.so.conf.d/pytorch.conf", dockerfile)
@@ -507,7 +518,7 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertNotIn("speed3r rope2d cuda extension import ok", dockerfile)
         self.assertNotIn("cached_wheel_install artdeco-vslam", dockerfile)
         self.assertLess(
-            dockerfile.index("copy backend/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/fused-ssim"),
+            dockerfile.index("copy backend/app/fine/vendor/fastgs ./app/fine/vendor/fastgs"),
             dockerfile.index("cached_wheel_install fused-ssim"),
         )
         self.assertGreater(

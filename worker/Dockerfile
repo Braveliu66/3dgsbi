@@ -108,13 +108,12 @@ FROM worker-common AS worker
 
 ARG LINGBOT_MAP_REPO_URL=https://github.com/Robbyant/lingbot-map.git
 ARG LINGBOT_MAP_REPO_COMMIT=4cd986009b9adeded8a4e740919221940dedeffe
-ARG FASTGS_REPO_URL=https://github.com/fastgs/FastGS.git
-ARG FASTGS_REPO_COMMIT=44e02a5c1d5e9ed64d2ecd4af1cbba14ac92150f
 
 ENV FINE_RECONSTRUCTION_ENABLED=true
 ENV MAX_JOBS=2
 ENV CUDA_PATH=/usr/local/cuda
 ENV NVTE_FRAMEWORK=pytorch
+ENV FASTGS_VENDOR_ROOT=/app/app/fine/vendor/fastgs
 
 COPY backend/requirements.txt /tmp/backend/requirements.txt
 COPY worker/requirements.txt /tmp/worker/requirements.txt
@@ -248,16 +247,10 @@ PY
 done
 EOF
 
-COPY backend/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/diff-gaussian-rasterization \
-    ./app/fine/local_3dgs/vendor/gaussian_splatting/submodules/diff-gaussian-rasterization
-COPY backend/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/simple-knn \
-    ./app/fine/local_3dgs/vendor/gaussian_splatting/submodules/simple-knn
-COPY backend/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/fused-ssim \
-    ./app/fine/local_3dgs/vendor/gaussian_splatting/submodules/fused-ssim
+COPY backend/app/fine/vendor/fastgs ./app/fine/vendor/fastgs
 
 RUN --mount=type=cache,id=three-dgs-worker-runtime-extension-pip-cache,target=/root/.cache/pip,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-extension-wheel-cache,target=/root/.cache/three-dgs-wheels,sharing=locked \
-    --mount=type=cache,id=three-dgs-worker-fastgs-git-cache,target=/repo-cache/fastgs,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-lingbot-map-git-cache,target=/repo-cache/lingbot-map,sharing=locked <<'EOF'
 set -eu
 retry_pip() {
@@ -341,12 +334,9 @@ ensure_git_checkout() {
   fi
   retry_git -C "$repo_path" checkout "$repo_commit"
 }
-cached_wheel_install diff-gaussian-rasterization /app/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/diff-gaussian-rasterization --no-deps --no-build-isolation
-cached_wheel_install simple-knn /app/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/simple-knn --no-deps --no-build-isolation
-CACHED_FASTGS=/repo-cache/fastgs/source
-ensure_git_checkout "$FASTGS_REPO_URL" "$CACHED_FASTGS" "$FASTGS_REPO_COMMIT"
-cached_wheel_install diff-gaussian-rasterization-fastgs "$CACHED_FASTGS/submodules/diff-gaussian-rasterization_fastgs" --no-deps --no-build-isolation
-cached_wheel_install fused-ssim /app/app/fine/local_3dgs/vendor/gaussian_splatting/submodules/fused-ssim --no-deps --no-build-isolation
+cached_wheel_install diff-gaussian-rasterization-fastgs /app/app/fine/vendor/fastgs/submodules/diff-gaussian-rasterization_fastgs --no-deps --no-build-isolation
+cached_wheel_install simple-knn /app/app/fine/vendor/fastgs/submodules/simple-knn --no-deps --no-build-isolation
+cached_wheel_install fused-ssim /app/app/fine/vendor/fastgs/submodules/fused-ssim --no-deps --no-build-isolation
 CACHED_LINGBOT_MAP=/repo-cache/lingbot-map/source
 ensure_git_checkout "$LINGBOT_MAP_REPO_URL" "$CACHED_LINGBOT_MAP" "$LINGBOT_MAP_REPO_COMMIT"
 cached_wheel_install lingbot-map "$CACHED_LINGBOT_MAP" --no-deps

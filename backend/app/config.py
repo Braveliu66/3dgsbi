@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     fine_expected_seconds_images: int = 7200
     fine_expected_seconds_video: int = 14_400
     fine_image_max_side: int = 2400
-    fine_iterations: int = 25000
+    fine_iterations: int = 5000
 
     litevggt_repo_commit: str = "4767c17f8b6f176bb751566e92f60eb885040033"
     lingbot_map_repo_commit: str = "4cd986009b9adeded8a4e740919221940dedeffe"

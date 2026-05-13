@@ -945,7 +945,7 @@ def create_fine_task(
     image_count = sum(1 for item in project.media if item.kind == "image")
     video_count = sum(1 for item in project.media if item.kind == "video")
     if project.input_type == "images" and image_count < 8:
-        raise HTTPException(status_code=400, detail="LiteVGGT fine reconstruction requires at least 8 images")
+        raise HTTPException(status_code=400, detail="FastGS-Big fine reconstruction requires at least 8 images")
     if project.input_type == "video" and (video_count != 1 or len(project.media) != 1):
         raise HTTPException(status_code=400, detail="Video fine reconstruction requires exactly one video file")
     if project.input_type == "video":
@@ -953,7 +953,7 @@ def create_fine_task(
     if project.input_type not in {"images", "video"}:
         raise HTTPException(status_code=400, detail="Fine reconstruction input type is unsupported")
 
-    fine_pipeline = "litevggt_fastgs_deblur_gsplat"
+    fine_pipeline = "official_fastgs_big"
     eta_seconds = settings.fine_expected_seconds_images
     payload_options = payload.options or {}
     if str(payload_options.get("fine_edgs_enabled", "")).strip().lower() in {"1", "true", "yes", "on"}:

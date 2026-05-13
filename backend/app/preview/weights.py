@@ -44,9 +44,11 @@ WEIGHT_BY_RELATIVE_PATH = {item.relative_path: item for item in MODEL_WEIGHTS}
 PIPELINE_WEIGHT_PATHS: dict[str, tuple[str, ...]] = {
     "litevggt_spz": ("litevggt/te_dict.pt",),
     "lingbot_map_spz": ("lingbot/lingbot-map-long.pt",),
-    "litevggt_fastgs_deblur_gsplat": (
-        "litevggt/te_dict.pt",
-    ),
+    "official_fastgs_big": (),
+    "litevggt_fastgs_deblur_gsplat": (),
+    "litevggt_fastgs_deblur": (),
+    "litevggt_fastgs": (),
+    "mobilegs_lmrs": (),
 }
 
 

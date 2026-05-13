@@ -40,12 +40,7 @@ _BATCHED_NDIMS = {
 }
 DEFAULT_LINGBOT_MODEL_IMAGE_SIZE = 518
 DEFAULT_LINGBOT_MIN_INFERENCE_FPS = 3.0
-OOM_FALLBACK_IMAGE_SIZE = 448
-OOM_FALLBACK_MAX_FRAMES = 96
-OOM_FALLBACK_WINDOW_SIZE = 32
-OOM_FALLBACK_KEYFRAME_INTERVAL = 2
 DEFAULT_KV_CACHE_SLIDING_WINDOW = 16
-OOM_FALLBACK_KV_CACHE_SLIDING_WINDOW = 8
 DEFAULT_PREVIEW_SPLAT_SCALE = 0.006
 DEFAULT_PREVIEW_OPACITY = 0.65
 SH_C0 = np.float32(0.28209479177387814)
@@ -67,7 +62,6 @@ class LingBotInferenceProfile:
     kv_cache_sliding_window: int
     overlap_keyframes: int
     preprocess_mode: str
-    oom_fallback: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,13 +85,12 @@ class ExtractedFramePoints:
 
 
 @dataclass(frozen=True, slots=True)
-class DownsampledPreviewPoints:
+class PreparedPreviewPoints:
     points: np.ndarray
     colors: np.ndarray
     confidence: np.ndarray | None
     input_count: int
     valid_count: int
-    voxel_count: int
     final_count: int
 
 
@@ -207,57 +200,10 @@ def run_lingbot_video_preview(
     except PreviewFailure:
         raise
     except Exception as exc:
-        if not is_cuda_out_of_memory(exc, torch_module=torch):
-            raise PreviewFailure("LINGBOT_INFERENCE_FAILED", f"LingBot-Map inference failed: {exc}") from exc
-        release_cuda_exception(exc, torch_module=torch)
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        fallback_profile = make_lingbot_oom_fallback_profile(profile)
-        _log(
-            "CUDA OOM fallback "
-            f"from image_size={profile.image_size} max_frames={profile.max_frames} "
-            f"window_size={profile.window_size} num_scale_frames={profile.num_scale_frames} "
-            f"keyframe_interval={profile.keyframe_interval} "
-            f"to image_size={fallback_profile.image_size} max_frames={fallback_profile.max_frames} "
-            f"window_size={fallback_profile.window_size} num_scale_frames={fallback_profile.num_scale_frames} "
-            f"keyframe_interval={fallback_profile.keyframe_interval}"
-        )
-        progress(
-            "lingbot_inference_retry",
-            46,
-            (
-                "CUDA out of memory; retrying LingBot-Map with "
-                f"image_size={fallback_profile.image_size}, "
-                f"max_frames={fallback_profile.max_frames}, "
-                f"window_size={fallback_profile.window_size}, "
-                f"keyframe_interval={fallback_profile.keyframe_interval}"
-            ),
-        )
-        try:
-            predictions, images, inference_metrics = run_lingbot_inference_profile(
-                frame_paths=frame_paths,
-                model_path=model_path,
-                device=device,
-                profile=fallback_profile,
-                use_sdpa=use_sdpa,
-                flashinfer_found=flashinfer_found,
-                allow_sdpa_fallback=allow_sdpa_fallback,
-                dtype=dtype,
-                compile_requested=False,
-                min_inference_fps=min_inference_fps,
-                load_and_preprocess_images=load_and_preprocess_images,
-                torch_module=torch,
-                progress=progress,
-            )
-        except PreviewFailure:
-            raise
-        except Exception as retry_exc:
-            if is_cuda_out_of_memory(retry_exc, torch_module=torch):
-                raise PreviewFailure(
-                    "LINGBOT_CUDA_OOM",
-                    "LingBot-Map inference still ran out of CUDA memory after the safe fallback profile",
-                ) from retry_exc
-            raise PreviewFailure("LINGBOT_INFERENCE_FAILED", f"LingBot-Map inference failed after OOM fallback: {retry_exc}") from retry_exc
+        if is_cuda_out_of_memory(exc, torch_module=torch):
+            release_cuda_exception(exc, torch_module=torch)
+            raise PreviewFailure("LINGBOT_CUDA_OOM", "LingBot-Map inference ran out of CUDA memory") from exc
+        raise PreviewFailure("LINGBOT_INFERENCE_FAILED", f"LingBot-Map inference failed: {exc}") from exc
 
     progress("lingbot_predictions", 66, "preparing LingBot-Map per-frame predictions")
     pred_np = predictions_to_visualization_np(
@@ -317,8 +263,7 @@ def run_lingbot_video_preview(
 
     del pred_np
     del predictions
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    clear_cuda_cache(torch)
 
     return {
         "adapter": "lingbot_map_spz",
@@ -452,9 +397,7 @@ def resolve_keyframe_interval(value: int | None, mode: str, frame_count: int) ->
 
 def resolve_preprocess_mode(mode: str, width: int, height: int) -> str:
     normalized = (mode or "auto").strip().lower()
-    if normalized in {"crop", "pad"}:
-        return normalized
-    return "pad" if height > width else "crop"
+    return normalized if normalized in {"crop", "pad"} else "crop"
 
 
 def select_lingbot_frame_paths(frame_paths: list[Path], max_frames: int) -> list[Path]:
@@ -462,24 +405,6 @@ def select_lingbot_frame_paths(frame_paths: list[Path], max_frames: int) -> list
         return frame_paths
     indices = np.linspace(0, len(frame_paths) - 1, max_frames, dtype=np.int64)
     return [frame_paths[int(index)] for index in indices]
-
-
-def make_lingbot_oom_fallback_profile(profile: LingBotInferenceProfile) -> LingBotInferenceProfile:
-    fallback_max_frames = OOM_FALLBACK_MAX_FRAMES if profile.max_frames <= 0 else min(profile.max_frames, OOM_FALLBACK_MAX_FRAMES)
-    fallback_keyframe_interval = max(profile.keyframe_interval or 0, OOM_FALLBACK_KEYFRAME_INTERVAL)
-    return LingBotInferenceProfile(
-        image_size=min(profile.image_size, OOM_FALLBACK_IMAGE_SIZE),
-        max_frames=fallback_max_frames,
-        mode=profile.mode,
-        keyframe_interval=fallback_keyframe_interval,
-        camera_iterations=1,
-        num_scale_frames=min(profile.num_scale_frames, 2),
-        window_size=min(profile.window_size, OOM_FALLBACK_WINDOW_SIZE),
-        kv_cache_sliding_window=min(profile.kv_cache_sliding_window, OOM_FALLBACK_KV_CACHE_SLIDING_WINDOW),
-        overlap_keyframes=min(profile.overlap_keyframes, 4),
-        preprocess_mode=profile.preprocess_mode,
-        oom_fallback=True,
-    )
 
 
 def resolve_kv_cache_sliding_window(window_size: int) -> int:
@@ -559,7 +484,7 @@ def run_lingbot_inference_profile(
         f"num_scale_frames={profile.num_scale_frames} window_size={profile.window_size} "
         f"overlap_keyframes={profile.overlap_keyframes} kv_cache_sliding_window={profile.kv_cache_sliding_window} "
         f"compile_requested={compile_requested} use_sdpa={use_sdpa} flashinfer_available={flashinfer_found} "
-        f"allow_sdpa_fallback={allow_sdpa_fallback} dtype={dtype} oom_fallback={profile.oom_fallback}"
+        f"allow_sdpa_fallback={allow_sdpa_fallback} dtype={dtype}"
     )
     model = load_lingbot_model(
         model_path,
@@ -625,8 +550,7 @@ def run_lingbot_inference_profile(
         compile_active = False
         compile_fallback = True
         progress("lingbot_inference_retry", 48, "torch.compile CUDA Graph conflict; retrying without compile")
-        if torch_module.cuda.is_available():
-            torch_module.cuda.empty_cache()
+        clear_cuda_cache(torch_module)
         model = load_lingbot_model(
             model_path,
             device,
@@ -643,8 +567,7 @@ def run_lingbot_inference_profile(
         aggregator_dtype = cast_lingbot_aggregator_for_inference(model, dtype)
         predictions, inference_seconds, inference_fps, peak_mb = _infer_once()
     finally:
-        if torch_module.cuda.is_available():
-            torch_module.cuda.empty_cache()
+        clear_cuda_cache(torch_module)
 
     metrics = {
         "lingbot_image_size": int(profile.image_size),
@@ -669,7 +592,6 @@ def run_lingbot_inference_profile(
         "lingbot_compile_cudagraphs": False,
         "lingbot_compile_fallback": compile_fallback,
         "lingbot_max_frames": int(profile.max_frames),
-        "lingbot_oom_fallback": bool(profile.oom_fallback),
         "lingbot_inference_seconds": round(inference_seconds, 3),
         "lingbot_inference_fps": round(inference_fps, 3),
         "cuda_memory_peak_mb": round(peak_mb, 2),
@@ -679,7 +601,7 @@ def run_lingbot_inference_profile(
         f"seconds={metrics['lingbot_inference_seconds']} fps={metrics['lingbot_inference_fps']} "
         f"peak_mb={metrics['cuda_memory_peak_mb']} model_image_size={metrics['lingbot_model_image_size']} "
         f"dtype={metrics['lingbot_aggregator_dtype']} compile={metrics['lingbot_compile']} "
-        f"compile_fallback={metrics['lingbot_compile_fallback']} oom_fallback={metrics['lingbot_oom_fallback']}"
+        f"compile_fallback={metrics['lingbot_compile_fallback']}"
     )
     return predictions, images, metrics
 
@@ -741,7 +663,7 @@ def warm_lingbot_model_once(
             model.clean_kv_cache()
         if torch_module.cuda.is_available():
             torch_module.cuda.synchronize()
-            torch_module.cuda.empty_cache()
+        clear_cuda_cache(torch_module)
 
 
 def cast_lingbot_aggregator_for_inference(model: Any, dtype: Any) -> Any:
@@ -766,7 +688,15 @@ def is_cuda_out_of_memory(error: Exception, *, torch_module: Any) -> bool:
     if oom_type is not None and isinstance(error, oom_type):
         return True
     message = str(error).lower()
-    return "cuda" in message and "out of memory" in message
+    if "cuda" in message and "out of memory" in message:
+        return True
+    if "cudacachingallocator" in message:
+        return True
+    if "internal assert failed" in message and ("handles_.at" in message or "cuda" in message):
+        return True
+    if "cublas_status_alloc_failed" in message or "cusparse_status_alloc_failed" in message:
+        return True
+    return False
 
 
 def release_cuda_exception(error: Exception, *, torch_module: Any) -> None:
@@ -774,8 +704,21 @@ def release_cuda_exception(error: Exception, *, torch_module: Any) -> None:
     error.__context__ = None
     error.__cause__ = None
     gc.collect()
-    if torch_module.cuda.is_available():
-        torch_module.cuda.empty_cache()
+    clear_cuda_cache(torch_module)
+
+
+def clear_cuda_cache(torch_module: Any) -> None:
+    cuda = getattr(torch_module, "cuda", None)
+    if cuda is None:
+        return
+    try:
+        if cuda.is_available():
+            cuda.empty_cache()
+            ipc_collect = getattr(cuda, "ipc_collect", None)
+            if callable(ipc_collect):
+                ipc_collect()
+    except Exception as exc:
+        _log(f"CUDA cache cleanup skipped: {exc}")
 
 
 def load_lingbot_model(
@@ -1224,10 +1167,10 @@ def write_lingbot_preview_assets(
     if total_points <= 0:
         raise PreviewFailure("LINGBOT_EMPTY_POINT_CLOUD", "LingBot-Map produced no valid 3D points")
 
-    downsampled = downsample_preview_points(points, colors, conf, max_points=max_points)
-    points = downsampled.points
-    colors = downsampled.colors
-    conf = downsampled.confidence
+    prepared = prepare_preview_points(points, colors, conf, max_points=max_points)
+    points = prepared.points
+    colors = prepared.colors
+    conf = prepared.confidence
     point_radius = fixed_preview_radius(points)
     bbox = preview_bounds(points)
 
@@ -1254,9 +1197,8 @@ def write_lingbot_preview_assets(
         f"used_frames={frame_count} skipped_frames={skipped_frame_count} "
         f"raw_points={raw_point_count if raw_point_count is not None else total_points} "
         f"confidence_filtered={confidence_filtered_point_count} after_confidence={total_points} "
-        f"finite_points={downsampled.valid_count} after_voxel={downsampled.voxel_count} "
-        f"removed_by_voxel={max(0, downsampled.valid_count - downsampled.voxel_count)} "
-        f"exported={points_count} removed_by_limit={max(0, downsampled.voxel_count - downsampled.final_count)} "
+        f"finite_points={prepared.valid_count} exported={points_count} "
+        f"removed_by_limit={max(0, prepared.valid_count - prepared.final_count)} "
         f"bbox_min={bbox['bbox_min']} bbox_max={bbox['bbox_max']} bbox_center={bbox['center']} "
         f"bbox_radius={bbox['radius']} point_radius={point_radius} warning={quality_warning}"
     )
@@ -1273,11 +1215,9 @@ def write_lingbot_preview_assets(
         "lingbot_points_before_confidence_filter": int(raw_point_count if raw_point_count is not None else total_points),
         "lingbot_points_filtered_by_confidence": int(confidence_filtered_point_count),
         "lingbot_points_after_confidence_filter": int(total_points),
-        "lingbot_points_before_downsample": int(downsampled.valid_count),
-        "lingbot_points_after_voxel": int(downsampled.voxel_count),
-        "lingbot_points_removed_by_voxel": int(max(0, downsampled.valid_count - downsampled.voxel_count)),
+        "lingbot_points_before_downsample": int(prepared.valid_count),
         "lingbot_points_after_downsample": int(points_count),
-        "lingbot_points_removed_by_limit": int(max(0, downsampled.voxel_count - downsampled.final_count)),
+        "lingbot_points_removed_by_limit": int(max(0, prepared.valid_count - prepared.final_count)),
         "lingbot_preview_point_radius": float(point_radius),
         "bbox_min": bbox["bbox_min"],
         "bbox_max": bbox["bbox_max"],
@@ -1407,13 +1347,13 @@ def concatenate_optional_conf(conf_batches: list[np.ndarray | None], point_count
     return conf if conf.shape[0] == point_count else None
 
 
-def downsample_preview_points(
+def prepare_preview_points(
     points: np.ndarray,
     colors: np.ndarray,
     conf: np.ndarray | None,
     *,
     max_points: int,
-) -> DownsampledPreviewPoints:
+) -> PreparedPreviewPoints:
     input_count = int(points.shape[0])
     mask = np.isfinite(points).all(axis=1)
     if conf is not None:
@@ -1425,53 +1365,20 @@ def downsample_preview_points(
         raise PreviewFailure("LINGBOT_EMPTY_POINT_CLOUD", "LingBot-Map produced no valid 3D points")
 
     valid_count = int(points.shape[0])
-    bbox = preview_bounds(points)
-    voxel_size = max(float(bbox["radius"]) * 2.0 / 800.0, 1e-5)
-    points, colors, conf = voxel_downsample(points, colors, conf, voxel_size)
-    voxel_count = int(points.shape[0])
-
     limit = int(max_points)
     if limit > 0 and points.shape[0] > limit:
         keep = np.linspace(0, points.shape[0] - 1, limit, dtype=np.int64)
         points = points[keep]
         colors = colors[keep]
         conf = None if conf is None else conf[keep]
-    return DownsampledPreviewPoints(
+    return PreparedPreviewPoints(
         points=points,
         colors=colors,
         confidence=conf,
         input_count=input_count,
         valid_count=valid_count,
-        voxel_count=voxel_count,
         final_count=int(points.shape[0]),
     )
-
-
-def voxel_downsample(
-    points: np.ndarray,
-    colors: np.ndarray,
-    conf: np.ndarray | None,
-    voxel_size: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
-    if points.shape[0] == 0:
-        return points, colors, conf
-    keys = np.floor(points / max(float(voxel_size), 1e-6)).astype(np.int64)
-    if conf is None:
-        _, unique_idx = np.unique(keys, axis=0, return_index=True)
-        unique_idx = np.sort(unique_idx)
-        return points[unique_idx], colors[unique_idx], None
-
-    _, inverse = np.unique(keys, axis=0, return_inverse=True)
-    best_idx = np.full(int(inverse.max()) + 1, -1, dtype=np.int64)
-    best_conf = np.full(best_idx.shape[0], -np.inf, dtype=np.float32)
-    for index, voxel_index in enumerate(inverse):
-        confidence = float(conf[index])
-        if confidence > best_conf[voxel_index]:
-            best_conf[voxel_index] = confidence
-            best_idx[voxel_index] = index
-    unique_idx = best_idx[best_idx >= 0]
-    unique_idx = np.sort(unique_idx)
-    return points[unique_idx], colors[unique_idx], conf[unique_idx]
 
 
 def estimate_preview_scale(points: np.ndarray) -> float:

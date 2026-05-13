@@ -316,7 +316,7 @@ def prepare_fine_inputs(db, task: Task, project: Project, work_dir: Path, starte
             flush=True,
         )
         if image_count < 8:
-            raise FineFailure("INSUFFICIENT_IMAGES", "LiteVGGT fine reconstruction requires an image project with at least 8 images")
+            raise FineFailure("INSUFFICIENT_IMAGES", "FastGS-Big fine reconstruction requires an image project with at least 8 images")
         pipeline = normalize_fine_pipeline(str(options.get("fine_pipeline") or PIPELINE_NAME))
         if pipeline != PIPELINE_NAME:
             raise FineFailure("UNSUPPORTED_FINE_PIPELINE", f"Image fine reconstruction only supports {PIPELINE_NAME}")
@@ -340,7 +340,7 @@ def prepare_fine_inputs(db, task: Task, project: Project, work_dir: Path, starte
             started,
             f"normalized {normalized.output_count} images to RGB JPEG, max side {normalized.max_side}px",
         )
-        return pipeline, normalized.output_dir, None, normalized.metrics(), "checking LiteVGGT + FastGS/Deblur runtime"
+        return pipeline, normalized.output_dir, None, normalized.metrics(), "checking official FastGS-Big runtime"
 
     if project.input_type == "video":
         raise FineFailure("UNSUPPORTED_FINE_INPUT", "Video fine reconstruction is disabled; use video preview instead")

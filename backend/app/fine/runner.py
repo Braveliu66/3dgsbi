@@ -8,28 +8,25 @@ from pathlib import Path
 from typing import Any
 
 from app.config import get_settings
-from app.fine.litevggt_scene import build_litevggt_scene
-from app.fine.local_3dgs.scene_quality import assess_sfm_scene_quality
-from app.fine.local_3dgs.sparse_compensation import compensate_sparse_point_cloud
 from app.fine.option_utils import read_float, read_int
+from app.fine.official_fastgs_big_trainer import train_official_fastgs_big
 from app.fine.preprocess import build_pycolmap_scene, prepare_mobile_images
 from app.fine.types import FineContext, FineFailure, FineResult
 from app.preview.io.spz import convert_ply_to_spz
-from app.preview.types import SOURCE_COMMITS
 from app.preview.types import PreviewFailure
 from app.preview.utils import image_files
 
 
-PIPELINE_NAME = "litevggt_fastgs_deblur_gsplat"
+PIPELINE_NAME = "official_fastgs_big"
 LEGACY_PIPELINE_NAME = "mobilegs_lmrs"
 VIDEO_PIPELINE_NAME = "video_artdeco_speed3r"
 
 SOURCE_COMMITS_FINE = {
-    "LiteVGGT": SOURCE_COMMITS["LiteVGGT"],
-    "Spark": SOURCE_COMMITS["Spark"],
     "FastGS": "44e02a5c1d5e9ed64d2ecd4af1cbba14ac92150f",
     "diff_gaussian_rasterization_fastgs": "44e02a5c1d5e9ed64d2ecd4af1cbba14ac92150f",
-    "Deblurring-3DGS": "e63366b8581c0fde2fda0ab1aea99518da2e2f10",
+    "simple-knn": "44e02a5c1d5e9ed64d2ecd4af1cbba14ac92150f",
+    "fused-ssim": "44e02a5c1d5e9ed64d2ecd4af1cbba14ac92150f",
+    "pycolmap": "3.12.6",
 }
 
 def run_fine_pipeline(ctx: FineContext) -> FineResult:
@@ -55,14 +52,15 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         flush=True,
     )
     if image_count < 8:
-        raise FineFailure("INSUFFICIENT_IMAGES", "LiteVGGT fine reconstruction requires at least 8 images")
+        raise FineFailure("INSUFFICIENT_IMAGES", "FastGS-Big fine reconstruction requires at least 8 images")
 
-    iterations = read_int(ctx.options.get("fine_iterations"), settings.fine_iterations, minimum=500, maximum=60_000)
-    explicit_lm_start_iter = ctx.options.get("fine_lm_start_iter")
+    iterations = read_int(ctx.options.get("fine_iterations"), settings.fine_iterations, minimum=5_000, maximum=60_000)
     reject_ratio = read_float(ctx.options.get("fine_blur_reject_ratio"), 0.0, minimum=0.0, maximum=0.45)
     colmap_features = read_int(ctx.options.get("fine_sift_max_num_features"), 8192, minimum=1024, maximum=32768)
     colmap_max_size = read_int(ctx.options.get("fine_colmap_max_image_size"), 1600, minimum=512, maximum=3200)
     colmap_threads = read_int(ctx.options.get("fine_colmap_threads"), 8, minimum=1, maximum=32)
+    colmap_matcher = str(ctx.options.get("fine_colmap_matcher") or "auto").strip().lower()
+    min_registered_ratio = _optional_float(ctx.options, "fine_min_registered_ratio", minimum=0.30, maximum=0.95)
 
     ctx_progress(ctx, "fine_blur_analysis", 20, "analyzing image sharpness and filtering lowest quality frames")
     print(
@@ -82,19 +80,26 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         flush=True,
     )
     blur_mode = str(ctx.options.get("fine_blur_mode") or blur.mode)
-    lm_default = iterations
-    lm_start_iter = read_int(explicit_lm_start_iter, lm_default, minimum=1, maximum=iterations)
     print(
         "[fine-runner] resolved training params "
-        f"iterations={iterations} lm_start_iter={lm_start_iter} blur_mode={blur_mode} "
+        f"iterations={iterations} blur_mode={blur_mode} "
         f"sfm_backend={ctx.options.get('fine_sfm_backend') or 'pycolmap'} colmap_features={colmap_features} "
-        f"colmap_max_size={colmap_max_size} colmap_threads={colmap_threads}",
+        f"colmap_max_size={colmap_max_size} colmap_threads={colmap_threads} colmap_matcher={colmap_matcher}",
         flush=True,
     )
 
     scene_dir = ctx.work_dir / "fine_scene"
-    output_dir = ctx.work_dir / "fine_mobilegs"
-    scene_result = build_scene(ctx, train_input_dir, scene_dir, colmap_features, colmap_max_size, colmap_threads)
+    output_dir = ctx.work_dir / "fine_fastgs_big"
+    scene_result = build_scene(
+        ctx,
+        train_input_dir,
+        scene_dir,
+        colmap_features,
+        colmap_max_size,
+        colmap_threads,
+        matcher=colmap_matcher,
+        min_registered_ratio=min_registered_ratio,
+    )
     print(
         "[fine-runner] scene build complete "
         f"backend={scene_result.backend} scene_dir={scene_result.scene_dir} "
@@ -102,35 +107,20 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         f"point_count={scene_result.point_count} metrics={_format_for_log(scene_result.metrics)}",
         flush=True,
     )
-    if scene_result.backend == "pycolmap":
-        scene_result.metrics.update(assess_sfm_scene_quality(scene_result.scene_dir, prefix="pycolmap").metrics)
-    if scene_result.backend == "litevggt":
-        scene_result.metrics.update(
-            {
-                "sparse_compensation_enabled": False,
-                "sparse_compensation_reason": "litevggt_initialization",
-            }
-        )
-    else:
-        scene_result.metrics.update(compensate_sparse_point_cloud(scene_result.scene_dir, ctx.options).metrics)
 
-    ctx_progress(ctx, "fine_gaussian_train_start", 42, f"training Gaussian model with {scene_result.backend} initialization")
-    from app.fine.mobilegs_trainer import train_mobile_3dgs
+    ctx_progress(ctx, "fine_gaussian_train_start", 42, f"training official FastGS-Big with {scene_result.backend} initialization")
     train_options = {**ctx.options, "_fine_scene_backend": scene_result.backend}
     print(
         "[fine-runner] gaussian training start "
         f"scene_dir={scene_result.scene_dir} output_dir={output_dir} iterations={iterations} "
-        f"lm_start_iter={lm_start_iter} blur_mode={blur_mode} train_options={_format_for_log(train_options)}",
+        f"blur_mode={blur_mode} train_options={_format_for_log(train_options)}",
         flush=True,
     )
 
-    train_result = train_mobile_3dgs(
+    train_result = train_official_fastgs_big(
         scene_dir=scene_result.scene_dir,
         output_dir=output_dir,
         iterations=iterations,
-        lm_start_iter=lm_start_iter,
-        blur_mode=blur_mode,
-        blur_registry=blur.per_frame_blur,
         options=train_options,
         progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
     )
@@ -172,13 +162,15 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
 
     metrics = {
         "pipeline": PIPELINE_NAME,
-        "algorithm": "litevggt_fastgs_deblur_gaussian_training",
+        "algorithm": "pycolmap_official_fastgs_big",
+        "requested_algorithms": ["pycolmap", "FastGS-Big"],
+        "effective_algorithms": ["pycolmap", "official_fastgs_big", "diff_gaussian_rasterization_fastgs"],
         "source_version": ctx.source_version,
         "source_commits": SOURCE_COMMITS_FINE,
+        "artifact_converter": "Spark SPZ",
         "input_images": image_count,
         "training_images": len(image_files(train_input_dir)),
         "iterations": iterations,
-        "lm_start_iter": lm_start_iter,
         "splat_count": splat_count,
         "final_ply_bytes": ctx.final_ply.stat().st_size,
         "final_spz_bytes": ctx.final_spz.stat().st_size,
@@ -214,60 +206,30 @@ def build_scene(
     colmap_features: int,
     colmap_max_size: int,
     colmap_threads: int,
+    matcher: str = "auto",
+    min_registered_ratio: float | None = None,
 ):
     sfm_backend = str(ctx.options.get("fine_sfm_backend") or "pycolmap").strip().lower()
     print(
         "[fine-runner] scene build start "
         f"requested_sfm_backend={sfm_backend} input_dir={input_dir} scene_dir={scene_dir} "
-        f"colmap_features={colmap_features} colmap_max_size={colmap_max_size} colmap_threads={colmap_threads}",
+        f"colmap_features={colmap_features} colmap_max_size={colmap_max_size} colmap_threads={colmap_threads} matcher={matcher}",
         flush=True,
     )
-    if sfm_backend not in {"litevggt", "pycolmap", "colmap"}:
+    if sfm_backend not in {"pycolmap", "colmap"}:
         raise FineFailure("UNSUPPORTED_FINE_SFM_BACKEND", f"Unsupported fine SfM backend: {sfm_backend}")
-    if sfm_backend == "litevggt":
-        return build_litevggt_scene(
-            input_dir,
-            scene_dir,
-            model_cache_dir=ctx.model_cache_dir,
-            options=ctx.options,
-            progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
-        )
 
-    try:
-        result = build_pycolmap_scene(
-            input_dir,
-            scene_dir,
-            max_num_features=colmap_features,
-            max_image_size=colmap_max_size,
-            min_model_size=max(3, min(10, len(image_files(input_dir)))),
-            num_threads=colmap_threads,
-            progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
-        )
-    except FineFailure as exc:
-        print(
-            "[fine-runner] pycolmap scene build failed "
-            f"code={exc.code} message={exc.message} allow_litevggt_fallback={read_bool(ctx.options.get('fine_allow_litevggt_fallback'), True)}",
-            flush=True,
-        )
-        if not read_bool(ctx.options.get("fine_allow_litevggt_fallback"), True):
-            raise
-        ctx_progress(
-            ctx,
-            "fine_sfm_fallback",
-            34,
-            f"pycolmap scene build failed ({exc.code}); falling back to LiteVGGT initialization",
-        )
-        result = build_litevggt_scene(
-            input_dir,
-            scene_dir,
-            model_cache_dir=ctx.model_cache_dir,
-            options=ctx.options,
-            progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
-        )
-        result.metrics["sfm_backend_requested"] = sfm_backend
-        result.metrics["sfm_fallback_reason"] = exc.code
-        result.metrics["sfm_fallback_message"] = exc.message
-        return result
+    result = build_pycolmap_scene(
+        input_dir,
+        scene_dir,
+        max_num_features=colmap_features,
+        max_image_size=colmap_max_size,
+        min_model_size=max(3, min(10, len(image_files(input_dir)))),
+        num_threads=colmap_threads,
+        matcher=matcher,
+        min_registered_ratio=min_registered_ratio,
+        progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
+    )
     if sfm_backend == "colmap":
         result.metrics["sfm_backend_requested_alias"] = "colmap_maps_to_pycolmap"
     return result
@@ -295,7 +257,7 @@ def normalize_fine_pipeline(value: str | None) -> str:
 
 
 def assert_runtime_ready() -> None:
-    print("[fine-runner] checking CUDA and fine reconstruction modules", flush=True)
+    print("[fine-runner] checking CUDA and official FastGS-Big modules", flush=True)
     try:
         import torch
     except Exception as exc:
@@ -310,7 +272,7 @@ def assert_runtime_ready() -> None:
         flush=True,
     )
     missing = []
-    for module_name in ("diff_gaussian_rasterization", "diff_gaussian_rasterization_fastgs", "simple_knn", "fused_ssim"):
+    for module_name in ("diff_gaussian_rasterization_fastgs", "simple_knn", "fused_ssim"):
         try:
             __import__(module_name)
             print(f"[fine-runner] module import ok module={module_name}", flush=True)
@@ -318,9 +280,6 @@ def assert_runtime_ready() -> None:
             missing.append(f"{module_name}: {exc}")
     if missing:
         raise FineFailure("FINE_RUNTIME_UNAVAILABLE", f"Fine reconstruction runtime dependency missing: {'; '.join(missing)}")
-    rasterizer = __import__("diff_gaussian_rasterization")
-    if not hasattr(rasterizer, "GaussianRasterizer"):
-        raise FineFailure("FINE_RUNTIME_UNAVAILABLE", "diff_gaussian_rasterization is missing GaussianRasterizer")
     fastgs_rasterizer = __import__("diff_gaussian_rasterization_fastgs")
     if not hasattr(fastgs_rasterizer, "GaussianRasterizer"):
         raise FineFailure("FINE_RUNTIME_UNAVAILABLE", "diff_gaussian_rasterization_fastgs is missing GaussianRasterizer")
@@ -344,6 +303,12 @@ def read_bool(value: Any, fallback: bool) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     return fallback
+
+
+def _optional_float(options: dict[str, Any], key: str, *, minimum: float, maximum: float) -> float | None:
+    if key not in options or options.get(key) in {None, ""}:
+        return None
+    return read_float(options.get(key), minimum, minimum=minimum, maximum=maximum)
 
 
 def build_lod_rad_if_available(ctx: FineContext) -> Path | None:

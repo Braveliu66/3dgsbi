@@ -7,12 +7,22 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-import cv2
-import numpy as np
-from PIL import Image, ImageOps
-
 from app.fine.types import FineFailure
 from app.preview.utils import image_files
+
+try:
+    from PIL import Image, ImageOps
+except Exception:  # pragma: no cover - depends on worker image
+    Image = None
+    ImageOps = None
+try:
+    import cv2
+except Exception:  # pragma: no cover - depends on worker image
+    cv2 = None
+try:
+    import numpy as np
+except Exception:  # pragma: no cover - depends on worker image
+    np = None
 
 
 Progress = Callable[[str, int, str], None]
@@ -88,6 +98,8 @@ def prepare_mobile_images(
     reject_ratio: float = 0.15,
     min_images: int = 3,
 ) -> tuple[Path, BlurAnalysis]:
+    if Image is None or ImageOps is None:
+        raise FineFailure("IMAGE_ANALYSIS_UNAVAILABLE", "Pillow is required for fine image normalization")
     scores = score_blur_images(input_dir)
     analysis = summarize_blur_scores(scores, reject_ratio=reject_ratio, min_images=min_images)
     reject_count = min(analysis.rejected_images, max(0, len(scores) - min_images))
@@ -130,6 +142,8 @@ def prepare_mobile_images(
 
 
 def score_blur_images(input_dir: Path) -> list[BlurScore]:
+    if Image is None or ImageOps is None or cv2 is None or np is None:
+        raise FineFailure("IMAGE_ANALYSIS_UNAVAILABLE", "Pillow, OpenCV, and NumPy are required for fine image blur analysis")
     files = image_files(input_dir)
     if not files:
         raise FineFailure("IMAGE_INPUT_NOT_FOUND", f"no supported image files found in {input_dir}")
@@ -147,9 +161,9 @@ def score_blur_images(input_dir: Path) -> list[BlurScore]:
 
 
 def summarize_blur_scores(scores: list[BlurScore], *, reject_ratio: float, min_images: int = 0) -> BlurAnalysis:
-    laps = np.array([item.laplacian for item in scores], dtype=np.float32)
-    gradients = np.array([item.gradient for item in scores], dtype=np.float32)
-    fft_ratios = np.array([item.fft_high_ratio for item in scores], dtype=np.float32)
+    laps = [item.laplacian for item in scores]
+    gradients = [item.gradient for item in scores]
+    fft_ratios = [item.fft_high_ratio for item in scores]
     rejected = int(math.floor(len(scores) * max(0.0, min(0.45, reject_ratio))))
     rejected = min(rejected, max(0, len(scores) - max(0, min_images)))
     keep_count = max(0, len(scores) - rejected)
@@ -157,11 +171,11 @@ def summarize_blur_scores(scores: list[BlurScore], *, reject_ratio: float, min_i
     kept_scores = ranked[:keep_count]
     rejected_scores = ranked[keep_count:]
 
-    mean_lap = float(laps.mean())
-    mean_gradient = float(gradients.mean())
-    mean_fft = float(fft_ratios.mean())
-    median_lap = float(np.median(laps))
-    median_fft = float(np.median(fft_ratios))
+    mean_lap = sum(laps) / len(laps)
+    mean_gradient = sum(gradients) / len(gradients)
+    mean_fft = sum(fft_ratios) / len(fft_ratios)
+    median_lap = _median(laps)
+    median_fft = _median(fft_ratios)
     classifications = classify_blur_scores(scores, median_laplacian=median_lap, median_fft_high_ratio=median_fft)
     kept_blur = [classifications[item.path] for item in kept_scores if classifications[item.path].blurred]
     rejected_blur = [classifications[item.path] for item in rejected_scores if classifications[item.path].blurred]
@@ -198,9 +212,9 @@ def classify_blur_scores(
     median_fft_high_ratio: float | None = None,
 ) -> dict[Path, BlurClassification]:
     if median_laplacian is None:
-        median_laplacian = float(np.median(np.array([item.laplacian for item in scores], dtype=np.float32)))
+        median_laplacian = _median([item.laplacian for item in scores])
     if median_fft_high_ratio is None:
-        median_fft_high_ratio = float(np.median(np.array([item.fft_high_ratio for item in scores], dtype=np.float32)))
+        median_fft_high_ratio = _median([item.fft_high_ratio for item in scores])
     return {
         item.path: classify_blur_score(
             item,
@@ -237,7 +251,17 @@ def blur_mode_from_classifications(classifications: list[BlurClassification]) ->
     return next(iter(kinds))
 
 
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2:
+        return float(ordered[midpoint])
+    return float((ordered[midpoint - 1] + ordered[midpoint]) / 2.0)
+
+
 def high_frequency_ratio(gray: np.ndarray) -> float:
+    if cv2 is None or np is None:
+        raise FineFailure("IMAGE_ANALYSIS_UNAVAILABLE", "OpenCV and NumPy are required for fine image blur analysis")
     small = cv2.resize(gray, (256, 256), interpolation=cv2.INTER_AREA) if max(gray.shape) > 256 else gray
     spectrum = np.fft.fftshift(np.fft.fft2(small.astype(np.float32)))
     magnitude = np.abs(spectrum)
@@ -259,6 +283,8 @@ def build_pycolmap_scene(
     max_image_size: int,
     min_model_size: int,
     num_threads: int,
+    matcher: str = "auto",
+    min_registered_ratio: float | None = None,
     progress: Progress,
 ) -> SceneBuildResult:
     try:
@@ -269,6 +295,11 @@ def build_pycolmap_scene(
     files = image_files(input_dir)
     if len(files) < 3:
         raise FineFailure("INSUFFICIENT_IMAGES", "COLMAP initialization requires at least 3 images")
+    matcher = matcher.strip().lower()
+    if matcher == "auto":
+        matcher = "exhaustive" if len(files) <= 250 else "sequential"
+    if matcher not in {"exhaustive", "sequential"}:
+        raise FineFailure("UNSUPPORTED_COLMAP_MATCHER", f"Unsupported COLMAP matcher: {matcher}")
 
     if scene_dir.exists():
         shutil.rmtree(scene_dir)
@@ -291,8 +322,11 @@ def build_pycolmap_scene(
             "num_threads": num_threads,
         },
     )
-    progress("fine_colmap_matching", 30, "matching COLMAP features")
-    pycolmap.match_exhaustive(database_path)
+    progress("fine_colmap_matching", 30, f"matching COLMAP features with {matcher} matcher")
+    if matcher == "exhaustive":
+        pycolmap.match_exhaustive(database_path)
+    else:
+        pycolmap.match_sequential(database_path)
 
     options = pycolmap.IncrementalPipelineOptions()
     options.min_num_matches = 15
@@ -322,8 +356,13 @@ def build_pycolmap_scene(
     normalize_colmap_cameras(reconstruction)
     reconstruction.write(recon_path)
     registered = len(reconstruction.images)
-    if registered < min_model_size:
-        raise FineFailure("COLMAP_RECONSTRUCTION_INCOMPLETE", f"COLMAP registered {registered}/{len(files)} images")
+    registered_ratio = registered / len(files)
+    threshold = _resolve_min_registered_ratio(len(files), min_registered_ratio)
+    if registered < min_model_size or registered_ratio < threshold:
+        raise FineFailure(
+            "COLMAP_RECONSTRUCTION_INCOMPLETE",
+            f"COLMAP registered {registered}/{len(files)} images ({registered_ratio:.1%}), below threshold {threshold:.1%}",
+        )
 
     point_count = len(reconstruction.points3D)
     elapsed = round(time.monotonic() - started, 3)
@@ -337,11 +376,24 @@ def build_pycolmap_scene(
             "sfm_backend": "pycolmap",
             "sfm_elapsed_seconds": elapsed,
             "sfm_registered_images": registered,
+            "sfm_registered_ratio": registered_ratio,
+            "sfm_min_registered_ratio": threshold,
             "sfm_sparse_points": point_count,
+            "colmap_matcher": matcher,
             "colmap_sift_max_num_features": max_num_features,
             "colmap_max_image_size": max_image_size,
         },
     )
+
+
+def _resolve_min_registered_ratio(image_count: int, override: float | None) -> float:
+    if override is not None:
+        return max(0.30, min(0.95, float(override)))
+    if image_count <= 250:
+        return 0.70
+    if image_count <= 1000:
+        return 0.65
+    return 0.60
 
 
 def select_best_colmap_model(sparse_dir: Path) -> Path | None:
@@ -352,7 +404,10 @@ def select_best_colmap_model(sparse_dir: Path) -> Path | None:
 
 
 def normalize_colmap_cameras(reconstruction) -> None:
-    import numpy as np
+    if np is None:
+        if getattr(reconstruction, "cameras", None):
+            raise FineFailure("IMAGE_ANALYSIS_UNAVAILABLE", "NumPy is required for COLMAP camera normalization")
+        return
 
     for camera in reconstruction.cameras.values():
         model = str(camera.model)

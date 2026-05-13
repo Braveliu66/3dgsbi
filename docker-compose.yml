@@ -90,7 +90,7 @@ services:
       MODEL_CACHE_DIR: /model-cache
       MODEL_AUTO_DOWNLOAD: "true"
       MODEL_DOWNLOAD_PREFER_HF_MIRROR: "true"
-      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      PYTORCH_CUDA_ALLOC_CONF: ${PREVIEW_PYTORCH_CUDA_ALLOC_CONF:-max_split_size_mb:512}
       TORCH_HOME: /model-cache/torch
       HF_HOME: /model-cache/huggingface
       HF_HUB_CACHE: /model-cache/huggingface/hub

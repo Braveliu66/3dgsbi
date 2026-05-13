@@ -61,19 +61,17 @@ ALGORITHMS: list[dict[str, Any]] = [
         "notes": "Spark-readable SPZ conversion/validation.",
     },
     {
-        "name": "Image Fine (LiteVGGT + FastGS/Deblur)",
-        "repo_url": "https://github.com/GarlicBa/LiteVGGT-repo",
-        "license": "MIT plus local fine reconstruction integrations",
-        "commit_hash_setting": "litevggt_repo_commit",
+        "name": "Image Fine (Official FastGS-Big)",
+        "repo_url": "https://github.com/fastgs/FastGS",
+        "license": "MIT plus upstream 3DGS-derived components; see vendored FastGS LICENSE",
+        "commit_hash_setting": "fastgs_repo_commit",
         "local_path": FINE_ROOT / "runner.py",
         "enabled": True,
-        "weight_paths": [
-            "litevggt/te_dict.pt",
-        ],
+        "weight_paths": [],
         "commands": {},
         "source_type": "system",
-        "license_notice": "Image fine reconstruction uses LiteVGGT as the geometry initializer and keeps Deblurring-3DGS GTnet ideas.",
-        "notes": "Default image fine reconstruction pipeline: JPG/PNG normalization, LiteVGGT camera/depth/point initialization, local Gaussian training with FastGS-style densify/prune, DeblurMLP refinement, and Spark SPZ conversion.",
+        "license_notice": "Image fine reconstruction uses vendored official FastGS-Big training code with pycolmap/COLMAP sparse initialization.",
+        "notes": "Default image fine reconstruction pipeline: JPG/PNG normalization, pycolmap/COLMAP sparse scene, vendored official FastGS-Big train.py, and Spark SPZ conversion.",
     },
     {
         "name": "Deblurring-3DGS GTnet",
@@ -93,13 +91,13 @@ ALGORITHMS: list[dict[str, Any]] = [
         "repo_url": "https://github.com/fastgs/FastGS",
         "license": "MIT plus upstream 3DGS-derived components; see upstream",
         "commit_hash_setting": "fastgs_repo_commit",
-        "local_path": None,
+        "local_path": FINE_ROOT / "vendor" / "fastgs",
         "enabled": False,
         "weight_paths": [],
         "commands": {},
-        "source_type": "optional_reference",
-        "license_notice": "Registered as the official FastGS reference; worker builds its diff_gaussian_rasterization_fastgs submodule for image fine FastGS metrics.",
-        "notes": "Official FastGS reference for metric-map accumulation and Compact Box rasterization in the image fine path.",
+        "source_type": "vendored",
+        "license_notice": "Official FastGS source is vendored locally for the image fine FastGS-Big training path.",
+        "notes": "Official FastGS-Big train.py and required runtime modules/submodules are bundled under backend/app/fine/vendor/fastgs.",
     },
 ]
 
@@ -183,7 +181,7 @@ def runtime_preflight(db: Session, settings: Settings | None = None) -> dict[str
                     weights_ready = False
             if not module_status.get("available", True):
                 issues.append(f"bundled module import failed: {module_status.get('error')}")
-            if item.name == "Image Fine (LiteVGGT + FastGS/Deblur)":
+            if item.name == "Image Fine (Official FastGS-Big)":
                 fine_runtime = fine_runtime_status()
                 extensions_ready = bool(fine_runtime["available"] or fine_workers["available"])
                 if not extensions_ready:
@@ -313,7 +311,7 @@ def bundled_module_status(name: str) -> dict[str, Any]:
     modules = {
         "LiteVGGT": "app.preview.vendor.litevggt_runtime",
         "LingBot-Map Video Preview": "app.preview.adapters.lingbot",
-        "Image Fine (LiteVGGT + FastGS/Deblur)": "app.fine.runner",
+        "Image Fine (Official FastGS-Big)": "app.fine.runner",
         "Deblurring-3DGS GTnet": "app.fine.deblur_mlp",
         "Spark SPZ": "app.preview.io.spz",
     }
@@ -339,10 +337,7 @@ def fine_runtime_status() -> dict[str, Any]:
     torch_status = torch_info()
     spark_status = spark_converter_status()
     modules = {
-        "transformer_engine": import_check("transformer_engine"),
-        "litevggt_runtime": litevggt_runtime_status(),
-        "deblur_mlp": import_check("app.fine.deblur_mlp"),
-        "diff_gaussian_rasterization": import_check("diff_gaussian_rasterization"),
+        "pycolmap": import_check("pycolmap"),
         "diff_gaussian_rasterization_fastgs": import_check("diff_gaussian_rasterization_fastgs"),
         "simple_knn": import_check("simple_knn"),
         "fused_ssim": import_check("fused_ssim"),
@@ -358,7 +353,7 @@ def fine_runtime_status() -> dict[str, Any]:
         "torch_cuda": torch_status,
         "spark_spz": spark_status,
         **modules,
-        "error": None if available else "CUDA torch/Spark SPZ/LiteVGGT/DeblurMLP/diff_gaussian_rasterization_fastgs/diff_gaussian_rasterization/simple_knn/fused_ssim check failed",
+        "error": None if available else "CUDA torch/Spark SPZ/pycolmap/diff_gaussian_rasterization_fastgs/simple_knn/fused_ssim check failed",
     }
 
 

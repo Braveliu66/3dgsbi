@@ -28,21 +28,21 @@ def run(ctx: PreviewContext) -> PreviewResult:
         "fps": read_int(ctx.options.get("preview_lingbot_fps"), 10, minimum=1, maximum=60),
         "max_frames": read_int(ctx.options.get("preview_lingbot_max_frames"), 0, minimum=0, maximum=100_000),
         "image_size": read_int(ctx.options.get("preview_lingbot_image_size"), 518, minimum=224, maximum=1024),
-        "mode": str(ctx.options.get("preview_lingbot_mode") or "auto"),
-        "keyframe_interval": read_optional_int(ctx.options.get("preview_lingbot_keyframe_interval")),
+        "mode": str(ctx.options.get("preview_lingbot_mode") or "windowed"),
+        "keyframe_interval": read_int(ctx.options.get("preview_lingbot_keyframe_interval"), 13, minimum=1, maximum=100_000),
         "camera_iterations": read_int(ctx.options.get("preview_lingbot_camera_iterations"), 4, minimum=1, maximum=8),
         "num_scale_frames": read_int(ctx.options.get("preview_lingbot_num_scale_frames"), 8, minimum=1, maximum=64),
-        "preprocess_mode": str(ctx.options.get("preview_lingbot_preprocess_mode") or "auto"),
+        "preprocess_mode": str(ctx.options.get("preview_lingbot_preprocess_mode") or "crop"),
         "window_size": read_int(ctx.options.get("preview_lingbot_window_size"), 128, minimum=8, maximum=512),
-        "overlap_keyframes": read_int(ctx.options.get("preview_lingbot_overlap_keyframes"), 16, minimum=1, maximum=128),
+        "overlap_keyframes": read_int(ctx.options.get("preview_lingbot_overlap_keyframes"), 8, minimum=1, maximum=128),
         "max_points": read_int(ctx.options.get("preview_lingbot_max_points"), 2_000_000, minimum=0, maximum=200_000_000),
         "frame_stride": read_int(ctx.options.get("preview_lingbot_frame_stride"), 1, minimum=1, maximum=10_000),
         "pixel_stride": read_int(ctx.options.get("preview_lingbot_pixel_stride"), 4, minimum=1, maximum=512),
-        "conf_percentile": read_float(ctx.options.get("preview_lingbot_conf_percentile"), 35.0, minimum=0.0, maximum=100.0),
-        "min_conf": read_float(ctx.options.get("preview_lingbot_min_conf"), 1e-5, minimum=-100.0, maximum=100.0),
+        "conf_percentile": read_float(ctx.options.get("preview_lingbot_conf_percentile"), 0.0, minimum=0.0, maximum=100.0),
+        "min_conf": read_float(ctx.options.get("preview_lingbot_min_conf"), 0.0, minimum=-100.0, maximum=100.0),
         "save_predictions": read_bool(ctx.options.get("preview_lingbot_save_predictions"), False),
-        "compile_model": read_bool(ctx.options.get("preview_lingbot_compile"), True),
-        "keyframes_only_points": read_bool(ctx.options.get("preview_lingbot_keyframes_only_points"), False),
+        "compile_model": read_bool(ctx.options.get("preview_lingbot_compile"), False),
+        "keyframes_only_points": read_bool(ctx.options.get("preview_lingbot_keyframes_only_points"), True),
         "allow_sdpa_fallback": read_bool(ctx.options.get("preview_lingbot_allow_sdpa_fallback"), False),
         "min_inference_fps": read_float(ctx.options.get("preview_lingbot_min_inference_fps"), 3.0, minimum=0.0, maximum=1000.0),
     }
@@ -92,7 +92,7 @@ def run(ctx: PreviewContext) -> PreviewResult:
         f"source={metrics.get('lingbot_point_source')} depth_fallback={metrics.get('lingbot_depth_reprojection_fallback')} "
         f"frames={metrics.get('lingbot_point_frame_count')}/{metrics.get('lingbot_point_source_frames')} "
         f"raw={metrics.get('point_count_raw')} conf_filtered={metrics.get('lingbot_points_filtered_by_confidence')} "
-        f"after_conf={metrics.get('lingbot_points_after_confidence_filter')} after_voxel={metrics.get('lingbot_points_after_voxel')} "
+        f"after_conf={metrics.get('lingbot_points_after_confidence_filter')} "
         f"exported={metrics.get('point_count_exported')} bbox_radius={metrics.get('bbox_radius')} "
         f"base_radius={base_point_radius} radius_scale={point_radius_scale} final_radius={point_radius}",
         flush=True,
@@ -104,7 +104,6 @@ def run(ctx: PreviewContext) -> PreviewResult:
             "LingBot points: "
             f"raw={metrics.get('point_count_raw')} "
             f"filtered={metrics.get('lingbot_points_filtered_by_confidence')} "
-            f"voxel={metrics.get('lingbot_points_removed_by_voxel')} "
             f"exported={metrics.get('point_count_exported')} "
             f"bbox_radius={metrics.get('bbox_radius')}"
         ),
@@ -181,14 +180,6 @@ def read_int(value, fallback: int, *, minimum: int, maximum: int) -> int:
     except (TypeError, ValueError):
         parsed = fallback
     return max(minimum, min(maximum, parsed))
-
-
-def read_optional_int(value) -> int | None:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed > 0 else None
 
 
 def read_float(value, fallback: float, *, minimum: float, maximum: float) -> float:

@@ -241,7 +241,7 @@ class StorageResponseTests(unittest.TestCase):
 
             self.assertEqual(payload["type"], "fine")
             self.assertEqual(payload["status"], "queued")
-            self.assertEqual(payload["options"]["fine_pipeline"], "litevggt_fastgs_deblur_gsplat")
+            self.assertEqual(payload["options"]["fine_pipeline"], "official_fastgs_big")
             self.assertEqual(payload["options"]["source_version"], 3)
             self.assertEqual(payload["options"]["fine_iterations"], 1000)
             self.assertNotIn("fine_amb3r_memory_device", payload["options"])
