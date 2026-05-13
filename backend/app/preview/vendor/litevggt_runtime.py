@@ -24,6 +24,7 @@ Progress = Callable[[str, int, str], None]
 @dataclass(slots=True)
 class LiteVGGTReconstruction:
     files: list[Path]
+    frame_indices: np.ndarray
     images: np.ndarray
     valid_masks: np.ndarray
     w2c: np.ndarray
@@ -31,7 +32,24 @@ class LiteVGGTReconstruction:
     points: np.ndarray
     colors: np.ndarray
     confidence: np.ndarray
+    point_frame_indices: np.ndarray
     metrics: dict[str, int | float | str | bool]
+
+
+@dataclass(slots=True)
+class LiteVGGTBatchResult:
+    frame_indices: np.ndarray
+    images: np.ndarray
+    valid_masks: np.ndarray
+    w2c: np.ndarray
+    intrinsics: np.ndarray
+    points: np.ndarray
+    colors: np.ndarray
+    confidence: np.ndarray
+    point_frame_indices: np.ndarray
+    valid_pixel_count: int
+    point_count_before_filter: int
+    point_count_after_filter: int
 
 
 @dataclass(slots=True)
@@ -48,6 +66,8 @@ class LiteVGGTWindowResult:
     valid_pixel_count: int
     point_count_before_filter: int
     point_count_after_filter: int
+    frame_indices: np.ndarray | None = None
+    point_frame_indices: np.ndarray | None = None
 
 
 class LiteVGGTWindowFrameMismatch(RuntimeError):
@@ -201,6 +221,48 @@ def w2c_to_homogeneous(w2c: np.ndarray) -> np.ndarray:
 def transform_points_sim3(points: np.ndarray, scale: float, rotation: np.ndarray, translation: np.ndarray) -> np.ndarray:
     pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
     return (float(scale) * (pts @ rotation.T) + translation).astype(np.float32, copy=False)
+
+
+def compute_sim3_alignment_metrics(
+    source: np.ndarray,
+    target: np.ndarray,
+    scale: float,
+    rotation: np.ndarray,
+    translation: np.ndarray,
+) -> dict[str, float]:
+    src = np.asarray(source, dtype=np.float32).reshape(-1, 3)
+    dst = np.asarray(target, dtype=np.float32).reshape(-1, 3)
+    aligned = float(scale) * (src @ np.asarray(rotation, dtype=np.float32).reshape(3, 3).T) + np.asarray(translation, dtype=np.float32).reshape(3)
+    residual = np.linalg.norm(aligned - dst, axis=1)
+    target_extent = float(np.linalg.norm(np.max(dst, axis=0) - np.min(dst, axis=0))) if dst.size else 0.0
+    denom = max(target_extent, 1e-6)
+    return {
+        "median": float(np.median(residual)) if residual.size else float("inf"),
+        "p90": float(np.percentile(residual, 90)) if residual.size else float("inf"),
+        "rel_median": float(np.median(residual) / denom) if residual.size else float("inf"),
+        "rel_p90": float(np.percentile(residual, 90) / denom) if residual.size else float("inf"),
+        "target_extent": target_extent,
+    }
+
+
+def validate_sim3_alignment(
+    *,
+    scale: float,
+    metrics: dict[str, float],
+    alignment_min_scale: float,
+    alignment_max_scale: float,
+    alignment_max_rel_median: float,
+    alignment_max_rel_p90: float,
+    code: str,
+    message: str,
+) -> None:
+    if scale < alignment_min_scale or scale > alignment_max_scale:
+        raise PreviewFailure(code, f"{message}: scale={scale:.4f}")
+    if metrics["rel_median"] > alignment_max_rel_median or metrics["rel_p90"] > alignment_max_rel_p90:
+        raise PreviewFailure(
+            code,
+            f"{message}: scale={scale:.4f}, rel_median={metrics['rel_median']:.4f}, rel_p90={metrics['rel_p90']:.4f}",
+        )
 
 
 def transform_w2c_sim3(w2c: np.ndarray, scale: float, rotation: np.ndarray, translation: np.ndarray) -> np.ndarray:
@@ -464,7 +526,7 @@ def select_points_per_frame(
     edge_keep_ratio: float,
     height: int,
     width: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     total = confidence.shape[0]
     pixels_per_frame = height * width
 
@@ -514,7 +576,7 @@ def select_points_per_frame(
 
     indices = np.concatenate(selected_indices, axis=0)
 
-    return points[indices], colors[indices], confidence[indices]
+    return points[indices], colors[indices], confidence[indices], indices.astype(np.int64, copy=False)
 
 
 def select_points_global(
@@ -524,7 +586,7 @@ def select_points_global(
     valid_pixels: np.ndarray,
     *,
     keep_ratio: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     finite = np.isfinite(points).all(axis=1) & np.isfinite(confidence)
     valid = finite & valid_pixels
 
@@ -534,6 +596,7 @@ def select_points_global(
             "LiteVGGT produced no valid points after global filtering",
         )
 
+    valid_indices = np.where(valid)[0]
     points = points[valid]
     colors = colors[valid]
     confidence = confidence[valid]
@@ -543,7 +606,9 @@ def select_points_global(
 
     keep_indices = np.argsort(confidence)[::-1][:keep]
 
-    return points[keep_indices], colors[keep_indices], confidence[keep_indices]
+    selected_indices = valid_indices[keep_indices]
+
+    return points[keep_indices], colors[keep_indices], confidence[keep_indices], selected_indices.astype(np.int64, copy=False)
 
 
 def trim_axis_quantile_outliers(
@@ -627,6 +692,23 @@ def reset_litevggt_aggregator_cache(model) -> None:
         aggregator.m_u = None
 
 
+def point_indices_to_frame_indices(
+    selected_pixel_indices: np.ndarray,
+    *,
+    frame_indices: list[int],
+    height: int,
+    width: int,
+) -> np.ndarray:
+    pixels_per_frame = int(height) * int(width)
+    if pixels_per_frame <= 0:
+        raise PreviewFailure("LITEVGGT_INVALID_IMAGE_SHAPE", "LiteVGGT point-frame mapping requires positive image dimensions")
+    local_frame_ids = np.asarray(selected_pixel_indices, dtype=np.int64) // pixels_per_frame
+    original = np.asarray(frame_indices, dtype=np.int32)
+    if np.any(local_frame_ids < 0) or np.any(local_frame_ids >= original.shape[0]):
+        raise PreviewFailure("LITEVGGT_POINT_FRAME_MAPPING_FAILED", "LiteVGGT selected point indices exceed batch frame count")
+    return original[local_frame_ids]
+
+
 def _select_litevggt_points(
     *,
     points: np.ndarray,
@@ -639,7 +721,7 @@ def _select_litevggt_points(
     height: int,
     width: int,
     selection_strategy: str,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if selection_strategy == "global":
         return select_points_global(
             points,
@@ -661,13 +743,12 @@ def _select_litevggt_points(
     )
 
 
-def _run_litevggt_window(
+def _run_litevggt_batch(
     *,
     model,
     image_tensors: list,
     valid_mask_tensors: list,
-    start: int,
-    end: int,
+    frame_indices: list[int],
     device: str,
     dtype,
     keep_ratio: float,
@@ -678,7 +759,7 @@ def _run_litevggt_window(
     Format,
     unproject_depth_map_to_point_map,
     pose_encoding_to_extri_intri,
-) -> LiteVGGTWindowResult:
+) -> LiteVGGTBatchResult:
     import torch
 
     reset_litevggt_aggregator_cache(model)
@@ -694,10 +775,13 @@ def _run_litevggt_window(
     points_3d = None
 
     try:
-        window_images = image_tensors[start:end]
-        window_masks = valid_mask_tensors[start:end]
-        image_batch = torch.stack(window_images, dim=0).to(device)
-        valid_mask_batch = torch.stack(window_masks, dim=0).to(device)
+        if len(image_tensors) != len(valid_mask_tensors) or len(image_tensors) != len(frame_indices):
+            raise LiteVGGTWindowFrameMismatch(
+                f"LiteVGGT batch expected aligned tensors and frame indices, got "
+                f"images={len(image_tensors)}, masks={len(valid_mask_tensors)}, frame_indices={len(frame_indices)}"
+            )
+        image_batch = torch.stack(image_tensors, dim=0).to(device)
+        valid_mask_batch = torch.stack(valid_mask_tensors, dim=0).to(device)
         patch_width = image_batch.shape[-1] // 14
         patch_height = image_batch.shape[-2] // 14
         model.update_patch_dimensions(patch_width, patch_height)
@@ -723,8 +807,8 @@ def _run_litevggt_window(
             intrinsic_array = intrinsic.squeeze(0).detach().float().cpu().numpy()
 
             _validate_litevggt_window_frame_counts(
-                start=start,
-                end=end,
+                start=0,
+                end=len(frame_indices),
                 fields={
                     "images": image_array,
                     "valid_masks": valid_mask_array,
@@ -742,7 +826,7 @@ def _run_litevggt_window(
 
             height = int(image_batch.shape[-2])
             width = int(image_batch.shape[-1])
-            selected_points, selected_colors, selected_confidence = _select_litevggt_points(
+            selected_points, selected_colors, selected_confidence, selected_indices = _select_litevggt_points(
                 points=points,
                 colors=colors,
                 confidence=confidence,
@@ -754,10 +838,15 @@ def _run_litevggt_window(
                 width=width,
                 selection_strategy=selection_strategy,
             )
+            point_frame_indices = point_indices_to_frame_indices(
+                selected_indices,
+                frame_indices=frame_indices,
+                height=height,
+                width=width,
+            )
 
-            return LiteVGGTWindowResult(
-                start=start,
-                end=end,
+            return LiteVGGTBatchResult(
+                frame_indices=np.asarray(frame_indices, dtype=np.int32),
                 images=image_array,
                 valid_masks=valid_mask_array,
                 w2c=w2c_array,
@@ -765,6 +854,7 @@ def _run_litevggt_window(
                 points=selected_points,
                 colors=selected_colors,
                 confidence=selected_confidence,
+                point_frame_indices=point_frame_indices,
                 valid_pixel_count=int(valid_pixels.sum()),
                 point_count_before_filter=int(points.shape[0]),
                 point_count_after_filter=int(selected_points.shape[0]),
@@ -786,9 +876,67 @@ def _run_litevggt_window(
             torch.cuda.empty_cache()
 
 
+def _run_litevggt_window(
+    *,
+    model,
+    image_tensors: list,
+    valid_mask_tensors: list,
+    start: int,
+    end: int,
+    frame_indices: list[int] | None = None,
+    device: str,
+    dtype,
+    keep_ratio: float,
+    edge_keep_ratio: float,
+    selection_strategy: str,
+    te,
+    DelayedScaling,
+    Format,
+    unproject_depth_map_to_point_map,
+    pose_encoding_to_extri_intri,
+) -> LiteVGGTWindowResult:
+    batch = _run_litevggt_batch(
+        model=model,
+        image_tensors=image_tensors[start:end],
+        valid_mask_tensors=valid_mask_tensors[start:end],
+        frame_indices=(frame_indices[start:end] if frame_indices is not None else list(range(start, end))),
+        device=device,
+        dtype=dtype,
+        keep_ratio=keep_ratio,
+        edge_keep_ratio=edge_keep_ratio,
+        selection_strategy=selection_strategy,
+        te=te,
+        DelayedScaling=DelayedScaling,
+        Format=Format,
+        unproject_depth_map_to_point_map=unproject_depth_map_to_point_map,
+        pose_encoding_to_extri_intri=pose_encoding_to_extri_intri,
+    )
+    return LiteVGGTWindowResult(
+        start=start,
+        end=end,
+        frame_indices=batch.frame_indices,
+        images=batch.images,
+        valid_masks=batch.valid_masks,
+        w2c=batch.w2c,
+        intrinsics=batch.intrinsics,
+        points=batch.points,
+        colors=batch.colors,
+        confidence=batch.confidence,
+        point_frame_indices=batch.point_frame_indices,
+        valid_pixel_count=batch.valid_pixel_count,
+        point_count_before_filter=batch.point_count_before_filter,
+        point_count_after_filter=batch.point_count_after_filter,
+    )
+
+
 def _merge_litevggt_windows(
     window_results: list[LiteVGGTWindowResult],
     frame_count: int,
+    *,
+    alignment_max_rel_median: float = 0.05,
+    alignment_max_rel_p90: float = 0.12,
+    alignment_min_scale: float = 0.25,
+    alignment_max_scale: float = 4.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if not window_results:
         raise PreviewFailure("LITEVGGT_EMPTY_WINDOWS", "LiteVGGT windowed inference produced no windows")
@@ -823,6 +971,23 @@ def _merge_litevggt_windows(
             scale, rotation, translation = estimate_sim3_umeyama(
                 np.asarray(source_centers, dtype=np.float32),
                 np.asarray(target_centers, dtype=np.float32),
+            )
+            metrics = compute_sim3_alignment_metrics(
+                source=np.asarray(source_centers, dtype=np.float32),
+                target=np.asarray(target_centers, dtype=np.float32),
+                scale=scale,
+                rotation=rotation,
+                translation=translation,
+            )
+            validate_sim3_alignment(
+                scale=scale,
+                metrics=metrics,
+                alignment_min_scale=alignment_min_scale,
+                alignment_max_scale=alignment_max_scale,
+                alignment_max_rel_median=alignment_max_rel_median,
+                alignment_max_rel_p90=alignment_max_rel_p90,
+                code="LITEVGGT_WINDOW_ALIGNMENT_UNSTABLE",
+                message=f"unstable window alignment: window={window_index}",
             )
 
         transformed_w2c = transform_w2c_sim3(local_w2c, scale, rotation, translation)
@@ -864,6 +1029,585 @@ def _merge_litevggt_windows(
     )
 
 
+def resolve_litevggt_effective_mode(
+    *,
+    inference_mode: str,
+    aligned_count: int,
+    single_frame_limit: int,
+    hierarchical_enable: bool,
+) -> str:
+    requested = str(inference_mode or "auto").strip().lower()
+    if requested in {"single", "global_keyframe", "hierarchical", "windowed"}:
+        return requested
+    if requested != "auto":
+        raise PreviewFailure("LITEVGGT_INFERENCE_MODE_INVALID", f"Unsupported LiteVGGT inference mode: {inference_mode}")
+    if int(aligned_count) <= int(single_frame_limit):
+        return "single"
+    if hierarchical_enable:
+        return "hierarchical"
+    return "global_keyframe"
+
+
+def select_global_keyframe_indices(
+    files: list[Path],
+    *,
+    multiple: int,
+    max_frames: int,
+    min_scene_change: float,
+) -> list[int]:
+    selected_files = select_scene_aware_frames(
+        files,
+        multiple=multiple,
+        max_frames=max_frames,
+        min_scene_change=min_scene_change,
+    )
+    file_to_index = {file: index for index, file in enumerate(files)}
+    return [file_to_index[file] for file in selected_files]
+
+
+def build_litevggt_chunks(
+    frame_count: int,
+    *,
+    chunk_size: int,
+    overlap: int,
+    exclude_indices: set[int] | None = None,
+) -> list[list[int]]:
+    frame_count = max(0, int(frame_count))
+    chunk_size = max(8, int(chunk_size))
+    overlap = max(0, min(int(overlap), chunk_size - 1))
+    excluded = exclude_indices or set()
+    if frame_count <= 0:
+        return []
+    step = max(1, chunk_size - overlap)
+    chunks: list[list[int]] = []
+    start = 0
+    while start < frame_count:
+        end = min(frame_count, start + chunk_size)
+        if end - start < chunk_size and frame_count >= chunk_size:
+            start = max(0, frame_count - chunk_size)
+            end = frame_count
+        indices = [index for index in range(start, end) if index not in excluded]
+        if indices and (not chunks or chunks[-1] != indices):
+            chunks.append(indices)
+        if end >= frame_count:
+            break
+        start += step
+    return chunks
+
+
+def nearest_anchor_indices(
+    chunk_indices: list[int],
+    global_indices: list[int],
+    *,
+    anchor_count: int,
+) -> list[int]:
+    if not chunk_indices or not global_indices:
+        return []
+    center = 0.5 * (chunk_indices[0] + chunk_indices[-1])
+    anchors = sorted(global_indices, key=lambda i: abs(i - center))[: max(0, int(anchor_count))]
+    return sorted(anchors)
+
+
+def surrounding_anchor_indices(
+    chunk_indices: list[int],
+    global_indices: list[int],
+    *,
+    anchor_count: int,
+) -> list[int]:
+    if not chunk_indices or not global_indices:
+        return []
+    anchor_count = max(0, int(anchor_count))
+    half = max(1, anchor_count // 2)
+    before = [i for i in global_indices if i <= chunk_indices[0]]
+    after = [i for i in global_indices if i >= chunk_indices[-1]]
+    selected = before[-half:] + after[:half]
+    if len(set(selected)) < anchor_count:
+        selected.extend(nearest_anchor_indices(chunk_indices, global_indices, anchor_count=anchor_count))
+    return sorted(set(selected))[:anchor_count]
+
+
+def align_indices_to_multiple_of_8(batch_indices: list[int], available_indices: list[int]) -> list[int]:
+    selected = sorted(set(int(index) for index in batch_indices))
+    available = sorted(set(int(index) for index in available_indices))
+    if len(selected) < 8:
+        for index in available:
+            if index not in selected:
+                selected.append(index)
+            if len(selected) >= 8:
+                break
+    remainder = len(selected) % 8
+    if remainder:
+        needed = 8 - remainder
+        center = 0.5 * (selected[0] + selected[-1]) if selected else 0.0
+        fill = [index for index in available if index not in selected]
+        fill.sort(key=lambda index: abs(index - center))
+        selected.extend(fill[:needed])
+    return sorted(selected[: (len(selected) // 8) * 8])
+
+
+def _subset_tensors_by_frame(
+    frame_indices: list[int],
+    *,
+    image_tensors_by_frame: dict[int, object],
+    valid_mask_tensors_by_frame: dict[int, object],
+) -> tuple[list, list]:
+    return (
+        [image_tensors_by_frame[int(index)] for index in frame_indices],
+        [valid_mask_tensors_by_frame[int(index)] for index in frame_indices],
+    )
+
+
+def _run_litevggt_single_mode(
+    *,
+    model,
+    frame_indices: list[int],
+    image_tensors_by_frame: dict[int, object],
+    valid_mask_tensors_by_frame: dict[int, object],
+    progress: Progress,
+    **batch_kwargs,
+) -> LiteVGGTBatchResult:
+    image_tensors, valid_mask_tensors = _subset_tensors_by_frame(
+        frame_indices,
+        image_tensors_by_frame=image_tensors_by_frame,
+        valid_mask_tensors_by_frame=valid_mask_tensors_by_frame,
+    )
+    progress("litevggt_inference", 40, f"running LiteVGGT single on {len(frame_indices)} aligned images")
+    return _run_litevggt_batch(
+        model=model,
+        image_tensors=image_tensors,
+        valid_mask_tensors=valid_mask_tensors,
+        frame_indices=frame_indices,
+        **batch_kwargs,
+    )
+
+
+def _run_litevggt_global_keyframe_mode(
+    *,
+    model,
+    files: list[Path],
+    frame_indices: list[int],
+    global_keyframe_count: int,
+    min_scene_change: float,
+    image_tensors_by_frame: dict[int, object],
+    valid_mask_tensors_by_frame: dict[int, object],
+    progress: Progress,
+    **batch_kwargs,
+) -> LiteVGGTBatchResult:
+    positions = select_global_keyframe_indices(
+        files,
+        multiple=8,
+        max_frames=global_keyframe_count,
+        min_scene_change=min_scene_change,
+    )
+    selected_indices = [frame_indices[position] for position in positions]
+    image_tensors, valid_mask_tensors = _subset_tensors_by_frame(
+        selected_indices,
+        image_tensors_by_frame=image_tensors_by_frame,
+        valid_mask_tensors_by_frame=valid_mask_tensors_by_frame,
+    )
+    progress(
+        "litevggt_inference",
+        40,
+        f"running LiteVGGT global_keyframe on {len(selected_indices)}/{len(frame_indices)} images",
+    )
+    return _run_litevggt_batch(
+        model=model,
+        image_tensors=image_tensors,
+        valid_mask_tensors=valid_mask_tensors,
+        frame_indices=selected_indices,
+        **batch_kwargs,
+    )
+
+
+def align_local_result_to_global(
+    local_result: LiteVGGTBatchResult,
+    *,
+    global_pose_by_frame: dict[int, np.ndarray],
+    anchor_indices: list[int],
+    alignment_min_scale: float,
+    alignment_max_scale: float,
+    alignment_max_rel_median: float,
+    alignment_max_rel_p90: float,
+) -> tuple[float, np.ndarray, np.ndarray, dict[str, float]]:
+    local_centers_all = camera_centers_from_w2c(local_result.w2c)
+    anchor_set = set(int(index) for index in anchor_indices)
+    source_centers = []
+    target_centers = []
+    for local_i, frame_idx in enumerate(local_result.frame_indices):
+        frame_idx = int(frame_idx)
+        if frame_idx not in anchor_set or frame_idx not in global_pose_by_frame:
+            continue
+        source_centers.append(local_centers_all[local_i])
+        target_centers.append(camera_centers_from_w2c(global_pose_by_frame[frame_idx][None])[0])
+    if len(source_centers) < 3:
+        raise PreviewFailure("LITEVGGT_HIERARCHICAL_ALIGNMENT_FAILED", "LiteVGGT hierarchical alignment requires at least 3 anchors")
+    source = np.asarray(source_centers, dtype=np.float32)
+    target = np.asarray(target_centers, dtype=np.float32)
+    scale, rotation, translation = estimate_sim3_umeyama(source, target)
+    metrics = compute_sim3_alignment_metrics(source, target, scale, rotation, translation)
+    validate_sim3_alignment(
+        scale=scale,
+        metrics=metrics,
+        alignment_min_scale=alignment_min_scale,
+        alignment_max_scale=alignment_max_scale,
+        alignment_max_rel_median=alignment_max_rel_median,
+        alignment_max_rel_p90=alignment_max_rel_p90,
+        code="LITEVGGT_HIERARCHICAL_ALIGNMENT_UNSTABLE",
+        message="unstable hierarchical chunk alignment",
+    )
+    return scale, rotation, translation, metrics
+
+
+def filter_local_non_anchor_points(
+    local_result: LiteVGGTBatchResult,
+    *,
+    anchor_indices: set[int],
+    chunk_indices: set[int],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    keep = np.asarray(
+        [int(frame_idx) in chunk_indices and int(frame_idx) not in anchor_indices for frame_idx in local_result.point_frame_indices],
+        dtype=bool,
+    )
+    return (
+        local_result.points[keep],
+        local_result.colors[keep],
+        local_result.confidence[keep],
+        local_result.point_frame_indices[keep],
+    )
+
+
+def _run_litevggt_hierarchical_mode(
+    *,
+    model,
+    files: list[Path],
+    frame_indices: list[int],
+    global_keyframe_count: int,
+    min_scene_change: float,
+    chunk_size: int,
+    chunk_overlap: int,
+    anchor_count: int,
+    alignment_min_scale: float,
+    alignment_max_scale: float,
+    alignment_max_rel_median: float,
+    alignment_max_rel_p90: float,
+    image_tensors_by_frame: dict[int, object],
+    valid_mask_tensors_by_frame: dict[int, object],
+    progress: Progress,
+    **batch_kwargs,
+) -> tuple[LiteVGGTBatchResult, dict[str, int | float]]:
+    global_result = _run_litevggt_global_keyframe_mode(
+        model=model,
+        files=files,
+        frame_indices=frame_indices,
+        global_keyframe_count=global_keyframe_count,
+        min_scene_change=min_scene_change,
+        image_tensors_by_frame=image_tensors_by_frame,
+        valid_mask_tensors_by_frame=valid_mask_tensors_by_frame,
+        progress=progress,
+        **batch_kwargs,
+    )
+    global_indices = [int(index) for index in global_result.frame_indices]
+    chunks_by_position = build_litevggt_chunks(len(frame_indices), chunk_size=chunk_size, overlap=chunk_overlap)
+    chunks = [[frame_indices[position] for position in chunk] for chunk in chunks_by_position]
+    progress(
+        "litevggt_inference",
+        42,
+        f"running LiteVGGT hierarchical: global={len(global_indices)}, chunks={len(chunks)}, chunk_size={chunk_size}, anchors={anchor_count}",
+    )
+    global_pose_by_frame = {int(frame_idx): global_result.w2c[local_i] for local_i, frame_idx in enumerate(global_result.frame_indices)}
+    all_points = [global_result.points]
+    all_colors = [global_result.colors]
+    all_confidence = [global_result.confidence]
+    all_point_frame_indices = [global_result.point_frame_indices]
+    accepted_chunk_count = 0
+    rejected_chunk_count = 0
+    rel_median_values: list[float] = []
+    rel_p90_values: list[float] = []
+    scale_values: list[float] = []
+    available_indices = list(frame_indices)
+    for chunk_index, chunk_indices in enumerate(chunks):
+        current_anchor_count = anchor_count
+        local_result = None
+        alignment = None
+        for attempt in range(2):
+            anchor_indices = surrounding_anchor_indices(chunk_indices, global_indices, anchor_count=current_anchor_count)
+            batch_indices = align_indices_to_multiple_of_8(anchor_indices + chunk_indices, available_indices)
+            image_tensors, valid_mask_tensors = _subset_tensors_by_frame(
+                batch_indices,
+                image_tensors_by_frame=image_tensors_by_frame,
+                valid_mask_tensors_by_frame=valid_mask_tensors_by_frame,
+            )
+            try:
+                local_result = _run_litevggt_batch(
+                    model=model,
+                    image_tensors=image_tensors,
+                    valid_mask_tensors=valid_mask_tensors,
+                    frame_indices=batch_indices,
+                    **batch_kwargs,
+                )
+                alignment = align_local_result_to_global(
+                    local_result,
+                    global_pose_by_frame=global_pose_by_frame,
+                    anchor_indices=anchor_indices,
+                    alignment_min_scale=alignment_min_scale,
+                    alignment_max_scale=alignment_max_scale,
+                    alignment_max_rel_median=alignment_max_rel_median,
+                    alignment_max_rel_p90=alignment_max_rel_p90,
+                )
+                break
+            except PreviewFailure as exc:
+                if attempt == 0:
+                    current_anchor_count *= 2
+                    continue
+                rejected_chunk_count += 1
+                progress("litevggt_inference", 43, f"chunk {chunk_index + 1}/{len(chunks)} rejected: {exc.message}")
+        if local_result is None or alignment is None:
+            continue
+        scale, rotation, translation, metrics = alignment
+        local_points, local_colors, local_confidence, local_point_frame_indices = filter_local_non_anchor_points(
+            local_result,
+            anchor_indices=set(anchor_indices) | set(global_indices),
+            chunk_indices=set(chunk_indices),
+        )
+        if local_points.size:
+            all_points.append(transform_points_sim3(local_points, scale, rotation, translation))
+            all_colors.append(local_colors)
+            all_confidence.append(local_confidence)
+            all_point_frame_indices.append(local_point_frame_indices)
+        accepted_chunk_count += 1
+        rel_median_values.append(float(metrics["rel_median"]))
+        rel_p90_values.append(float(metrics["rel_p90"]))
+        scale_values.append(float(scale))
+        progress(
+            "litevggt_inference",
+            43 + int((chunk_index + 1) / max(1, len(chunks)) * 12),
+            f"chunk {chunk_index + 1}/{len(chunks)} accepted: scale={scale:.4f}, rel_median={metrics['rel_median']:.4f}, rel_p90={metrics['rel_p90']:.4f}",
+        )
+    merged = LiteVGGTBatchResult(
+        frame_indices=global_result.frame_indices,
+        images=global_result.images,
+        valid_masks=global_result.valid_masks,
+        w2c=global_result.w2c,
+        intrinsics=global_result.intrinsics,
+        points=np.concatenate(all_points, axis=0),
+        colors=np.concatenate(all_colors, axis=0),
+        confidence=np.concatenate(all_confidence, axis=0),
+        point_frame_indices=np.concatenate(all_point_frame_indices, axis=0),
+        valid_pixel_count=global_result.valid_pixel_count,
+        point_count_before_filter=global_result.point_count_before_filter,
+        point_count_after_filter=int(sum(points.shape[0] for points in all_points)),
+    )
+    metrics: dict[str, int | float] = {
+        "chunk_count": int(len(chunks)),
+        "accepted_chunk_count": int(accepted_chunk_count),
+        "rejected_chunk_count": int(rejected_chunk_count),
+        "alignment_rel_median_max": float(max(rel_median_values) if rel_median_values else 0.0),
+        "alignment_rel_p90_max": float(max(rel_p90_values) if rel_p90_values else 0.0),
+        "alignment_scale_min": float(min(scale_values) if scale_values else 1.0),
+        "alignment_scale_max": float(max(scale_values) if scale_values else 1.0),
+    }
+    return merged, metrics
+
+
+def _run_litevggt_windowed_mode_with_quality_checks(
+    *,
+    model,
+    image_tensors: list,
+    valid_mask_tensors: list,
+    frame_indices: list[int],
+    aligned_count: int,
+    window_size: int,
+    window_overlap: int,
+    oom_window_sizes: list[int],
+    alignment_max_rel_median: float,
+    alignment_max_rel_p90: float,
+    alignment_min_scale: float,
+    alignment_max_scale: float,
+    progress: Progress,
+    **batch_kwargs,
+) -> tuple[LiteVGGTBatchResult, dict[str, int | float]]:
+    import torch
+
+    attempts = resolve_litevggt_window_attempts(window_size, oom_window_sizes)
+    last_oom: RuntimeError | None = None
+    oom_retry_count = 0
+    window_frame_retry_count = 0
+    for attempt_index, attempt_window_size in enumerate(attempts):
+        selected_attempt = min(int(attempt_window_size), aligned_count)
+        selected_overlap = effective_litevggt_overlap(selected_attempt, window_overlap)
+        windows = build_litevggt_windows(aligned_count, selected_attempt, selected_overlap)
+        progress(
+            "litevggt_inference",
+            40,
+            f"running LiteVGGT windowed on {aligned_count} aligned images "
+            f"(window_size={selected_attempt}, overlap={selected_overlap}, windows={len(windows)})",
+        )
+        try:
+            window_results = []
+            for window_index, (start, end) in enumerate(windows):
+                progress(
+                    "litevggt_inference",
+                    40 + int(window_index / max(1, len(windows)) * 14),
+                    f"running LiteVGGT window {window_index + 1}/{len(windows)}: frames {start + 1}-{end}",
+                )
+                window_results.append(
+                    _run_litevggt_window(
+                        model=model,
+                        image_tensors=image_tensors,
+                        valid_mask_tensors=valid_mask_tensors,
+                        start=start,
+                        end=end,
+                        frame_indices=frame_indices,
+                        **batch_kwargs,
+                    )
+                )
+            progress("litevggt_unproject", 58, "aligning LiteVGGT windows and merging point clouds")
+            image_array, valid_mask_array, w2c_array, intrinsic_array, points, colors, confidence = _merge_litevggt_windows(
+                window_results,
+                aligned_count,
+                alignment_max_rel_median=alignment_max_rel_median,
+                alignment_max_rel_p90=alignment_max_rel_p90,
+                alignment_min_scale=alignment_min_scale,
+                alignment_max_scale=alignment_max_scale,
+            )
+            point_frame_indices = np.concatenate(
+                [
+                    result.point_frame_indices
+                    if result.point_frame_indices is not None
+                    else np.full(result.points.shape[0], result.start, dtype=np.int32)
+                    for result in window_results
+                ],
+                axis=0,
+            )
+            result = LiteVGGTBatchResult(
+                frame_indices=np.asarray(frame_indices, dtype=np.int32),
+                images=image_array,
+                valid_masks=valid_mask_array,
+                w2c=w2c_array,
+                intrinsics=intrinsic_array,
+                points=points,
+                colors=colors,
+                confidence=confidence,
+                point_frame_indices=point_frame_indices,
+                valid_pixel_count=sum(result.valid_pixel_count for result in window_results),
+                point_count_before_filter=sum(result.point_count_before_filter for result in window_results),
+                point_count_after_filter=sum(result.point_count_after_filter for result in window_results),
+            )
+            return result, {
+                "litevggt_window_size_effective": int(selected_attempt),
+                "litevggt_window_overlap": int(selected_overlap),
+                "litevggt_window_count": int(len(windows)),
+                "litevggt_oom_retry_count": int(oom_retry_count),
+                "litevggt_window_frame_retry_count": int(window_frame_retry_count),
+            }
+        except LiteVGGTWindowFrameMismatch as exc:
+            if attempt_index < len(attempts) - 1:
+                window_frame_retry_count += 1
+                reset_litevggt_aggregator_cache(model)
+                torch.cuda.empty_cache()
+                progress("litevggt_inference", 40, f"{exc}; retrying with window_size={attempts[attempt_index + 1]}")
+                continue
+            raise PreviewFailure("LITEVGGT_WINDOW_FRAME_MISMATCH", str(exc)) from exc
+        except RuntimeError as exc:
+            if is_cuda_oom_error(exc) and attempt_index < len(attempts) - 1:
+                last_oom = exc
+                oom_retry_count += 1
+                reset_litevggt_aggregator_cache(model)
+                torch.cuda.empty_cache()
+                progress("litevggt_inference", 40, f"LiteVGGT CUDA OOM at window_size={selected_attempt}; retrying with window_size={attempts[attempt_index + 1]}")
+                continue
+            raise
+    if last_oom is not None:
+        raise last_oom
+    raise PreviewFailure("LITEVGGT_EMPTY_WINDOWS", "LiteVGGT windowed inference produced no merged result")
+
+
+def trim_axis_quantile_outliers_with_frames(
+    points: np.ndarray,
+    colors: np.ndarray,
+    confidence: np.ndarray,
+    point_frame_indices: np.ndarray,
+    *,
+    low_quantile: float,
+    high_quantile: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    finite = np.isfinite(points).all(axis=1) & np.isfinite(confidence)
+    points = points[finite]
+    colors = colors[finite]
+    confidence = confidence[finite]
+    point_frame_indices = point_frame_indices[finite]
+    if points.shape[0] <= 10:
+        return points, colors, confidence, point_frame_indices
+    mins = np.quantile(points, low_quantile, axis=0)
+    maxs = np.quantile(points, high_quantile, axis=0)
+    keep = np.all((points >= mins) & (points <= maxs), axis=1)
+    if not np.any(keep):
+        return points, colors, confidence, point_frame_indices
+    return points[keep], colors[keep], confidence[keep], point_frame_indices[keep]
+
+
+def trim_spatial_outliers_with_frames(
+    points: np.ndarray,
+    colors: np.ndarray,
+    confidence: np.ndarray,
+    point_frame_indices: np.ndarray,
+    *,
+    keep_quantile: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    keep_quantile = float(np.clip(keep_quantile, 0.5, 1.0))
+    finite = np.isfinite(points).all(axis=1) & np.isfinite(confidence)
+    points = points[finite]
+    colors = colors[finite]
+    confidence = confidence[finite]
+    point_frame_indices = point_frame_indices[finite]
+    if keep_quantile >= 1.0 or points.shape[0] <= 1:
+        return points, colors, confidence, point_frame_indices
+    center = np.median(points, axis=0)
+    distances = np.linalg.norm(points - center, axis=1)
+    cutoff = float(np.quantile(distances, keep_quantile))
+    keep = distances <= cutoff
+    if not np.any(keep):
+        return points, colors, confidence, point_frame_indices
+    return points[keep], colors[keep], confidence[keep], point_frame_indices[keep]
+
+
+def voxel_downsample_points_with_frames(
+    points: np.ndarray,
+    colors: np.ndarray,
+    confidence: np.ndarray,
+    point_frame_indices: np.ndarray,
+    *,
+    max_points: int,
+    voxel_size: float | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if max_points <= 0 or points.shape[0] <= max_points:
+        return points, colors, confidence, point_frame_indices
+    finite = np.isfinite(points).all(axis=1) & np.isfinite(confidence)
+    points = points[finite]
+    colors = colors[finite]
+    confidence = confidence[finite]
+    point_frame_indices = point_frame_indices[finite]
+    if points.shape[0] <= max_points:
+        return points, colors, confidence, point_frame_indices
+    if voxel_size is None:
+        lo = np.quantile(points, 0.01, axis=0)
+        hi = np.quantile(points, 0.99, axis=0)
+        scene_scale = float(np.linalg.norm(hi - lo))
+        voxel_size = max(scene_scale / 512.0, 1e-6)
+    keys = np.floor(points / voxel_size).astype(np.int64)
+    best_by_voxel: dict[tuple[int, int, int], int] = {}
+    for idx, key_arr in enumerate(keys):
+        key = (int(key_arr[0]), int(key_arr[1]), int(key_arr[2]))
+        previous = best_by_voxel.get(key)
+        if previous is None or confidence[idx] > confidence[previous]:
+            best_by_voxel[key] = idx
+    selected = np.fromiter(best_by_voxel.values(), dtype=np.int64)
+    if selected.size > max_points:
+        order = np.argsort(confidence[selected])[::-1]
+        selected = selected[order[:max_points]]
+    return points[selected], colors[selected], confidence[selected], point_frame_indices[selected]
+
+
 def run_litevggt_reconstruction(
     *,
     input_dir: Path,
@@ -881,7 +1625,17 @@ def run_litevggt_reconstruction(
     axis_trim_high_quantile: float,
     selection_strategy: str,
     progress: Progress,
-    inference_mode: str = "single",
+    inference_mode: str = "auto",
+    single_frame_limit: int = 192,
+    global_keyframe_count: int = 192,
+    hierarchical_enable: bool = False,
+    chunk_size: int = 64,
+    chunk_overlap: int = 16,
+    anchor_count: int = 8,
+    alignment_max_rel_median: float = 0.05,
+    alignment_max_rel_p90: float = 0.12,
+    alignment_min_scale: float = 0.25,
+    alignment_max_scale: float = 4.0,
     window_size: int = 48,
     window_overlap: int = 16,
     oom_window_sizes: list[int] | None = None,
@@ -903,10 +1657,11 @@ def run_litevggt_reconstruction(
         from vggt.utils.load_fn import load_image_file_crop
         from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 
-        files = image_files(input_dir)
-        if len(files) < 8:
+        original_files = image_files(input_dir)
+        if len(original_files) < 8:
             raise PreviewFailure("LITEVGGT_NOT_ENOUGH_IMAGES", "LiteVGGT preview requires at least 8 images")
-        original_frame_count = len(files)
+        original_frame_count = len(original_files)
+        files = original_files
 
         if frame_selection == "scene":
             files = select_scene_aware_frames(
@@ -945,6 +1700,8 @@ def run_litevggt_reconstruction(
             )
 
         aligned_count = len(files)
+        original_index_by_file = {file: index for index, file in enumerate(original_files)}
+        frame_indices = [original_index_by_file[file] for file in files]
 
         if aligned_count < 8:
             raise PreviewFailure(
@@ -983,154 +1740,190 @@ def run_litevggt_reconstruction(
             if index % 4 == 0:
                 progress("litevggt_preprocess", 28 + int(index / max(1, len(files)) * 8), f"preprocessed {index + 1}/{len(files)} images")
 
-        resolved_mode = "windowed" if str(inference_mode).strip().lower() == "windowed" else "single"
-        configured_overlap = int(window_overlap)
-        attempts = resolve_litevggt_window_attempts(window_size, oom_window_sizes or [32, 16, 8])
-        if resolved_mode == "single":
-            attempts = [aligned_count]
+        image_tensors_by_frame = {frame_index: image_tensors[position] for position, frame_index in enumerate(frame_indices)}
+        valid_mask_tensors_by_frame = {frame_index: valid_mask_tensors[position] for position, frame_index in enumerate(frame_indices)}
+        batch_kwargs = {
+            "device": device,
+            "dtype": dtype,
+            "keep_ratio": keep_ratio,
+            "edge_keep_ratio": edge_keep_ratio,
+            "selection_strategy": selection_strategy,
+            "te": te,
+            "DelayedScaling": DelayedScaling,
+            "Format": Format,
+            "unproject_depth_map_to_point_map": unproject_depth_map_to_point_map,
+            "pose_encoding_to_extri_intri": pose_encoding_to_extri_intri,
+        }
+        requested_mode = str(inference_mode or "auto").strip().lower()
+        resolved_mode = resolve_litevggt_effective_mode(
+            inference_mode=requested_mode,
+            aligned_count=aligned_count,
+            single_frame_limit=single_frame_limit,
+            hierarchical_enable=hierarchical_enable,
+        )
+        mode_metrics: dict[str, int | float] = {
+            "chunk_count": 0,
+            "accepted_chunk_count": 0,
+            "rejected_chunk_count": 0,
+            "alignment_rel_median_max": 0.0,
+            "alignment_rel_p90_max": 0.0,
+            "alignment_scale_min": 1.0,
+            "alignment_scale_max": 1.0,
+            "litevggt_window_size_effective": 0,
+            "litevggt_window_overlap": 0,
+            "litevggt_window_count": 0,
+            "litevggt_oom_retry_count": 0,
+            "litevggt_window_frame_retry_count": 0,
+        }
 
-        last_oom: RuntimeError | None = None
-        selected_attempt = attempts[-1]
-        selected_overlap = 0
-        selected_window_count = 1
-        oom_retry_count = 0
-        window_frame_retry_count = 0
-        window_results: list[LiteVGGTWindowResult] = []
-        merged_arrays: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None
-
-        for attempt_index, attempt_window_size in enumerate(attempts):
-            selected_attempt = min(int(attempt_window_size), aligned_count)
-            selected_overlap = effective_litevggt_overlap(selected_attempt, configured_overlap)
-            if resolved_mode == "single":
-                windows = [(0, aligned_count)]
-                selected_overlap = 0
-            else:
-                windows = build_litevggt_windows(aligned_count, selected_attempt, selected_overlap)
-
-            selected_window_count = len(windows)
-            progress(
-                "litevggt_inference",
-                40,
-                f"running LiteVGGT {resolved_mode} on {aligned_count} aligned images "
-                f"(window_size={selected_attempt}, overlap={selected_overlap}, windows={selected_window_count})",
-            )
-
+        if requested_mode == "auto" and resolved_mode == "single":
             try:
-                window_results = []
-                for window_index, (start, end) in enumerate(windows):
-                    progress(
-                        "litevggt_inference",
-                        40 + int(window_index / max(1, selected_window_count) * 14),
-                        f"running LiteVGGT window {window_index + 1}/{selected_window_count}: frames {start + 1}-{end}",
-                    )
-                    window_results.append(
-                        _run_litevggt_window(
-                            model=model,
-                            image_tensors=image_tensors,
-                            valid_mask_tensors=valid_mask_tensors,
-                            start=start,
-                            end=end,
-                            device=device,
-                            dtype=dtype,
-                            keep_ratio=keep_ratio,
-                            edge_keep_ratio=edge_keep_ratio,
-                            selection_strategy=selection_strategy,
-                            te=te,
-                            DelayedScaling=DelayedScaling,
-                            Format=Format,
-                            unproject_depth_map_to_point_map=unproject_depth_map_to_point_map,
-                            pose_encoding_to_extri_intri=pose_encoding_to_extri_intri,
-                        )
-                    )
-                progress("litevggt_unproject", 58, "aligning LiteVGGT windows and merging point clouds")
-                merged_arrays = _merge_litevggt_windows(
-                    window_results,
-                    aligned_count,
+                batch_result = _run_litevggt_single_mode(
+                    model=model,
+                    frame_indices=frame_indices,
+                    image_tensors_by_frame=image_tensors_by_frame,
+                    valid_mask_tensors_by_frame=valid_mask_tensors_by_frame,
+                    progress=progress,
+                    **batch_kwargs,
                 )
-                last_oom = None
-                break
-            except LiteVGGTWindowFrameMismatch as exc:
-                if resolved_mode == "windowed" and attempt_index < len(attempts) - 1:
-                    window_frame_retry_count += 1
-                    window_results = []
-                    reset_litevggt_aggregator_cache(model)
-                    torch.cuda.empty_cache()
-                    next_size = attempts[attempt_index + 1]
-                    progress(
-                        "litevggt_inference",
-                        40,
-                        f"{exc}; retrying with window_size={next_size}",
-                    )
-                    continue
-                raise PreviewFailure("LITEVGGT_WINDOW_FRAME_MISMATCH", str(exc)) from exc
             except RuntimeError as exc:
-                if resolved_mode == "windowed" and is_cuda_oom_error(exc) and attempt_index < len(attempts) - 1:
-                    last_oom = exc
-                    oom_retry_count += 1
-                    window_results = []
-                    reset_litevggt_aggregator_cache(model)
-                    torch.cuda.empty_cache()
-                    next_size = attempts[attempt_index + 1]
-                    progress(
-                        "litevggt_inference",
-                        40,
-                        f"LiteVGGT CUDA OOM at window_size={selected_attempt}; retrying with window_size={next_size}",
-                    )
-                    continue
-                raise
+                if not is_cuda_oom_error(exc):
+                    raise
+                torch.cuda.empty_cache()
+                progress("litevggt_oom_fallback", 42, "LiteVGGT single OOM, falling back to global keyframes")
+                resolved_mode = "global_keyframe"
+                batch_result = _run_litevggt_global_keyframe_mode(
+                    model=model,
+                    files=files,
+                    frame_indices=frame_indices,
+                    global_keyframe_count=global_keyframe_count,
+                    min_scene_change=min_scene_change,
+                    image_tensors_by_frame=image_tensors_by_frame,
+                    valid_mask_tensors_by_frame=valid_mask_tensors_by_frame,
+                    progress=progress,
+                    **batch_kwargs,
+                )
+        elif resolved_mode == "single":
+            batch_result = _run_litevggt_single_mode(
+                model=model,
+                frame_indices=frame_indices,
+                image_tensors_by_frame=image_tensors_by_frame,
+                valid_mask_tensors_by_frame=valid_mask_tensors_by_frame,
+                progress=progress,
+                **batch_kwargs,
+            )
+        elif resolved_mode == "global_keyframe":
+            batch_result = _run_litevggt_global_keyframe_mode(
+                model=model,
+                files=files,
+                frame_indices=frame_indices,
+                global_keyframe_count=global_keyframe_count,
+                min_scene_change=min_scene_change,
+                image_tensors_by_frame=image_tensors_by_frame,
+                valid_mask_tensors_by_frame=valid_mask_tensors_by_frame,
+                progress=progress,
+                **batch_kwargs,
+            )
+        elif resolved_mode == "hierarchical":
+            batch_result, hierarchical_metrics = _run_litevggt_hierarchical_mode(
+                model=model,
+                files=files,
+                frame_indices=frame_indices,
+                global_keyframe_count=global_keyframe_count,
+                min_scene_change=min_scene_change,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                anchor_count=anchor_count,
+                alignment_min_scale=alignment_min_scale,
+                alignment_max_scale=alignment_max_scale,
+                alignment_max_rel_median=alignment_max_rel_median,
+                alignment_max_rel_p90=alignment_max_rel_p90,
+                image_tensors_by_frame=image_tensors_by_frame,
+                valid_mask_tensors_by_frame=valid_mask_tensors_by_frame,
+                progress=progress,
+                **batch_kwargs,
+            )
+            mode_metrics.update(hierarchical_metrics)
+        elif resolved_mode == "windowed":
+            batch_result, window_metrics = _run_litevggt_windowed_mode_with_quality_checks(
+                model=model,
+                image_tensors=image_tensors,
+                valid_mask_tensors=valid_mask_tensors,
+                frame_indices=frame_indices,
+                aligned_count=aligned_count,
+                window_size=window_size,
+                window_overlap=window_overlap,
+                oom_window_sizes=oom_window_sizes or [32, 16, 8],
+                alignment_max_rel_median=alignment_max_rel_median,
+                alignment_max_rel_p90=alignment_max_rel_p90,
+                alignment_min_scale=alignment_min_scale,
+                alignment_max_scale=alignment_max_scale,
+                progress=progress,
+                **batch_kwargs,
+            )
+            mode_metrics.update(window_metrics)
+        else:
+            raise PreviewFailure("LITEVGGT_INFERENCE_MODE_INVALID", f"Unsupported LiteVGGT inference mode: {resolved_mode}")
 
-        if last_oom is not None:
-            raise last_oom
-
-        if merged_arrays is None:
-            raise PreviewFailure("LITEVGGT_EMPTY_WINDOWS", "LiteVGGT windowed inference produced no merged result")
-
-        image_array, valid_mask_array, w2c_array, intrinsic_array, selected_points, selected_colors, selected_confidence = merged_arrays
+        selected_points = batch_result.points
+        selected_colors = batch_result.colors
+        selected_confidence = batch_result.confidence
+        selected_point_frame_indices = batch_result.point_frame_indices
 
         if spatial_keep_quantile >= 1.0:
-            trimmed_points, trimmed_colors, trimmed_confidence = trim_axis_quantile_outliers(
+            trimmed_points, trimmed_colors, trimmed_confidence, trimmed_point_frame_indices = trim_axis_quantile_outliers_with_frames(
                 selected_points,
                 selected_colors,
                 selected_confidence,
+                selected_point_frame_indices,
                 low_quantile=axis_trim_low_quantile,
                 high_quantile=axis_trim_high_quantile,
             )
         else:
-            trimmed_points, trimmed_colors, trimmed_confidence = trim_spatial_outliers(
+            trimmed_points, trimmed_colors, trimmed_confidence, trimmed_point_frame_indices = trim_spatial_outliers_with_frames(
                 selected_points,
                 selected_colors,
                 selected_confidence,
+                selected_point_frame_indices,
                 keep_quantile=spatial_keep_quantile,
             )
 
         point_count_after_spatial_trim = int(trimmed_points.shape[0])
         point_count_before_downsample = int(trimmed_points.shape[0])
 
-        trimmed_points, trimmed_colors, trimmed_confidence = voxel_downsample_points(
+        trimmed_points, trimmed_colors, trimmed_confidence, trimmed_point_frame_indices = voxel_downsample_points_with_frames(
             trimmed_points,
             trimmed_colors,
             trimmed_confidence,
+            trimmed_point_frame_indices,
             max_points=max_points,
         )
 
         point_count_after_downsample = int(trimmed_points.shape[0])
-        valid_pixel_count = sum(result.valid_pixel_count for result in window_results)
-        point_count_before_filter = sum(result.point_count_before_filter for result in window_results)
-        point_count_after_filter = sum(result.point_count_after_filter for result in window_results)
+        valid_pixel_count = batch_result.valid_pixel_count
+        point_count_before_filter = batch_result.point_count_before_filter
+        point_count_after_filter = batch_result.point_count_after_filter
 
         peak_mb = int(torch.cuda.max_memory_allocated() / 1024 / 1024) if torch.cuda.is_available() else 0
+        used_frame_count = int(aligned_count if resolved_mode == "hierarchical" else batch_result.frame_indices.shape[0])
+        effective_global_keyframe_count = int(batch_result.frame_indices.shape[0] if resolved_mode in {"global_keyframe", "hierarchical"} else 0)
         return LiteVGGTReconstruction(
             files=files,
-            images=image_array,
-            valid_masks=valid_mask_array,
-            w2c=w2c_array,
-            intrinsics=intrinsic_array,
+            frame_indices=batch_result.frame_indices,
+            images=batch_result.images,
+            valid_masks=batch_result.valid_masks,
+            w2c=batch_result.w2c,
+            intrinsics=batch_result.intrinsics,
             points=trimmed_points,
             colors=trimmed_colors,
             confidence=trimmed_confidence,
+            point_frame_indices=trimmed_point_frame_indices,
             metrics={
                 "original_frame_count": int(original_frame_count),
-                "input_frame_count": aligned_count,
+                "input_frame_count": used_frame_count,
+                "aligned_frame_count": int(aligned_count),
+                "global_keyframe_count": effective_global_keyframe_count,
+                "skipped_frame_count": int(original_frame_count - used_frame_count),
                 "frame_selection": frame_selection,
                 "min_scene_change": float(min_scene_change),
                 "point_selection_strategy": selection_strategy,
@@ -1142,11 +1935,9 @@ def run_litevggt_reconstruction(
                 "preserve_full_image": bool(preserve_full_image),
                 "letterbox_size": int(letterbox_size),
                 "litevggt_inference_mode": resolved_mode,
-                "litevggt_window_size_effective": int(selected_attempt),
-                "litevggt_window_overlap": int(selected_overlap),
-                "litevggt_window_count": int(selected_window_count),
-                "litevggt_oom_retry_count": int(oom_retry_count),
-                "litevggt_window_frame_retry_count": int(window_frame_retry_count),
+                "litevggt_inference_mode_requested": requested_mode,
+                "litevggt_inference_mode_effective": resolved_mode,
+                **mode_metrics,
                 "valid_pixel_count": int(valid_pixel_count),
                 "point_count_before_filter": int(point_count_before_filter),
                 "point_count_after_filter": int(point_count_after_filter),
@@ -1173,11 +1964,21 @@ def run_litevggt_pointcloud(
     max_input_frames: int | None = None,
     frame_selection: str = "scene",
     min_scene_change: float = 0.045,
-    edge_keep_ratio: float = 0.15,
+    edge_keep_ratio: float = 0.0,
     axis_trim_low_quantile: float = 0.0005,
     axis_trim_high_quantile: float = 0.9995,
-    selection_strategy: str = "per_frame",
-    inference_mode: str = "single",
+    selection_strategy: str = "global",
+    inference_mode: str = "auto",
+    single_frame_limit: int = 192,
+    global_keyframe_count: int = 192,
+    hierarchical_enable: bool = False,
+    chunk_size: int = 64,
+    chunk_overlap: int = 16,
+    anchor_count: int = 8,
+    alignment_max_rel_median: float = 0.05,
+    alignment_max_rel_p90: float = 0.12,
+    alignment_min_scale: float = 0.25,
+    alignment_max_scale: float = 4.0,
     window_size: int = 48,
     window_overlap: int = 16,
     oom_window_sizes: list[int] | None = None,
@@ -1199,6 +2000,16 @@ def run_litevggt_pointcloud(
         axis_trim_high_quantile=axis_trim_high_quantile,
         selection_strategy=selection_strategy,
         inference_mode=inference_mode,
+        single_frame_limit=single_frame_limit,
+        global_keyframe_count=global_keyframe_count,
+        hierarchical_enable=hierarchical_enable,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        anchor_count=anchor_count,
+        alignment_max_rel_median=alignment_max_rel_median,
+        alignment_max_rel_p90=alignment_max_rel_p90,
+        alignment_min_scale=alignment_min_scale,
+        alignment_max_scale=alignment_max_scale,
         window_size=window_size,
         window_overlap=window_overlap,
         oom_window_sizes=oom_window_sizes,

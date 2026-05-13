@@ -727,6 +727,7 @@ def preview_artifact_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "lingbot_inference_frames",
         "lingbot_inference_mode",
         "lingbot_keyframe_interval",
+        "lingbot_preprocess_mode",
         "lingbot_camera_iterations",
         "lingbot_num_scale_frames",
         "lingbot_window_size",

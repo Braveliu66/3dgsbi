@@ -2,7 +2,7 @@
 
 import { Focus, Maximize2, RotateCcw, RotateCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { Box3, Object3D, PerspectiveCamera, Vector3, WebGLRenderer } from "three";
+import type { Box3, BufferGeometry, Object3D, PerspectiveCamera, Points, Vector3, WebGLRenderer } from "three";
 import type { OrbitControls as OrbitControlsType } from "three/examples/jsm/controls/OrbitControls.js";
 import { artifactUrl, fetchBytesWithProgress, formatBytes } from "@/lib/api";
 
@@ -86,15 +86,19 @@ export function SplatViewer({
   modelUrl,
   format = "spz",
   previewMetaUrl,
-  debugPointsUrl
+  debugPointsUrl,
+  defaultViewMode = "splats"
 }: {
   modelUrl?: string | null;
   format?: ModelFormat | null;
   previewMetaUrl?: string | null;
   debugPointsUrl?: string | null;
+  defaultViewMode?: "splats" | "points";
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewerApiRef = useRef<ViewerControlApi | null>(null);
+  const applyPointCloudControlsRef = useRef<(() => void) | null>(null);
+  const debugControlsRef = useRef({ pointSizeScale: 1, confidenceThreshold: 0, downsampleFactor: 10 });
   const [state, setState] = useState<ViewerState>("idle");
   const [viewerReady, setViewerReady] = useState(false);
   const [message, setMessage] = useState("真实 preview_spz 产物会加载在这里。");
@@ -102,7 +106,25 @@ export function SplatViewer({
   const [qualityIndex, setQualityIndex] = useState(1);
   const [splatCount, setSplatCount] = useState<number | null>(null);
   const [modelLoadProgress, setModelLoadProgress] = useState<ModelLoadProgress | null>(null);
-  const [viewMode, setViewMode] = useState<"splats" | "points">("splats");
+  const [viewMode, setViewMode] = useState<"splats" | "points">(defaultViewMode);
+  const [debugPointSizeScale, setDebugPointSizeScale] = useState(1);
+  const [debugConfidenceThreshold, setDebugConfidenceThreshold] = useState(0);
+  const [debugDownsampleFactor, setDebugDownsampleFactor] = useState(10);
+  const [pointStats, setPointStats] = useState<{ shown: number; total: number; hasConfidence: boolean } | null>(null);
+
+  debugControlsRef.current = {
+    pointSizeScale: debugPointSizeScale,
+    confidenceThreshold: debugConfidenceThreshold,
+    downsampleFactor: debugDownsampleFactor
+  };
+
+  useEffect(() => {
+    setViewMode(defaultViewMode);
+  }, [defaultViewMode, modelUrl, debugPointsUrl]);
+
+  useEffect(() => {
+    applyPointCloudControlsRef.current?.();
+  }, [debugPointSizeScale, debugConfidenceThreshold, debugDownsampleFactor]);
 
   useEffect(() => {
     const urls = modelUrl ? [modelUrl] : [];
@@ -124,12 +146,15 @@ export function SplatViewer({
     let resizeObserver: ResizeObserver | undefined;
     let cleanup: (() => void) | undefined;
     let controls: OrbitControlsType | undefined;
+    let rawPointGeometry: BufferGeometry | null = null;
     const modelFormat = format ?? "spz";
     const qualityRef = { current: qualityIndex };
     const fpsWindow = { startedAt: performance.now(), frames: 0, highStreak: 0, lowStreak: 0 };
     viewerApiRef.current = null;
+    applyPointCloudControlsRef.current = null;
     setViewerReady(false);
     setModelLoadProgress(null);
+    setPointStats(null);
 
     async function mountViewer() {
       try {
@@ -222,19 +247,39 @@ export function SplatViewer({
           applyQuality(renderer, sparkRenderer, splat, initialQuality, host);
           return splat;
         }) : [];
-        let pointCloud: import("three").Points | null = null;
+        let pointCloud: Points | null = null;
         if (debugMode && debugPointsUrl) {
           const { PLYLoader } = await import("three/examples/jsm/loaders/PLYLoader.js");
-          const geometry = await new PLYLoader().loadAsync(artifactUrl(debugPointsUrl));
-          geometry.computeBoundingBox();
-          pointCloud = new THREE.Points(
-            geometry,
-            new THREE.PointsMaterial({
-              size: 0.01,
-              vertexColors: Boolean(geometry.getAttribute("color")),
-              sizeAttenuation: true
-            })
-          );
+          const loader = new PLYLoader() as InstanceType<typeof PLYLoader> & {
+            setCustomPropertyNameMapping: (mapping: Record<string, string[]>) => void;
+          };
+          loader.setCustomPropertyNameMapping({ confidence: ["confidence"] });
+          rawPointGeometry = await loader.loadAsync(artifactUrl(debugPointsUrl));
+          rawPointGeometry.computeBoundingBox();
+          const radius = previewMeta?.radius ?? 1;
+          const basePointSize = Math.max(radius * 0.00025, 0.00002);
+          const pointMaterial = new THREE.PointsMaterial({
+            size: basePointSize,
+            vertexColors: Boolean(rawPointGeometry.getAttribute("color")),
+            sizeAttenuation: true
+          });
+          pointCloud = new THREE.Points(new THREE.BufferGeometry(), pointMaterial);
+          applyPointCloudControlsRef.current = () => {
+            if (!pointCloud || !rawPointGeometry || cancelled) return;
+            const controlsValue = debugControlsRef.current;
+            const nextGeometry = buildDebugPointGeometry(
+              THREE,
+              rawPointGeometry,
+              controlsValue.confidenceThreshold,
+              controlsValue.downsampleFactor
+            );
+            const oldGeometry = pointCloud.geometry;
+            pointCloud.geometry = nextGeometry.geometry;
+            oldGeometry.dispose();
+            pointMaterial.size = basePointSize * controlsValue.pointSizeScale;
+            setPointStats(nextGeometry.stats);
+          };
+          applyPointCloudControlsRef.current();
           splatGroup.add(pointCloud);
         }
 
@@ -253,6 +298,7 @@ export function SplatViewer({
           controls?.dispose();
           for (const splat of splats) splat.dispose?.();
           pointCloud?.geometry.dispose();
+          rawPointGeometry?.dispose();
           const pointMaterial = pointCloud?.material;
           if (Array.isArray(pointMaterial)) {
             pointMaterial.forEach((material) => material.dispose());
@@ -262,6 +308,7 @@ export function SplatViewer({
           sparkRenderer?.dispose?.();
           renderer.dispose();
           host.innerHTML = "";
+          applyPointCloudControlsRef.current = null;
         };
 
         await Promise.all(splats.map((splat) => splat.initialized ?? Promise.resolve(splat)));
@@ -379,7 +426,7 @@ export function SplatViewer({
         <span>{message}</span>
         <span className="viewer-stats">
           {state === "ready" ? `${Math.round(fps)} FPS / ${quality.label} / target ${TARGET_FPS}` : quality.label}
-          {splatCount ? ` / ${splatCount.toLocaleString()} splats` : ""}
+          {viewMode === "points" && pointStats ? ` / ${pointStats.shown.toLocaleString()} points` : splatCount ? ` / ${splatCount.toLocaleString()} splats` : ""}
         </span>
         <button className="icon-button" type="button" onClick={() => hostRef.current?.requestFullscreen?.()} aria-label="Fullscreen">
           <Maximize2 size={17} />
@@ -391,8 +438,81 @@ export function SplatViewer({
         ) : null}
         {modelLoadProgress ? <ViewerLoadProgress progress={modelLoadProgress} format={format ?? "spz"} /> : null}
       </div>
+      {debugPointsUrl && viewMode === "points" ? (
+        <div className="viewer-point-controls">
+          <label>
+            <span>Point size</span>
+            <input type="range" min="0.25" max="4" step="0.05" value={debugPointSizeScale} onChange={(event) => setDebugPointSizeScale(Number(event.target.value))} />
+            <strong>{debugPointSizeScale.toFixed(2)}x</strong>
+          </label>
+          <label>
+            <span>Confidence</span>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value={debugConfidenceThreshold}
+              disabled={pointStats?.hasConfidence === false}
+              onChange={(event) => setDebugConfidenceThreshold(Number(event.target.value))}
+            />
+            <strong>{debugConfidenceThreshold.toFixed(2)}</strong>
+          </label>
+          <label>
+            <span>Downsample</span>
+            <input type="range" min="1" max="30" step="1" value={debugDownsampleFactor} onChange={(event) => setDebugDownsampleFactor(Number(event.target.value))} />
+            <strong>{debugDownsampleFactor}x</strong>
+          </label>
+        </div>
+      ) : null}
     </section>
   );
+}
+
+function buildDebugPointGeometry(
+  THREE: typeof import("three"),
+  source: BufferGeometry,
+  confidenceThreshold: number,
+  downsampleFactor: number
+): { geometry: BufferGeometry; stats: { shown: number; total: number; hasConfidence: boolean } } {
+  const position = source.getAttribute("position");
+  const color = source.getAttribute("color");
+  const confidence = source.getAttribute("confidence");
+  const total = position?.count ?? 0;
+  if (!position) {
+    return { geometry: new THREE.BufferGeometry(), stats: { shown: 0, total: 0, hasConfidence: false } };
+  }
+  const step = Math.max(1, Math.round(downsampleFactor));
+  const hasConfidence = Boolean(confidence && confidence.count === total);
+  const maxOutput = Math.ceil(total / step);
+  const positions = new Float32Array(maxOutput * 3);
+  const colors = color ? new Float32Array(maxOutput * 3) : null;
+  const confidences = hasConfidence ? new Float32Array(maxOutput) : null;
+  let written = 0;
+
+  for (let index = 0; index < total; index += step) {
+    const conf = hasConfidence && confidence ? confidence.getX(index) : 1;
+    if (hasConfidence && conf < confidenceThreshold) continue;
+    const output = written * 3;
+    positions[output] = position.getX(index);
+    positions[output + 1] = position.getY(index);
+    positions[output + 2] = position.getZ(index);
+    if (colors && color) {
+      colors[output] = color.getX(index);
+      colors[output + 1] = color.getY(index);
+      colors[output + 2] = color.getZ(index);
+    }
+    if (confidences) confidences[written] = conf;
+    written += 1;
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions.slice(0, written * 3), 3));
+  if (colors) geometry.setAttribute("color", new THREE.BufferAttribute(colors.slice(0, written * 3), 3));
+  if (confidences) geometry.setAttribute("confidence", new THREE.BufferAttribute(confidences.slice(0, written), 1));
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+  return { geometry, stats: { shown: written, total, hasConfidence } };
 }
 
 function ViewerLoadProgress({ progress, format }: { progress: ModelLoadProgress; format: ModelFormat }) {

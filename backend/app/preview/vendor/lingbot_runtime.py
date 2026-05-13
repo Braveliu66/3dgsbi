@@ -3,6 +3,8 @@ from __future__ import annotations
 import gc
 import json
 import math
+import shutil
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,6 +66,7 @@ class LingBotInferenceProfile:
     window_size: int
     kv_cache_sliding_window: int
     overlap_keyframes: int
+    preprocess_mode: str
     oom_fallback: bool = False
 
 
@@ -114,6 +117,7 @@ def run_lingbot_video_preview(
     keyframe_interval: int | None,
     camera_iterations: int,
     num_scale_frames: int,
+    preprocess_mode: str,
     window_size: int,
     overlap_keyframes: int,
     max_points: int,
@@ -136,7 +140,8 @@ def run_lingbot_video_preview(
         "runtime start "
         f"video={video_path} model={model_path} fps={fps} max_frames={max_frames} image_size={image_size} "
         f"mode={mode} keyframe_interval={keyframe_interval} camera_iterations={camera_iterations} "
-        f"num_scale_frames={num_scale_frames} window_size={window_size} overlap_keyframes={overlap_keyframes} "
+        f"num_scale_frames={num_scale_frames} preprocess_mode={preprocess_mode} "
+        f"window_size={window_size} overlap_keyframes={overlap_keyframes} "
         f"frame_stride={frame_stride} pixel_stride={pixel_stride} conf_percentile={conf_percentile} "
         f"min_conf={min_conf} max_points={max_points} save_predictions={save_predictions} "
         f"compile={compile_model} keyframes_only_points={keyframes_only_points} "
@@ -180,6 +185,7 @@ def run_lingbot_video_preview(
         window_size=window_size,
         kv_cache_sliding_window=resolve_kv_cache_sliding_window(window_size),
         overlap_keyframes=overlap_keyframes,
+        preprocess_mode=preprocess_mode,
     )
 
     try:
@@ -340,61 +346,81 @@ def run_lingbot_video_preview(
 
 
 def extract_video_frames(video_path: Path, output_dir: Path, *, fps: int, max_frames: int) -> ExtractedLingBotFrames:
-    try:
-        import cv2
-    except Exception as exc:
-        raise PreviewFailure("VIDEO_RUNTIME_UNAVAILABLE", f"OpenCV video runtime is unavailable: {exc}") from exc
-
     if not video_path.exists() or video_path.stat().st_size <= 0:
         raise PreviewFailure("VIDEO_INPUT_MISSING", f"Missing non-empty input video: {video_path}")
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    capture = cv2.VideoCapture(str(video_path))
-    if not capture.isOpened():
-        raise PreviewFailure("VIDEO_DECODE_FAILED", f"Could not open video: {video_path}")
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise PreviewFailure("VIDEO_RUNTIME_UNAVAILABLE", "ffmpeg is required for phone-video autorotation")
 
-    source_fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0) or None
-    total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    interval = max(1, int(round((source_fps or fps) / max(1, fps))))
-    if total_frames > 0 and max_frames > 0:
-        interval = max(interval, math.ceil(total_frames / max_frames))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for stale in output_dir.glob("*.jpg"):
+        stale.unlink()
+    tmp_dir = output_dir.with_name(output_dir.name + "_ffmpeg_all")
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    pattern = tmp_dir / "%06d.jpg"
     _log(
         "video decode "
-        f"path={video_path} source_fps={source_fps} total_frames={total_frames} "
-        f"target_fps={fps} max_frames={max_frames} sample_interval={interval}"
+        f"path={video_path} decoder=ffmpeg target_fps={fps} max_frames={max_frames} autorotate=true"
     )
 
-    written = 0
-    frame_index = 0
-    width = 0
-    height = 0
     try:
-        while True:
-            ok, frame = capture.read()
-            if not ok or frame is None:
-                break
-            if frame_index % interval != 0:
-                frame_index += 1
-                continue
-            height, width = frame.shape[:2]
-            target = output_dir / f"{written:06d}.jpg"
-            if not cv2.imwrite(str(target), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90]):
-                raise PreviewFailure("VIDEO_FRAME_WRITE_FAILED", f"Could not write extracted frame: {target}")
-            written += 1
-            frame_index += 1
-            if max_frames > 0 and written >= max_frames:
-                break
-    finally:
-        capture.release()
+        subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(video_path),
+                "-vf",
+                f"fps={fps}",
+                "-q:v",
+                "2",
+                str(pattern),
+            ],
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise PreviewFailure("VIDEO_DECODE_FAILED", f"ffmpeg could not decode video: {exc}") from exc
 
-    if written < 2:
+    all_frames = sorted(tmp_dir.glob("*.jpg"))
+    if len(all_frames) < 2:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
         raise PreviewFailure("VIDEO_DECODE_FAILED", "Video did not yield enough readable frames")
+
+    if max_frames > 0 and len(all_frames) > max_frames:
+        keep_idx = np.linspace(0, len(all_frames) - 1, max_frames, dtype=np.int64)
+        selected = [all_frames[int(index)] for index in keep_idx]
+    else:
+        selected = all_frames
+    if len(selected) < 2:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise PreviewFailure("VIDEO_DECODE_FAILED", "Video did not yield enough selected frames")
+
+    for index, src in enumerate(selected):
+        shutil.move(str(src), str(output_dir / f"{index:06d}.jpg"))
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    try:
+        import cv2
+    except Exception as exc:
+        raise PreviewFailure("VIDEO_RUNTIME_UNAVAILABLE", f"OpenCV image runtime is unavailable: {exc}") from exc
+
+    first = cv2.imread(str(output_dir / "000000.jpg"))
+    if first is None:
+        raise PreviewFailure("VIDEO_DECODE_FAILED", "Could not read extracted frame")
+    height, width = first.shape[:2]
     _log(
         "video sampled "
-        f"written_frames={written} decoded_frames={frame_index} size={width}x{height} "
-        f"source_fps={source_fps} target_fps={fps} sample_interval={interval}"
+        f"written_frames={len(selected)} decoded_frames={len(all_frames)} size={width}x{height} "
+        f"target_fps={fps} max_frames={max_frames} autorotate=true"
     )
-    return ExtractedLingBotFrames(output_dir, written, source_fps, fps, width, height)
+    return ExtractedLingBotFrames(output_dir, len(selected), None, fps, width, height)
 
 
 def flashinfer_available() -> bool:
@@ -413,15 +439,22 @@ def resolve_mode(value: str, frame_count: int) -> str:
     normalized = (value or "auto").strip().lower()
     if normalized in {"streaming", "windowed"}:
         return normalized
-    return "streaming" if frame_count <= 320 else "windowed"
+    return "windowed" if frame_count > 3000 else "streaming"
 
 
 def resolve_keyframe_interval(value: int | None, mode: str, frame_count: int) -> int:
     if value is not None and value > 0:
         return int(value)
-    if mode == "streaming" and frame_count > 320:
+    if frame_count > 320:
         return max(1, math.ceil(frame_count / 320))
     return 1
+
+
+def resolve_preprocess_mode(mode: str, width: int, height: int) -> str:
+    normalized = (mode or "auto").strip().lower()
+    if normalized in {"crop", "pad"}:
+        return normalized
+    return "pad" if height > width else "crop"
 
 
 def select_lingbot_frame_paths(frame_paths: list[Path], max_frames: int) -> list[Path]:
@@ -444,6 +477,7 @@ def make_lingbot_oom_fallback_profile(profile: LingBotInferenceProfile) -> LingB
         window_size=min(profile.window_size, OOM_FALLBACK_WINDOW_SIZE),
         kv_cache_sliding_window=min(profile.kv_cache_sliding_window, OOM_FALLBACK_KV_CACHE_SLIDING_WINDOW),
         overlap_keyframes=min(profile.overlap_keyframes, 4),
+        preprocess_mode=profile.preprocess_mode,
         oom_fallback=True,
     )
 
@@ -483,15 +517,29 @@ def run_lingbot_inference_profile(
     progress: Progress,
 ) -> tuple[dict[str, Any], Any, dict[str, Any]]:
     selected_frame_paths = select_lingbot_frame_paths(frame_paths, profile.max_frames)
+    if selected_frame_paths:
+        try:
+            import cv2
+
+            first_frame = cv2.imread(str(selected_frame_paths[0]))
+        except Exception as exc:
+            raise PreviewFailure("LINGBOT_PREPROCESS_FAILED", f"Could not inspect LingBot frame size: {exc}") from exc
+        if first_frame is None:
+            raise PreviewFailure("LINGBOT_PREPROCESS_FAILED", f"Could not read LingBot frame: {selected_frame_paths[0]}")
+        source_height, source_width = first_frame.shape[:2]
+    else:
+        source_width = 0
+        source_height = 0
+    resolved_preprocess_mode = resolve_preprocess_mode(profile.preprocess_mode, source_width, source_height)
     progress(
         "lingbot_preprocess",
         34,
-        f"preprocessing {len(selected_frame_paths)} frames at image size {profile.image_size}",
+        f"preprocessing {len(selected_frame_paths)} frames at image size {profile.image_size} using {resolved_preprocess_mode}",
     )
     try:
         images = load_and_preprocess_images(
             [str(path) for path in selected_frame_paths],
-            mode="crop",
+            mode=resolved_preprocess_mode,
             image_size=profile.image_size,
             patch_size=14,
         )
@@ -506,6 +554,7 @@ def run_lingbot_inference_profile(
         f"selected_frames={len(selected_frame_paths)} available_frames={len(frame_paths)} "
         f"requested_max_frames={profile.max_frames} requested_mode={profile.mode} "
         f"resolved_mode={resolved_mode} resolved_keyframe_interval={resolved_keyframe_interval} "
+        f"preprocess_mode={resolved_preprocess_mode} source_size={source_width}x{source_height} "
         f"image_size={profile.image_size} camera_iterations={profile.camera_iterations} "
         f"num_scale_frames={profile.num_scale_frames} window_size={profile.window_size} "
         f"overlap_keyframes={profile.overlap_keyframes} kv_cache_sliding_window={profile.kv_cache_sliding_window} "
@@ -603,6 +652,7 @@ def run_lingbot_inference_profile(
         "lingbot_inference_frames": frame_count,
         "lingbot_inference_mode": resolved_mode,
         "lingbot_keyframe_interval": int(resolved_keyframe_interval),
+        "lingbot_preprocess_mode": resolved_preprocess_mode,
         "lingbot_camera_iterations": int(profile.camera_iterations),
         "lingbot_num_scale_frames": int(profile.num_scale_frames),
         "lingbot_window_size": int(profile.window_size) if resolved_mode == "windowed" else None,

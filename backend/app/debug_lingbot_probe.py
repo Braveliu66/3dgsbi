@@ -22,6 +22,7 @@ from app.preview.vendor.lingbot_runtime import (
     resolve_keyframe_interval,
     resolve_kv_cache_sliding_window,
     resolve_mode,
+    resolve_preprocess_mode,
 )
 
 
@@ -64,10 +65,11 @@ def main() -> None:
     frame_paths = sorted(frame_dir.glob("*.jpg"))
     print(f"Extracted {len(frame_paths)} frames, source_fps={frames.source_fps}", flush=True)
 
-    print(f"Preprocessing frames at image_size={args.image_size}", flush=True)
+    preprocess_mode = resolve_preprocess_mode(args.preprocess_mode, frames.width, frames.height)
+    print(f"Preprocessing frames at image_size={args.image_size}, mode={preprocess_mode}", flush=True)
     images = load_and_preprocess_images(
         [str(path) for path in frame_paths],
-        mode=args.preprocess_mode,
+        mode=preprocess_mode,
         image_size=args.image_size,
         patch_size=14,
     )
@@ -283,7 +285,7 @@ def main() -> None:
         "input_width": frames.width,
         "input_height": frames.height,
         "image_size": args.image_size,
-        "preprocess_mode": args.preprocess_mode,
+        "preprocess_mode": preprocess_mode,
         "mode": mode,
         "keyframe_interval": keyframe_interval,
         "camera_iterations": args.camera_iterations,
@@ -322,7 +324,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=int, default=4)
     parser.add_argument("--max-frames", type=int, default=96)
     parser.add_argument("--image-size", type=int, default=518)
-    parser.add_argument("--preprocess-mode", choices=["crop", "pad"], default="crop")
+    parser.add_argument("--preprocess-mode", choices=["auto", "crop", "pad"], default="auto")
     parser.add_argument("--mode", choices=["auto", "streaming", "windowed"], default="windowed")
     parser.add_argument("--keyframe-interval", type=int, default=1)
     parser.add_argument("--camera-iterations", type=int, default=4)

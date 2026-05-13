@@ -23,7 +23,7 @@ def run(ctx: PreviewContext) -> PreviewResult:
 
     coverage_mode = str(ctx.options.get("litevggt_coverage_mode") or "complete")
     if coverage_mode == "complete":
-        keep_ratio = float(ctx.options.get("litevggt_keep_ratio") or 0.95)
+        keep_ratio = float(ctx.options.get("litevggt_keep_ratio") or 0.42)
         spatial_keep_quantile = float(ctx.options.get("litevggt_spatial_keep_quantile") or 1.0)
         preserve_full_image = _read_bool(ctx.options.get("litevggt_preserve_full_image"), True)
         frame_selection = str(ctx.options.get("litevggt_frame_selection") or "scene")
@@ -50,10 +50,21 @@ def run(ctx: PreviewContext) -> PreviewResult:
     max_input_frames = int(max_input_frames_value) if max_input_frames_value else None
 
     min_scene_change = float(ctx.options.get("litevggt_min_scene_change") or 0.045)
-    edge_keep_ratio = float(ctx.options.get("litevggt_edge_keep_ratio") or 0.15)
+    edge_keep_ratio = float(ctx.options.get("litevggt_edge_keep_ratio") or 0.0)
     axis_trim_low_quantile = float(ctx.options.get("litevggt_axis_trim_low_quantile") or 0.0005)
     axis_trim_high_quantile = float(ctx.options.get("litevggt_axis_trim_high_quantile") or 0.9995)
-    selection_strategy = str(ctx.options.get("litevggt_point_selection_strategy") or "per_frame")
+    selection_strategy = str(ctx.options.get("litevggt_point_selection_strategy") or "global")
+    inference_mode = str(ctx.options.get("litevggt_inference_mode") or "auto")
+    single_frame_limit = int(ctx.options.get("litevggt_single_frame_limit") or 192)
+    global_keyframe_count = int(ctx.options.get("litevggt_global_keyframe_count") or 192)
+    hierarchical_enable = _read_bool(ctx.options.get("litevggt_hierarchical_enable"), False)
+    chunk_size = int(ctx.options.get("litevggt_chunk_size") or 64)
+    chunk_overlap = int(ctx.options.get("litevggt_chunk_overlap") or 16)
+    anchor_count = int(ctx.options.get("litevggt_anchor_count") or 8)
+    alignment_max_rel_median = float(ctx.options.get("litevggt_alignment_max_rel_median") or 0.05)
+    alignment_max_rel_p90 = float(ctx.options.get("litevggt_alignment_max_rel_p90") or 0.12)
+    alignment_min_scale = float(ctx.options.get("litevggt_alignment_min_scale") or 0.25)
+    alignment_max_scale = float(ctx.options.get("litevggt_alignment_max_scale") or 4.0)
     params: dict[str, Any] = {
         "coverage_mode": coverage_mode,
         "keep_ratio": keep_ratio,
@@ -71,6 +82,17 @@ def run(ctx: PreviewContext) -> PreviewResult:
         "axis_trim_low_quantile": axis_trim_low_quantile,
         "axis_trim_high_quantile": axis_trim_high_quantile,
         "selection_strategy": selection_strategy,
+        "inference_mode": inference_mode,
+        "single_frame_limit": single_frame_limit,
+        "global_keyframe_count": global_keyframe_count,
+        "hierarchical_enable": hierarchical_enable,
+        "chunk_size": chunk_size,
+        "chunk_overlap": chunk_overlap,
+        "anchor_count": anchor_count,
+        "alignment_max_rel_median": alignment_max_rel_median,
+        "alignment_max_rel_p90": alignment_max_rel_p90,
+        "alignment_min_scale": alignment_min_scale,
+        "alignment_max_scale": alignment_max_scale,
     }
     print(
         "[litevggt-preview] adapter params "
@@ -110,7 +132,17 @@ def run(ctx: PreviewContext) -> PreviewResult:
         axis_trim_low_quantile=axis_trim_low_quantile,
         axis_trim_high_quantile=axis_trim_high_quantile,
         selection_strategy=selection_strategy,
-        inference_mode="windowed",
+        inference_mode=inference_mode,
+        single_frame_limit=single_frame_limit,
+        global_keyframe_count=global_keyframe_count,
+        hierarchical_enable=hierarchical_enable,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        anchor_count=anchor_count,
+        alignment_max_rel_median=alignment_max_rel_median,
+        alignment_max_rel_p90=alignment_max_rel_p90,
+        alignment_min_scale=alignment_min_scale,
+        alignment_max_scale=alignment_max_scale,
         window_size=window_size,
         window_overlap=window_overlap,
         oom_window_sizes=oom_window_sizes,

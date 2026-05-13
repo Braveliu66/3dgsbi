@@ -273,6 +273,7 @@ export default function ProjectDetailPage() {
               format={viewer?.format}
               previewMetaUrl={viewer?.status === "ready" ? viewer.preview_meta_url : null}
               debugPointsUrl={viewer?.status === "ready" ? viewer.debug_points_ply_url : null}
+              defaultViewMode={viewer?.status === "ready" && viewer.point_source ? "points" : "splats"}
             />
           </div>
         </div>

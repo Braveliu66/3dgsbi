@@ -337,7 +337,13 @@ export default function UploadPage() {
           <div className="panel-body scrollable" style={{ padding: 0 }}>
             {viewer?.stale ? <div className="notice-box preview-stale">{viewer.message}</div> : null}
             {viewer?.status === "ready" ? (
-              <SplatViewer modelUrl={viewer.model_url} format={viewer.format} previewMetaUrl={viewer.preview_meta_url} />
+              <SplatViewer
+                modelUrl={viewer.model_url}
+                format={viewer.format}
+                previewMetaUrl={viewer.preview_meta_url}
+                debugPointsUrl={viewer.debug_points_ply_url}
+                defaultViewMode={viewer.point_source ? "points" : "splats"}
+              />
             ) : (
               <div className="preview-stage">
                 <div className="preview-placeholder">

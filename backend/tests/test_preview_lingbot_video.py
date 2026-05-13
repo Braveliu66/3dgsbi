@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -61,9 +62,10 @@ class LingBotVideoPreviewTests(unittest.TestCase):
 
             def fake_runtime(**kwargs):
                 self.assertEqual(kwargs["fps"], 10)
-                self.assertEqual(kwargs["max_frames"], 320)
+                self.assertEqual(kwargs["max_frames"], 0)
                 self.assertEqual(kwargs["image_size"], 518)
                 self.assertEqual(kwargs["mode"], "auto")
+                self.assertEqual(kwargs["preprocess_mode"], "auto")
                 self.assertEqual(kwargs["camera_iterations"], 4)
                 self.assertIsNone(kwargs["keyframe_interval"])
                 self.assertEqual(kwargs["window_size"], 128)
@@ -167,6 +169,7 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             window_size=64,
             kv_cache_sliding_window=16,
             overlap_keyframes=8,
+            preprocess_mode="auto",
         )
 
         fallback = make_lingbot_oom_fallback_profile(profile)
@@ -181,11 +184,57 @@ class LingBotVideoPreviewTests(unittest.TestCase):
         self.assertEqual(fallback.overlap_keyframes, 4)
         self.assertTrue(fallback.oom_fallback)
 
-    def test_lingbot_auto_mode_prefers_windowed_after_320_frames(self) -> None:
-        from app.preview.vendor.lingbot_runtime import resolve_mode
+    def test_lingbot_auto_mode_uses_keyframes_before_very_long_windowed(self) -> None:
+        from app.preview.vendor.lingbot_runtime import resolve_keyframe_interval, resolve_mode
 
         self.assertEqual(resolve_mode("auto", 320), "streaming")
-        self.assertEqual(resolve_mode("auto", 321), "windowed")
+        self.assertEqual(resolve_mode("auto", 321), "streaming")
+        self.assertEqual(resolve_mode("auto", 3000), "streaming")
+        self.assertEqual(resolve_mode("auto", 3001), "windowed")
+        self.assertEqual(resolve_keyframe_interval(None, "streaming", 800), 3)
+        self.assertEqual(resolve_keyframe_interval(None, "windowed", 800), 3)
+
+    def test_lingbot_preprocess_auto_pads_portrait_and_crops_landscape(self) -> None:
+        from app.preview.vendor.lingbot_runtime import resolve_preprocess_mode
+
+        self.assertEqual(resolve_preprocess_mode("auto", 720, 1280), "pad")
+        self.assertEqual(resolve_preprocess_mode("auto", 1280, 720), "crop")
+        self.assertEqual(resolve_preprocess_mode("crop", 720, 1280), "crop")
+        self.assertEqual(resolve_preprocess_mode("pad", 1280, 720), "pad")
+
+    def test_lingbot_video_frame_extraction_uses_ffmpeg_autorotate(self) -> None:
+        from app.preview.vendor import lingbot_runtime
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "phone.mov"
+            video.write_bytes(b"video")
+            output_dir = root / "frames"
+
+            def fake_run(command, check):
+                self.assertIn("-vf", command)
+                self.assertIn("fps=10", command)
+                self.assertNotIn("-noautorotate", command)
+                pattern = Path(command[-1])
+                pattern.parent.mkdir(parents=True, exist_ok=True)
+                for index in range(5):
+                    (pattern.parent / f"{index + 1:06d}.jpg").write_bytes(b"jpg")
+                return SimpleNamespace(returncode=0)
+
+            fake_cv2 = SimpleNamespace(imread=lambda _: np.zeros((1280, 720, 3), dtype=np.uint8))
+
+            with patch.object(lingbot_runtime.shutil, "which", return_value="ffmpeg"), patch.object(
+                lingbot_runtime.subprocess,
+                "run",
+                side_effect=fake_run,
+            ), patch.dict(sys.modules, {"cv2": fake_cv2}):
+                frames = lingbot_runtime.extract_video_frames(video, output_dir, fps=10, max_frames=3)
+
+            self.assertEqual(frames.count, 3)
+            self.assertIsNone(frames.source_fps)
+            self.assertEqual(frames.sampled_fps, 10)
+            self.assertEqual((frames.width, frames.height), (720, 1280))
+            self.assertEqual([path.name for path in sorted(output_dir.glob("*.jpg"))], ["000000.jpg", "000001.jpg", "000002.jpg"])
 
     def test_lingbot_inference_fps_guard_is_non_blocking(self) -> None:
         from app.preview.vendor.lingbot_runtime import validate_lingbot_inference_fps

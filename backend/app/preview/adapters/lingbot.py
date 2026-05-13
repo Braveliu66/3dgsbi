@@ -26,12 +26,13 @@ def run(ctx: PreviewContext) -> PreviewResult:
 
     params = {
         "fps": read_int(ctx.options.get("preview_lingbot_fps"), 10, minimum=1, maximum=60),
-        "max_frames": read_int(ctx.options.get("preview_lingbot_max_frames"), 320, minimum=0, maximum=100_000),
+        "max_frames": read_int(ctx.options.get("preview_lingbot_max_frames"), 0, minimum=0, maximum=100_000),
         "image_size": read_int(ctx.options.get("preview_lingbot_image_size"), 518, minimum=224, maximum=1024),
         "mode": str(ctx.options.get("preview_lingbot_mode") or "auto"),
         "keyframe_interval": read_optional_int(ctx.options.get("preview_lingbot_keyframe_interval")),
         "camera_iterations": read_int(ctx.options.get("preview_lingbot_camera_iterations"), 4, minimum=1, maximum=8),
         "num_scale_frames": read_int(ctx.options.get("preview_lingbot_num_scale_frames"), 8, minimum=1, maximum=64),
+        "preprocess_mode": str(ctx.options.get("preview_lingbot_preprocess_mode") or "auto"),
         "window_size": read_int(ctx.options.get("preview_lingbot_window_size"), 128, minimum=8, maximum=512),
         "overlap_keyframes": read_int(ctx.options.get("preview_lingbot_overlap_keyframes"), 16, minimum=1, maximum=128),
         "max_points": read_int(ctx.options.get("preview_lingbot_max_points"), 2_000_000, minimum=0, maximum=200_000_000),
