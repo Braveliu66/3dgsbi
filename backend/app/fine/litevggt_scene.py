@@ -30,21 +30,21 @@ def build_litevggt_scene(
         raise FineFailure("LITEVGGT_WEIGHT_MISSING", f"LiteVGGT weight is missing: {weight}")
 
     params = {
-        "keep_ratio": float(options.get("fine_litevggt_keep_ratio") or 1.0),
-        "max_points": int(options.get("fine_litevggt_max_points") or 1_500_000),
-        "spatial_keep_quantile": float(options.get("fine_litevggt_spatial_keep_quantile") or 0.999),
+        "keep_ratio": float(options.get("fine_litevggt_keep_ratio") or 0.95),
+        "max_points": int(options.get("fine_litevggt_max_points") or 3_000_000),
+        "spatial_keep_quantile": float(options.get("fine_litevggt_spatial_keep_quantile") or 0.9975),
         "preserve_full_image": read_bool(options.get("fine_litevggt_preserve_full_image"), True),
         "letterbox_size": int(options.get("fine_litevggt_letterbox_size") or 518),
-        "max_input_frames": read_optional_int(options.get("fine_litevggt_max_input_frames")),
+        "max_input_frames": read_optional_int(options.get("fine_litevggt_max_input_frames"), 128),
         "frame_stride": read_optional_int(options.get("fine_litevggt_frame_stride")),
         "depth_conf_thresh": read_optional_float(options.get("fine_litevggt_depth_conf_thresh"), None),
         "preprocess_mode": str(options.get("fine_litevggt_preprocess_mode") or "pad"),
         "frame_selection": str(options.get("fine_litevggt_frame_selection") or "all"),
         "min_scene_change": float(options.get("fine_litevggt_min_scene_change") or 0.0),
         "edge_keep_ratio": float(options.get("fine_litevggt_edge_keep_ratio") or 0.15),
-        "axis_trim_low_quantile": float(options.get("fine_litevggt_axis_trim_low_quantile") or 0.0005),
-        "axis_trim_high_quantile": float(options.get("fine_litevggt_axis_trim_high_quantile") or 0.9995),
-        "selection_strategy": str(options.get("fine_litevggt_point_selection_strategy") or "per_frame"),
+        "axis_trim_low_quantile": float(options.get("fine_litevggt_axis_trim_low_quantile") or 0.001),
+        "axis_trim_high_quantile": float(options.get("fine_litevggt_axis_trim_high_quantile") or 0.999),
+        "selection_strategy": str(options.get("fine_litevggt_point_selection_strategy") or "scene_coverage"),
         "window_size": int(options.get("fine_litevggt_window_size") or 48),
         "window_overlap": int(options.get("fine_litevggt_window_overlap") or 16),
         "oom_window_sizes": read_int_list(options.get("fine_litevggt_oom_window_sizes"), [32, 16, 8]),
@@ -106,11 +106,13 @@ def build_litevggt_scene(
     write_cameras_txt(sparse_dir / "cameras.txt", reconstruction.intrinsics, reconstruction.images)
     write_images_txt(sparse_dir / "images.txt", reconstruction.w2c, image_names)
     write_points3d_ply(sparse_dir / "points3D.ply", reconstruction.points, reconstruction.colors)
+    write_points3d_txt(sparse_dir / "points3D.txt", reconstruction.points, reconstruction.colors)
     print(
         "[fine-litevggt-scene] COLMAP-compatible files written "
         f"images_dir={images_dir} image_count={len(image_names)} "
         f"cameras_txt={sparse_dir / 'cameras.txt'} images_txt={sparse_dir / 'images.txt'} "
-        f"points3d_ply={sparse_dir / 'points3D.ply'} points3d_bytes={(sparse_dir / 'points3D.ply').stat().st_size}",
+        f"points3d_ply={sparse_dir / 'points3D.ply'} points3d_txt={sparse_dir / 'points3D.txt'} "
+        f"points3d_bytes={(sparse_dir / 'points3D.ply').stat().st_size}",
         flush=True,
     )
 
@@ -180,7 +182,7 @@ def write_images_txt(path: Path, w2c: np.ndarray, image_names: list[str]) -> Non
     path.write_text("\n".join(lines) + "\n", encoding="ascii")
 
 
-def write_points3d_ply(path: Path, points: np.ndarray, colors: np.ndarray) -> None:
+def valid_points_and_colors(points: np.ndarray, colors: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     xyz = np.asarray(points, dtype=np.float32).reshape(-1, 3)
     rgb = np.clip(np.asarray(colors).reshape(-1, 3), 0, 255).astype(np.uint8)
     valid = np.isfinite(xyz).all(axis=1)
@@ -188,6 +190,11 @@ def write_points3d_ply(path: Path, points: np.ndarray, colors: np.ndarray) -> No
     rgb = rgb[valid]
     if xyz.shape[0] == 0:
         raise FineFailure("LITEVGGT_EMPTY_POINT_CLOUD", "LiteVGGT produced no valid points for fine initialization")
+    return xyz, rgb
+
+
+def write_points3d_ply(path: Path, points: np.ndarray, colors: np.ndarray) -> None:
+    xyz, rgb = valid_points_and_colors(points, colors)
 
     dtype = np.dtype(
         [
@@ -233,6 +240,21 @@ def write_points3d_ply(path: Path, points: np.ndarray, colors: np.ndarray) -> No
         handle.write(records.tobytes())
 
 
+def write_points3d_txt(path: Path, points: np.ndarray, colors: np.ndarray) -> None:
+    xyz, rgb = valid_points_and_colors(points, colors)
+    lines = [
+        "# 3D point list with one line of data per point:",
+        "# POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[] as (IMAGE_ID, POINT2D_IDX)",
+        f"# Number of points: {xyz.shape[0]}, mean track length: 0",
+    ]
+    for index, (point, color) in enumerate(zip(xyz, rgb), start=1):
+        lines.append(
+            f"{index} {point[0]:.8f} {point[1]:.8f} {point[2]:.8f} "
+            f"{int(color[0])} {int(color[1])} {int(color[2])} 0.0"
+        )
+    path.write_text("\n".join(lines) + "\n", encoding="ascii")
+
+
 def rotmat2qvec(rotation: np.ndarray) -> np.ndarray:
     rxx, ryx, rzx, rxy, ryy, rzy, rxz, ryz, rzz = rotation.flat
     matrix = np.array(
@@ -251,12 +273,12 @@ def rotmat2qvec(rotation: np.ndarray) -> np.ndarray:
     return qvec
 
 
-def read_optional_int(value: Any) -> int | None:
+def read_optional_int(value: Any, fallback: int | None = None) -> int | None:
     if value is None:
-        return None
+        return fallback
     normalized = str(value).strip().lower()
     if normalized in {"", "auto", "none"}:
-        return None
+        return fallback
     try:
         return int(value)
     except (TypeError, ValueError):

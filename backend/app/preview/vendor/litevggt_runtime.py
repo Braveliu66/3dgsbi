@@ -356,6 +356,41 @@ def prepare_litevggt_point_selection(
     return pts, rgb, conf, valid_indices, keep_count
 
 
+def litevggt_outlier_mask(
+    points: np.ndarray,
+    base_mask: np.ndarray,
+    *,
+    spatial_keep_quantile: float,
+    axis_trim_low_quantile: float,
+    axis_trim_high_quantile: float,
+) -> np.ndarray:
+    pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+    mask = np.asarray(base_mask, dtype=bool).reshape(-1).copy()
+    if mask.shape[0] != pts.shape[0]:
+        raise PreviewFailure("LITEVGGT_MASK_SHAPE_MISMATCH", "LiteVGGT outlier mask must match point count")
+    mask &= np.isfinite(pts).all(axis=1)
+    if not np.any(mask):
+        return mask
+
+    low = float(np.clip(axis_trim_low_quantile, 0.0, 0.49))
+    high = float(np.clip(axis_trim_high_quantile, low + 1e-6, 1.0))
+    if low > 0.0 or high < 1.0:
+        valid_pts = pts[mask]
+        lower = np.quantile(valid_pts, low, axis=0)
+        upper = np.quantile(valid_pts, high, axis=0)
+        mask &= np.all((pts >= lower) & (pts <= upper), axis=1)
+
+    spatial = float(np.clip(spatial_keep_quantile, 0.0, 1.0))
+    if 0.0 < spatial < 1.0 and np.any(mask):
+        valid_pts = pts[mask]
+        center = np.median(valid_pts, axis=0)
+        distances = np.linalg.norm(valid_pts - center, axis=1)
+        threshold = float(np.quantile(distances, spatial))
+        all_distances = np.linalg.norm(pts - center, axis=1)
+        mask &= all_distances <= threshold
+    return mask
+
+
 def reset_litevggt_aggregator_cache(model) -> None:
     aggregator = getattr(model, "aggregator", None)
     if aggregator is not None and hasattr(aggregator, "m_u"):
@@ -545,7 +580,13 @@ def run_litevggt_reconstruction(
             points = np.asarray(points_3d, dtype=np.float32).reshape(-1, 3)
             colors = np.clip(image_array.reshape(-1, 3) * 255.0, 0, 255).astype(np.uint8)
             confidence = depth_conf.reshape(-1).detach().float().cpu().numpy()
-            valid_point_mask = valid_masks.reshape(-1)
+            valid_point_mask = litevggt_outlier_mask(
+                points,
+                valid_masks.reshape(-1),
+                spatial_keep_quantile=spatial_keep_quantile,
+                axis_trim_low_quantile=axis_trim_low_quantile,
+                axis_trim_high_quantile=axis_trim_high_quantile,
+            )
 
             point_selection_strategy = str(selection_strategy or "scene_coverage").strip().lower()
             if point_selection_strategy in {"global", "global_confidence"}:
@@ -607,6 +648,9 @@ def run_litevggt_reconstruction(
                     "keep_ratio": float(quality.keep_ratio),
                     "keep_ratio_source": quality.keep_ratio_source,
                     "depth_conf_thresh": None if depth_conf_thresh is None else float(depth_conf_thresh),
+                    "spatial_keep_quantile": float(spatial_keep_quantile),
+                    "axis_trim_low_quantile": float(axis_trim_low_quantile),
+                    "axis_trim_high_quantile": float(axis_trim_high_quantile),
                     "litevggt_preprocess_mode": loaded_images.preprocess_mode,
                     "max_points": int(max_points),
                     "litevggt_target_size": int(quality.target_size),

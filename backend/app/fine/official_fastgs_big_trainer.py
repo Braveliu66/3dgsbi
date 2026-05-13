@@ -117,7 +117,7 @@ def train_official_fastgs_big(
         for line_number, line in enumerate(process.stdout, start=1):
             log_file.write(line)
             tail.append(line.rstrip())
-            if line_number % 25 == 0 or _is_progress_line(line):
+            if _is_progress_line(line):
                 progress("fine_fastgs_training", 70, line.strip()[:220] or "FastGS-Big training")
         return_code = process.wait()
 

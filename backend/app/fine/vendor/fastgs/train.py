@@ -59,7 +59,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     total_time = 0.0
 
     ema_loss_for_log = 0.0
-    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
+    log_interval = 200
+    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress", miniters=log_interval)
+    progress_bar_last_iter = first_iter
     first_iter += 1
     bg = torch.rand((3), device="cuda") if opt.random_background else background
 
@@ -108,9 +110,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         with torch.no_grad():
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
-            if iteration % 10 == 0:
+            if iteration % log_interval == 0 or iteration == opt.iterations:
                 progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
-                progress_bar.update(10)
+                progress_bar.update(iteration - progress_bar_last_iter)
+                progress_bar_last_iter = iteration
+                print(f"[ITER {iteration}] loss={ema_loss_for_log:.7f}")
             if iteration == opt.iterations:
                 progress_bar.close()
 

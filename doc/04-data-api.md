@@ -361,37 +361,19 @@ Fine `metrics.json` now includes:
 }
 ```
 
-## 9. 2026-05-10 EDGS/RoMA Fine API Update
 
-Image fine keeps `mobilegs_lmrs` as the default pipeline and adds EDGS/RoMA dense initialization between `Scene(...)` creation and Gaussian `training_setup(...)`. The full EDGS repository is not part of the backend; only the local `backend/app/fine/edgs_runtime/` initialization runtime is used.
 
 Additional task options:
 
-- `fine_edgs_enabled=true|false`, default `true`. `false` keeps pycolmap sparse initialization and sparse point compensation.
-- `fine_edgs_matches_per_ref`, default `15000`.
-- `fine_edgs_nns_per_ref`, default `3`.
-- `fine_edgs_num_refs`, default all train cameras.
-- `fine_edgs_roma_model=outdoor|indoor`, default `outdoor`.
-- `fine_edgs_max_points`, default `500000`.
-- `fine_edgs_reprojection_error`, default `4.0`.
 - `fine_deblur_warmup_iters`, default `3000`.
 - `fine_deblur_xyz_lr_scale`, default `0.1`.
 
-When EDGS is enabled, the trainer sets `densify_until_iter=0` and records sparse point compensation as disabled by EDGS. DeblurMLP GTnet is attached to the optimizer but remains inactive until warmup completes.
 
 Additional fine metrics:
 
 ```json
 {
-  "edgs_enabled": true,
-  "edgs_matches_per_ref": 15000,
-  "edgs_nns_per_ref": 3,
-  "edgs_num_refs": 6,
-  "edgs_roma_model": "outdoor",
-  "edgs_initial_gaussians": 500000,
-  "densification_disabled_by_edgs": true,
   "sparse_compensation_enabled": false,
-  "sparse_compensation_reason": "disabled_by_edgs",
   "deblur_warmup_iters": 3000,
   "deblur_xyz_lr_scale": 0.1,
   "deblur_activated_after_warmup": true

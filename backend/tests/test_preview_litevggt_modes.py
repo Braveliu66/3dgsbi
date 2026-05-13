@@ -222,6 +222,55 @@ class LiteVGGTOfficialPathTests(unittest.TestCase):
 
 @unittest.skipIf(RUNTIME_IMPORT_ERROR is not None, f"LiteVGGT runtime dependencies unavailable: {RUNTIME_IMPORT_ERROR}")
 class LiteVGGTAdapterTests(unittest.TestCase):
+    def test_adapter_uses_speed_oriented_preview_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            work_dir = root / "work"
+            output_spz = root / "preview.spz"
+            model_cache = root / "model-cache"
+            input_dir.mkdir()
+            work_dir.mkdir()
+            weight = model_cache / "litevggt" / "te_dict.pt"
+            weight.parent.mkdir(parents=True)
+            weight.write_bytes(b"weight")
+            for index in range(8):
+                (input_dir / f"{index:03d}.jpg").write_bytes(b"image")
+
+            ctx = PreviewContext(
+                task_id="task",
+                project_id="project",
+                pipeline="litevggt_spz",
+                input_dir=input_dir,
+                work_dir=work_dir,
+                output_spz=output_spz,
+                model_cache_dir=model_cache,
+                source_version=1,
+                options={},
+                progress=lambda stage, value, message, metrics: None,
+            )
+
+            ply_path = work_dir / "litevggt" / "recon.ply"
+            ply_path.parent.mkdir(parents=True)
+            ply_path.write_bytes(b"ply")
+            output_spz.write_bytes(b"spz")
+
+            with (
+                patch.object(litevggt_adapter, "run_litevggt_pointcloud", return_value={"point_count": 9}) as run,
+                patch.object(litevggt_adapter, "convert_ply_to_spz", return_value=9),
+            ):
+                litevggt_adapter.run(ctx)
+
+        self.assertEqual(run.call_args.kwargs["keep_ratio"], 0.40)
+        self.assertEqual(run.call_args.kwargs["target_size"], 336)
+        self.assertEqual(run.call_args.kwargs["max_input_frames"], 64)
+        self.assertEqual(run.call_args.kwargs["max_points"], 750_000)
+        self.assertEqual(run.call_args.kwargs["preprocess_mode"], "pad")
+        self.assertEqual(run.call_args.kwargs["selection_strategy"], "scene_coverage")
+        self.assertEqual(run.call_args.kwargs["axis_trim_low_quantile"], 0.002)
+        self.assertEqual(run.call_args.kwargs["axis_trim_high_quantile"], 0.998)
+        self.assertEqual(run.call_args.kwargs["spatial_keep_quantile"], 0.995)
+
     def test_adapter_passes_only_minimal_runtime_options(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -275,9 +324,16 @@ class LiteVGGTAdapterTests(unittest.TestCase):
         self.assertIsNone(run.call_args.kwargs["depth_conf_thresh"])
         self.assertEqual(run.call_args.kwargs["preprocess_mode"], "pad")
         self.assertEqual(run.call_args.kwargs["max_points"], 1234)
+        self.assertEqual(run.call_args.kwargs["max_input_frames"], 64)
+        self.assertEqual(run.call_args.kwargs["selection_strategy"], "scene_coverage")
+        self.assertEqual(run.call_args.kwargs["axis_trim_low_quantile"], 0.002)
+        self.assertEqual(run.call_args.kwargs["axis_trim_high_quantile"], 0.998)
+        self.assertEqual(run.call_args.kwargs["spatial_keep_quantile"], 0.995)
         self.assertEqual(
             sorted(run.call_args.kwargs),
             [
+                "axis_trim_high_quantile",
+                "axis_trim_low_quantile",
                 "checkpoint_path",
                 "depth_conf_thresh",
                 "frame_stride",
@@ -288,6 +344,8 @@ class LiteVGGTAdapterTests(unittest.TestCase):
                 "output_ply",
                 "preprocess_mode",
                 "progress",
+                "selection_strategy",
+                "spatial_keep_quantile",
                 "target_size",
             ],
         )

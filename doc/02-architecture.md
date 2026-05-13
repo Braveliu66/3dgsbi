@@ -102,7 +102,6 @@ flowchart LR
 | 图片极速预览 | LiteVGGT → Spark-SPZ |
 | 视频极速预览 | 待重写 |
 | 实时摄像头 | 待重写 |
-| 精细重建 | 默认 `mobilegs_lmrs`：pycolmap 生成 COLMAP 兼容 SfM + DeblurMLP-MobileGS + FastGS-style VCD/VCP + patched LM-RS Compact Box rasterizer + 可选 LM-RS matrix-free Phase 2 + Spark-SPZ；预览仍使用 LiteVGGT |
 | 稀疏视角 | FreeSplatter 初始化 → 精细合成引擎 |
 | 长视频精细重建 | 待重写 |
 | Mesh 导出 | MeshSplatting → `.ply` / `.obj` / `.glb` |
@@ -145,25 +144,15 @@ viewer          Spark 2.0
 ## 2026-05-07 Fine Pipeline Update
 
 - Fine reconstruction accepts ordinary JPG/PNG uploads. EXIF camera parameters are not required; EXIF is used only for orientation correction.
-- Production fine path: JPG/PNG normalization -> pycolmap COLMAP-compatible sparse model -> DeblurMLP-MobileGS training -> optional LM-RS refinement -> Spark SPZ.
-- pycolmap is the production fine SfM frontend. Deprecated fine `litevggt` and learned-SfM backends are no longer routed by the image fine pipeline.
 - Preview LiteVGGT remains isolated under the preview vendor path. Fine SfM metrics include `sfm_backend=pycolmap`, registered image count, and sparse point count.
 - DeblurMLP uses the Deblurring-3DGS GTnet method at commit `e63366b8581c0fde2fda0ab1aea99518da2e2f10`. It models blurred observations during training and still exports a standard sharp Gaussian PLY.
 - The worker image keeps one CUDA/PyTorch baseline, one patched LM-RS rasterizer, one `simple_knn`, and one `fused_ssim`.
 
-## 2026-05-10 Image Fine EDGS/RoMA Update
 
-- Image fine remains `mobilegs_lmrs`: JPG/PNG normalization -> pycolmap -> local EDGS/RoMA dense-correspondence Gaussian initialization -> DeblurMLP-MobileGS training -> optional LM-RS -> final PLY validation -> Spark SPZ.
-- The backend does not clone or vendor the full EDGS repository. The only EDGS-specific code in this project is the minimal initialization adapter under `backend/app/fine/edgs_init.py` and `backend/app/fine/edgs_runtime/`.
-- EDGS initialization runs after `Scene(...)` and before `gaussians.training_setup(opt)`. If the runtime or weights are missing, fine fails with an explicit runtime/weight error instead of silently falling back.
-- EDGS is enabled by default. `fine_edgs_enabled=false` keeps the pycolmap sparse initialization and sparse point compensation.
-- EDGS defaults are `matches_per_ref=15000`, `nns_per_ref=3`, `num_refs=len(train cameras)`, and `roma_model=outdoor`.
-- When EDGS is enabled, MobileGS densification is disabled with `densify_until_iter=0`; final prune behavior remains.
 - DeblurMLP uses a default 3000-iteration warmup. GTnet activates after warmup and xyz learning rate is scaled by `0.1` while DeblurMLP is active.
 
 ## 2026-05-10 Video Fine Pipeline Update
 
-- Image fine reconstruction remains `mobilegs_lmrs`: pycolmap SfM, DeblurMLP-MobileGS, optional LM-RS, final PLY validation, and Spark SPZ conversion.
 - Video fine reconstruction uses canonical pipeline `video_artdeco_speed3r`. Legacy names `video_artdeco_litevggt`, `video_litevggt`, and `artdeco_litevggt` are aliases only.
 - Video fine accepts exactly one uploaded video. The worker extracts frames, writes ARTDECO `selfCaptured` calibration, runs ARTDECO VSLAM plus Reconstruct h3dgsv3 mapper/training, validates `point_clouds/gs.ply`, copies it to `final.ply`, and converts `final_web.spz`.
 - Speed3R-Pi3 is only the replacement for ARTDECO Pi3 inference in loop-closure matching. The video path does not call MobileGS, LM-RS, DeblurMLP, or LiteVGGT image preview.

@@ -70,7 +70,7 @@ ALGORITHMS: list[dict[str, Any]] = [
         "weight_paths": [],
         "commands": {},
         "source_type": "system",
-        "license_notice": "Image fine reconstruction uses vendored official FastGS-Big training code with pycolmap/COLMAP sparse initialization.",
+        "license_notice": "Image fine reconstruction uses pycolmap/COLMAP initialization and vendored official FastGS-Big training code.",
         "notes": "Default image fine reconstruction pipeline: JPG/PNG normalization, pycolmap/COLMAP sparse scene, vendored official FastGS-Big train.py, and Spark SPZ conversion.",
     },
     {

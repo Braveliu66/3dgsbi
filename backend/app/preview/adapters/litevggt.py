@@ -19,23 +19,31 @@ def run(ctx: PreviewContext) -> PreviewResult:
     files = image_files(ctx.input_dir)
 
     keep_ratio_value = ctx.options.get("litevggt_keep_ratio")
-    keep_ratio = float(keep_ratio_value) if keep_ratio_value is not None else None
-    max_points = int(ctx.options.get("preview_max_points") or 15_000_000)
+    keep_ratio = float(keep_ratio_value) if keep_ratio_value is not None else 0.40
+    max_points = int(ctx.options.get("preview_max_points") or 750_000)
     max_input_frames_value = ctx.options.get("litevggt_max_input_frames")
-    max_input_frames = int(max_input_frames_value) if max_input_frames_value else None
+    max_input_frames = int(max_input_frames_value) if max_input_frames_value else 64
     target_size_value = ctx.options.get("litevggt_target_size")
-    target_size = int(target_size_value) if target_size_value else None
+    target_size = int(target_size_value) if target_size_value else 336
     frame_stride = _read_optional_int(ctx.options.get("litevggt_frame_stride"))
     depth_conf_thresh = _read_optional_float(ctx.options.get("litevggt_depth_conf_thresh"), None)
     preprocess_mode = str(ctx.options.get("litevggt_preprocess_mode") or "pad")
+    point_selection_strategy = str(ctx.options.get("litevggt_point_selection_strategy") or "scene_coverage")
+    axis_trim_low_quantile = float(ctx.options.get("litevggt_axis_trim_low_quantile") or 0.002)
+    axis_trim_high_quantile = float(ctx.options.get("litevggt_axis_trim_high_quantile") or 0.998)
+    spatial_keep_quantile = float(ctx.options.get("litevggt_spatial_keep_quantile") or 0.995)
     params: dict[str, Any] = {
-        "keep_ratio": keep_ratio if keep_ratio is not None else "auto",
+        "keep_ratio": keep_ratio,
         "max_points": max_points,
         "max_input_frames": max_input_frames,
-        "target_size": target_size if target_size is not None else "auto",
+        "target_size": target_size,
         "frame_stride": frame_stride if frame_stride is not None else "auto",
         "depth_conf_thresh": depth_conf_thresh,
         "preprocess_mode": preprocess_mode,
+        "point_selection_strategy": point_selection_strategy,
+        "axis_trim_low_quantile": axis_trim_low_quantile,
+        "axis_trim_high_quantile": axis_trim_high_quantile,
+        "spatial_keep_quantile": spatial_keep_quantile,
     }
     print(
         "[litevggt-preview] adapter params "
@@ -65,6 +73,10 @@ def run(ctx: PreviewContext) -> PreviewResult:
         frame_stride=frame_stride,
         depth_conf_thresh=depth_conf_thresh,
         preprocess_mode=preprocess_mode,
+        selection_strategy=point_selection_strategy,
+        axis_trim_low_quantile=axis_trim_low_quantile,
+        axis_trim_high_quantile=axis_trim_high_quantile,
+        spatial_keep_quantile=spatial_keep_quantile,
         progress=report,
     )
     timer.mark("litevggt_inference")

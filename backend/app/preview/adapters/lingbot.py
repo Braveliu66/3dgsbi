@@ -40,8 +40,8 @@ def run(ctx: PreviewContext) -> PreviewResult:
         "overlap_keyframes": read_int(ctx.options.get("preview_lingbot_overlap_keyframes"), 8, minimum=1, maximum=128),
         "max_points": read_int(ctx.options.get("preview_lingbot_max_points"), 1_000_000_000, minimum=0, maximum=1_000_000_000),
         "frame_stride": read_int(ctx.options.get("preview_lingbot_frame_stride"), 1, minimum=1, maximum=10_000),
-        "pixel_stride": read_int(ctx.options.get("preview_lingbot_pixel_stride"), 3, minimum=1, maximum=512),
-        "conf_percentile": read_float(ctx.options.get("preview_lingbot_conf_percentile"), 0.0, minimum=0.0, maximum=100.0),
+        "pixel_stride": read_int(ctx.options.get("preview_lingbot_pixel_stride"), 2, minimum=1, maximum=512),
+        "conf_percentile": read_float(ctx.options.get("preview_lingbot_conf_percentile"), 10.0, minimum=0.0, maximum=100.0),
         "min_conf": read_float(ctx.options.get("preview_lingbot_min_conf"), 0.0, minimum=-100.0, maximum=100.0),
         "save_predictions": read_bool(ctx.options.get("preview_lingbot_save_predictions"), True),
         "compile_model": read_bool(ctx.options.get("preview_lingbot_compile"), False),
@@ -90,7 +90,7 @@ def run(ctx: PreviewContext) -> PreviewResult:
     )
 
     base_point_radius = read_float(metrics.get("lingbot_preview_point_radius"), 0.002, minimum=1e-8, maximum=1.0)
-    point_radius_scale = read_float(ctx.options.get("preview_lingbot_point_radius_scale"), 1.8, minimum=0.1, maximum=20.0)
+    point_radius_scale = read_float(ctx.options.get("preview_lingbot_point_radius_scale"), 1.0, minimum=0.1, maximum=20.0)
     point_radius = base_point_radius * point_radius_scale
     print(
         "[lingbot-preview] pointcloud summary "

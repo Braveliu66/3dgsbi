@@ -2,7 +2,7 @@
 
 ## Fine Pipeline Split
 
-`mobilegs_lmrs` is the image fine pipeline. It owns pycolmap SfM, minimal EDGS/RoMA dense-correspondence Gaussian initialization, DeblurMLP-MobileGS training with warmup, optional LM-RS refinement, final PLY validation, and Spark SPZ conversion.
+`official_fastgs_big` is the image fine pipeline. It defaults to pycolmap/COLMAP initialization, writes a COLMAP-compatible `sparse/0` scene, runs vendored official FastGS-Big training, validates the final PLY, and converts it to Spark SPZ. `fine_sfm_backend=colmap` is accepted as an alias for the pycolmap implementation.
 
 `video_artdeco_speed3r` is the video fine pipeline. It owns video frame extraction, ARTDECO `selfCaptured` calibration, ARTDECO VSLAM state/frontend/backend, ARTDECO Reconstruct h3dgsv3 SceneModel training, `point_clouds/gs.ply` validation, and Spark SPZ conversion.
 
@@ -18,16 +18,15 @@ The worker keeps one CUDA stack: the PyTorch/CUDA/cuDNN baseline already used by
 
 Model files are cached under `model-cache` and use the same downloader semantics as preview and image fine: skip existing files, write `.part`, hold `.lock`, and resume when possible.
 
-## EDGS/RoMA Image Fine Boundary
+## COLMAP Image Fine Boundary
 
-The project does not vendor or clone the full EDGS repository. Image fine only keeps the small runtime needed for dense-correspondence initialization under `backend/app/fine/edgs_runtime/`, wrapped by `backend/app/fine/edgs_init.py`.
+Image fine uses pycolmap for feature extraction, matching, and mapping. Preview LiteVGGT remains separate and keeps speed-oriented defaults with fewer frames and points.
 
 The image fine order is:
 
-1. pycolmap writes the COLMAP-compatible `sparse/0` scene.
-2. `EDGSDenseInit` runs after `Scene(...)` and before `gaussians.training_setup(opt)`.
-3. EDGS/RoMA creates the initial Gaussian set from dense correspondences.
-4. MobileGS trains with densification disabled by EDGS and keeps final prune behavior.
-5. DeblurMLP GTnet stays inactive during the default 3000-iteration warmup, then activates and scales xyz learning rate by `0.1`.
+1. pycolmap extracts SIFT features, matches images, and writes the COLMAP-compatible `sparse/0` scene.
+2. FastGS-Big reads that scene and trains with its existing densification/pruning behavior.
+3. FastGS training progress is surfaced every 200 iterations.
+4. The worker validates `final.ply` and converts it to Spark SPZ.
 
-Default EDGS options are `matches_per_ref=15000`, `nns_per_ref=3`, `num_refs=len(train cameras)`, and `roma_model=outdoor`. EDGS is enabled by default and can be disabled with `fine_edgs_enabled=false`, which keeps the pycolmap sparse initialization path.
+Default COLMAP options remain configurable through `fine_sift_max_num_features`, `fine_colmap_max_image_size`, `fine_colmap_threads`, `fine_colmap_matcher`, and `fine_min_registered_ratio`.

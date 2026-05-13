@@ -162,9 +162,9 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
 
     metrics = {
         "pipeline": PIPELINE_NAME,
-        "algorithm": "pycolmap_official_fastgs_big",
-        "requested_algorithms": ["pycolmap", "FastGS-Big"],
-        "effective_algorithms": ["pycolmap", "official_fastgs_big", "diff_gaussian_rasterization_fastgs"],
+        "algorithm": f"{scene_result.backend}_official_fastgs_big",
+        "requested_algorithms": [scene_result.backend, "FastGS-Big"],
+        "effective_algorithms": [scene_result.backend, "official_fastgs_big", "diff_gaussian_rasterization_fastgs"],
         "source_version": ctx.source_version,
         "source_commits": SOURCE_COMMITS_FINE,
         "artifact_converter": "Spark SPZ",

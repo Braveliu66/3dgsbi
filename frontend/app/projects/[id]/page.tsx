@@ -25,6 +25,8 @@ export default function ProjectDetailPage() {
   const [downloadProgress, setDownloadProgress] = useState<TransferProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
+  const latestLogRef = useRef<HTMLDivElement | null>(null);
+  const modalLogRef = useRef<HTMLPreElement | null>(null);
 
   useEffect(() => {
     if (!params.id) return;
@@ -81,6 +83,20 @@ export default function ProjectDetailPage() {
     () => artifacts.find((artifact) => artifact.kind === "task_log" && artifact.task_id === logTask?.id) ?? null,
     [artifacts, logTask?.id]
   );
+
+  useEffect(() => {
+    latestLogRef.current?.scrollTo({
+      top: latestLogRef.current.scrollHeight,
+      behavior: "smooth"
+    });
+  }, [latestTask?.id, logs.length, logs.at(-1)]);
+
+  useEffect(() => {
+    modalLogRef.current?.scrollTo({
+      top: modalLogRef.current.scrollHeight,
+      behavior: "smooth"
+    });
+  }, [logTask?.id, logTask?.logs?.length, logTask?.logs?.at(-1)]);
 
   async function cancelTask(task: Task) {
     setBusy(true);
@@ -421,7 +437,7 @@ export default function ProjectDetailPage() {
               {logs.length ? (
                 <section className="stack">
                   <h3>任务日志</h3>
-                  <div className="log-console">
+                  <div className="log-console" ref={latestLogRef}>
                     {logs.map((line, index) => <div key={`${index}-${line}`}>{line}</div>)}
                   </div>
                 </section>
@@ -449,7 +465,7 @@ export default function ProjectDetailPage() {
             </div>
             <div className="panel-body scrollable stack">
               {logTask.error_message ? <div className="error-box">{logTask.error_message}</div> : null}
-              <pre className="code-view">{formatTaskLog(logTask)}</pre>
+              <pre className="code-view" ref={modalLogRef}>{formatTaskLog(logTask)}</pre>
             </div>
           </section>
         </div>

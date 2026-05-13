@@ -77,7 +77,7 @@ flowchart TD
     FreeSplatter --> Engine
     Engine --> Blur{"检测到模糊素材?"}
     Blur -- 是 --> Deblur["启用 Deblurring 钩子"]
-    Blur -- 否 --> Train["mobilegs_lmrs 训练"]
+    Blur -- no --> Train["official_fastgs_big training"]
     Deblur --> Train
     Train --> LM["LM-RS matrix-free Phase 2 / 缺失则失败"]
     LM --> LOD
@@ -164,14 +164,10 @@ Fine image workflow now runs:
 
 1. Normalize uploaded JPG/PNG into RGB JPEG. Missing EXIF is valid; EXIF orientation is only a pixel-rotation hint.
 2. Analyze blur and keep at least 3 real images.
-3. Run pycolmap as the production fine SfM frontend. Preview remains LiteVGGT.
+3. Run pycolmap as the production fine SfM frontend. Preview remains LiteVGGT with separate speed-oriented defaults.
 4. Write COLMAP-compatible `sparse/0` with `images.bin`, `cameras.bin`, and `points3D.bin`; metrics set `sfm_backend=pycolmap`.
-5. Initialize Gaussians with local EDGS/RoMA dense correspondences when `fine_edgs_enabled` is not `false`. This runs after `Scene(...)` and before `training_setup(...)`.
-6. Train MobileGS. EDGS mode disables densification by setting `densify_until_iter=0`; final prune behavior remains.
-7. Non-sharp inputs enable DeblurMLP GTnet with a default 3000-iteration warmup. After warmup, GTnet activates and xyz learning rate is scaled by `0.1`.
-8. Optional LM-RS refinement runs only when explicitly scheduled. Auto DeblurMLP runs keep the default LM start at the final iteration so training does not optimize the blurred observation with LM-RS unless requested.
-9. Export standard `final.ply`, transcode `final_web.spz`, and write `metrics.json`.
+5. Train official FastGS-Big from the COLMAP scene and surface progress every 200 iterations.
+6. Export standard `final.ply`, transcode `final_web.spz`, and write `metrics.json`.
 
 `pycolmap` is the default image fine SfM path. The deprecated `fine_sfm_backend=litevggt` fine option is unsupported; preview LiteVGGT is unchanged.
 
-EDGS/RoMA defaults are `matches_per_ref=15000`, `nns_per_ref=3`, `num_refs=len(train cameras)`, and `roma_model=outdoor`. The project keeps only `backend/app/fine/edgs_runtime/` for initialization and does not include EDGS training, UI, Gradio, full configs, or the original repository tree.

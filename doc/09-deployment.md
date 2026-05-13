@@ -14,14 +14,9 @@
 
 ```text
 model-cache/litevggt/te_dict.pt
-model-cache/roma/roma_outdoor.pth
-model-cache/roma/roma_indoor.pth
-model-cache/roma/dinov2_vitl14_pretrain.pth
 ```
 
-Image fine SfM uses pycolmap and does not require a learned SfM checkpoint. RoMA/DINOv2 weights are part of the default image fine EDGS/RoMA initialization path. The worker stores them under `model-cache/roma/` and uses them when `fine_edgs_enabled` is not `false`.
 
-Docker build and task-specific model downloads prefer `https://hf-mirror.com` through `HF_MIRROR_BASE_URL` / `HF_ENDPOINT`. The image fine runtime installs `romatch` and `scikit-learn`, but does not clone or copy the full CompVis/EDGS repository.
 
 ## Worker 镜像
 

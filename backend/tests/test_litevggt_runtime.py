@@ -51,12 +51,22 @@ class LiteVGGTSceneTests(unittest.TestCase):
                     options={},
                     progress=lambda stage, value, message: None,
                 )
+            points_txt = scene_dir / "sparse" / "0" / "points3D.txt"
+            points_ply = scene_dir / "sparse" / "0" / "points3D.ply"
+            self.assertTrue(points_txt.exists())
+            self.assertTrue(points_ply.exists())
 
         kwargs = run.call_args.kwargs
-        self.assertEqual(kwargs["keep_ratio"], 1.0)
+        self.assertEqual(kwargs["keep_ratio"], 0.95)
         self.assertIsNone(kwargs["depth_conf_thresh"])
-        self.assertEqual(kwargs["max_points"], 1_500_000)
+        self.assertEqual(kwargs["max_points"], 3_000_000)
+        self.assertEqual(kwargs["max_input_frames"], 128)
         self.assertEqual(kwargs["frame_selection"], "all")
+        self.assertEqual(kwargs["preprocess_mode"], "pad")
+        self.assertEqual(kwargs["selection_strategy"], "scene_coverage")
+        self.assertEqual(kwargs["axis_trim_low_quantile"], 0.001)
+        self.assertEqual(kwargs["axis_trim_high_quantile"], 0.999)
+        self.assertEqual(kwargs["spatial_keep_quantile"], 0.9975)
         self.assertEqual(result.metrics["litevggt_official_single_path"], True)
 
 
