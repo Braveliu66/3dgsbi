@@ -29,6 +29,30 @@ def build_litevggt_scene(
     if not weight.exists() or weight.stat().st_size <= 0:
         raise FineFailure("LITEVGGT_WEIGHT_MISSING", f"LiteVGGT weight is missing: {weight}")
 
+    params = {
+        "keep_ratio": float(options.get("fine_litevggt_keep_ratio") or 0.90),
+        "max_points": int(options.get("fine_litevggt_max_points") or 1_500_000),
+        "spatial_keep_quantile": float(options.get("fine_litevggt_spatial_keep_quantile") or 0.999),
+        "preserve_full_image": read_bool(options.get("fine_litevggt_preserve_full_image"), True),
+        "letterbox_size": int(options.get("fine_litevggt_letterbox_size") or 518),
+        "max_input_frames": read_optional_int(options.get("fine_litevggt_max_input_frames")),
+        "frame_selection": str(options.get("fine_litevggt_frame_selection") or "all"),
+        "min_scene_change": float(options.get("fine_litevggt_min_scene_change") or 0.0),
+        "edge_keep_ratio": float(options.get("fine_litevggt_edge_keep_ratio") or 0.15),
+        "axis_trim_low_quantile": float(options.get("fine_litevggt_axis_trim_low_quantile") or 0.0005),
+        "axis_trim_high_quantile": float(options.get("fine_litevggt_axis_trim_high_quantile") or 0.9995),
+        "selection_strategy": str(options.get("fine_litevggt_point_selection_strategy") or "per_frame"),
+        "window_size": int(options.get("fine_litevggt_window_size") or 48),
+        "window_overlap": int(options.get("fine_litevggt_window_overlap") or 16),
+        "oom_window_sizes": read_int_list(options.get("fine_litevggt_oom_window_sizes"), [32, 16, 8]),
+    }
+    print(
+        "[fine-litevggt-scene] start "
+        f"input_dir={input_dir} scene_dir={scene_dir} weight={weight} weight_bytes={weight.stat().st_size} "
+        + " ".join(f"{key}={value}" for key, value in params.items()),
+        flush=True,
+    )
+
     if scene_dir.exists():
         shutil.rmtree(scene_dir)
     images_dir = scene_dir / "images"
@@ -45,27 +69,44 @@ def build_litevggt_scene(
         reconstruction = run_litevggt_reconstruction(
             input_dir=input_dir,
             checkpoint_path=weight,
-            keep_ratio=float(options.get("fine_litevggt_keep_ratio") or 0.90),
-            max_points=int(options.get("fine_litevggt_max_points") or 1_500_000),
-            spatial_keep_quantile=float(options.get("fine_litevggt_spatial_keep_quantile") or 0.999),
-            preserve_full_image=read_bool(options.get("fine_litevggt_preserve_full_image"), True),
-            letterbox_size=int(options.get("fine_litevggt_letterbox_size") or 518),
-            max_input_frames=read_optional_int(options.get("fine_litevggt_max_input_frames")),
-            frame_selection=str(options.get("fine_litevggt_frame_selection") or "scene"),
-            min_scene_change=float(options.get("fine_litevggt_min_scene_change") or 0.045),
-            edge_keep_ratio=float(options.get("fine_litevggt_edge_keep_ratio") or 0.15),
-            axis_trim_low_quantile=float(options.get("fine_litevggt_axis_trim_low_quantile") or 0.0005),
-            axis_trim_high_quantile=float(options.get("fine_litevggt_axis_trim_high_quantile") or 0.9995),
-            selection_strategy=str(options.get("fine_litevggt_point_selection_strategy") or "per_frame"),
+            keep_ratio=params["keep_ratio"],
+            max_points=params["max_points"],
+            spatial_keep_quantile=params["spatial_keep_quantile"],
+            preserve_full_image=params["preserve_full_image"],
+            letterbox_size=params["letterbox_size"],
+            max_input_frames=params["max_input_frames"],
+            frame_selection=params["frame_selection"],
+            min_scene_change=params["min_scene_change"],
+            edge_keep_ratio=params["edge_keep_ratio"],
+            axis_trim_low_quantile=params["axis_trim_low_quantile"],
+            axis_trim_high_quantile=params["axis_trim_high_quantile"],
+            selection_strategy=params["selection_strategy"],
+            inference_mode="windowed",
+            window_size=params["window_size"],
+            window_overlap=params["window_overlap"],
+            oom_window_sizes=params["oom_window_sizes"],
             progress=report,
         )
     except PreviewFailure as exc:
         raise FineFailure(exc.code, exc.message) from exc
+    print(
+        "[fine-litevggt-scene] reconstruction complete "
+        f"images_shape={getattr(reconstruction.images, 'shape', None)} points_shape={getattr(reconstruction.points, 'shape', None)} "
+        f"colors_shape={getattr(reconstruction.colors, 'shape', None)} metrics={reconstruction.metrics}",
+        flush=True,
+    )
 
     image_names = write_training_images(reconstruction.images, images_dir)
     write_cameras_txt(sparse_dir / "cameras.txt", reconstruction.intrinsics, reconstruction.images)
     write_images_txt(sparse_dir / "images.txt", reconstruction.w2c, image_names)
     write_points3d_ply(sparse_dir / "points3D.ply", reconstruction.points, reconstruction.colors)
+    print(
+        "[fine-litevggt-scene] COLMAP-compatible files written "
+        f"images_dir={images_dir} image_count={len(image_names)} "
+        f"cameras_txt={sparse_dir / 'cameras.txt'} images_txt={sparse_dir / 'images.txt'} "
+        f"points3d_ply={sparse_dir / 'points3D.ply'} points3d_bytes={(sparse_dir / 'points3D.ply').stat().st_size}",
+        flush=True,
+    )
 
     elapsed = round(time.monotonic() - started, 3)
     selected_count = len(image_names)
@@ -214,6 +255,23 @@ def read_optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def read_int_list(value: Any, fallback: list[int]) -> list[int]:
+    if value is None:
+        return fallback
+    if isinstance(value, (list, tuple)):
+        values = value
+    else:
+        values = str(value).replace(";", ",").split(",")
+
+    parsed: list[int] = []
+    for item in values:
+        try:
+            parsed.append(int(str(item).strip()))
+        except (TypeError, ValueError):
+            continue
+    return parsed or fallback
 
 
 def read_bool(value: Any, fallback: bool) -> bool:

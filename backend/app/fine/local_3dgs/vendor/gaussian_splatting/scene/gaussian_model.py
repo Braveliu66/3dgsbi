@@ -561,12 +561,12 @@ class GaussianModel:
         self.tmp_radii = None
         torch.cuda.empty_cache()
 
-    def final_prune_fastgs(self, min_opacity, pruning_score=None):
+    def final_prune_fastgs(self, min_opacity, pruning_score=None, score_thresh=0.97):
         if pruning_score is None:
             pruning_score = torch.zeros((self.get_xyz.shape[0]), dtype=torch.float32, device="cuda")
         pruning_score = pruning_score.reshape(-1).to(device=self.get_xyz.device)
         prune_mask = (self.get_opacity < min_opacity).squeeze()
-        scores_mask = pruning_score > 0.9
+        scores_mask = pruning_score > score_thresh
         final_prune = torch.logical_or(prune_mask, scores_mask)
         if bool(final_prune.any().item()):
             self.prune_points(final_prune)

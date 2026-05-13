@@ -76,9 +76,9 @@ class Local3DGSTests(unittest.TestCase):
             def get_xyz(self):
                 return self.xyz
 
-            def final_prune_fastgs(self, min_opacity, pruning_score=None):
+            def final_prune_fastgs(self, min_opacity, pruning_score=None, score_thresh=0.97):
                 score = torch.zeros((self.xyz.shape[0],)) if pruning_score is None else pruning_score
-                mask = torch.logical_or(self.opacity.squeeze(-1) < min_opacity, score > 0.9)
+                mask = torch.logical_or(self.opacity.squeeze(-1) < min_opacity, score > score_thresh)
                 self.prune_points(mask)
 
             def prune_points(self, mask):
@@ -86,7 +86,7 @@ class Local3DGSTests(unittest.TestCase):
                 self.xyz = self.xyz[keep]
                 self.opacity = self.opacity[keep]
 
-        policy = FastGSPolicy()
+        policy = FastGSPolicy({"fine_fastgs_final_prune_score_thresh": 0.9})
         policy.pruning_score = torch.tensor([[0.0], [0.95], [0.0], [0.0]])
         gaussians = DummyGaussians()
 

@@ -26,10 +26,13 @@ from app.worker import (
     download_media,
     emit,
     fail_task,
+    format_options,
     heartbeat,
+    media_summary,
     read_positive_int,
     run_task_in_subprocess,
     task_log_path,
+    task_work_dir,
     task_source_version,
     task_payload,
     upload_task_log,
@@ -86,7 +89,7 @@ def recover_interrupted_fine_tasks(redis_client: redis.Redis) -> None:
 
 def run_fine_task(task_id: str, worker_id: str) -> None:
     started = time.monotonic()
-    work_dir = settings.local_work_root / task_id
+    work_dir = task_work_dir(task_id)
     if work_dir.exists():
         shutil.rmtree(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -134,6 +137,15 @@ def run_fine_task(task_id: str, worker_id: str) -> None:
             )
             if not task or not project:
                 return
+            requested_pipeline = normalize_fine_pipeline(str((task.options or {}).get("fine_pipeline") or PIPELINE_NAME))
+            print(
+                "[fine-worker] task context "
+                f"task_id={task.id} project_id={project.id} project_name={project.name!r} "
+                f"owner_id={project.owner_id} input_type={project.input_type} requested_pipeline={requested_pipeline} "
+                f"source_version={source_version} work_dir={work_dir} media={media_summary(project.media)} "
+                f"options={format_options(task.options or {})}",
+                flush=True,
+            )
             pipeline, input_dir, input_video, input_metrics, preflight_message = prepare_fine_inputs(db, task, project, work_dir, started)
             ensure_fine_weights(db, task, project, started, pipeline)
 
@@ -157,7 +169,20 @@ def run_fine_task(task_id: str, worker_id: str) -> None:
                 ),
             )
             update_task(db, task, project, "fine_preflight", 18, started, preflight_message)
+            print(
+                "[fine-worker] invoking fine pipeline "
+                f"task_id={task.id} pipeline={pipeline} input_dir={input_dir} input_video={input_video} "
+                f"final_ply={ctx.final_ply} final_spz={ctx.final_spz} metrics_json={ctx.metrics_json}",
+                flush=True,
+            )
             result = run_fine_pipeline(ctx)
+            print(
+                "[fine-worker] fine pipeline returned "
+                f"task_id={task.id} pipeline={pipeline} final_ply={result.final_ply} final_spz={result.final_spz} "
+                f"metrics_json={result.metrics_json} lod_rad={result.lod_rad} splat_count={result.splat_count} "
+                f"metrics={format_options(result.metrics)} source_commits={format_options(result.source_commits)}",
+                flush=True,
+            )
 
             if not result.final_ply.exists() or result.final_ply.stat().st_size <= 0:
                 raise FineFailure("ARTIFACT_NOT_FOUND", f"Missing non-empty final.ply: {result.final_ply}")
@@ -189,6 +214,11 @@ def run_fine_task(task_id: str, worker_id: str) -> None:
                     **input_metrics,
                     **result.metrics,
                 }
+                print(
+                    "[fine-worker] final task metrics "
+                    f"task_id={task.id} metrics={format_options(task.metrics)}",
+                    flush=True,
+                )
                 task.logs = append_log(task.logs, "uploaded final.ply", "uploaded final_web.spz", "uploaded metrics.json")
                 if result.lod_rad:
                     task.logs = append_log(task.logs, "uploaded final_lod.rad")
@@ -280,6 +310,11 @@ def prepare_fine_inputs(db, task: Task, project: Project, work_dir: Path, starte
     options = task.options or {}
     if project.input_type == "images":
         image_count = sum(1 for media in project.media if media.kind == "image")
+        print(
+            "[fine-worker] preparing image fine input "
+            f"project_id={project.id} image_count={image_count} work_dir={work_dir}",
+            flush=True,
+        )
         if image_count < 8:
             raise FineFailure("INSUFFICIENT_IMAGES", "LiteVGGT fine reconstruction requires an image project with at least 8 images")
         pipeline = normalize_fine_pipeline(str(options.get("fine_pipeline") or PIPELINE_NAME))
@@ -291,6 +326,11 @@ def prepare_fine_inputs(db, task: Task, project: Project, work_dir: Path, starte
         update_task(db, task, project, "input_downloaded", 12, started, f"downloaded {len(project.media)} media files")
         max_side = read_positive_int(options.get("fine_image_max_side"), settings.fine_image_max_side)
         normalized = normalize_image_directory(input_dir, work_dir / "input_normalized", max_side=max_side, jpeg_quality=92)
+        print(
+            "[fine-worker] normalized fine image input "
+            f"input_dir={input_dir} output_dir={normalized.output_dir} metrics={format_options(normalized.metrics())}",
+            flush=True,
+        )
         update_task(
             db,
             task,
@@ -318,6 +358,12 @@ def download_single_video(media, work_dir: Path) -> Path:
 
 def ensure_fine_weights(db, task: Task, project: Project, started: float, pipeline: str) -> None:
     specs = weights_for_pipeline(pipeline)
+    print(
+        "[fine-worker] weight preflight "
+        f"pipeline={pipeline} count={len(specs)} auto_download={settings.model_auto_download} "
+        f"model_cache_dir={settings.model_cache_dir} specs={[spec.relative_path for spec in specs]}",
+        flush=True,
+    )
     update_task(db, task, project, "weights_checking", 8, started, f"checking {len(specs)} model weights for {pipeline}")
     if settings.model_auto_download:
         try:
@@ -339,6 +385,12 @@ def update_task(db, task: Task, project: Project, stage: str, progress: int, sta
     task.eta_seconds = estimate_fine_eta(task, started)
     if logs:
         task.logs = append_log(task.logs, *logs)
+    print(
+        "[fine-worker] progress "
+        f"task_id={task.id} project_id={project.id} stage={stage} progress={task.progress} "
+        f"eta_seconds={task.eta_seconds} messages={list(logs)}",
+        flush=True,
+    )
     emit(db, project.id, "task_progress", task_payload(task), task.id)
     db.commit()
 

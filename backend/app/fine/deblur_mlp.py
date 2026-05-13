@@ -92,10 +92,10 @@ class DeblurMLPConfig:
     use_position: bool
     hidden: int = 3
     width: int = 64
-    num_moments: int = 4
+    num_moments: int = 5
     lambda_s: float = 0.01
     lambda_p: float = 0.01
-    min_clamp: float = 0.9
+    min_clamp: float = 1.0
     max_clamp: float = 1.1
     max_position_delta: float = 0.02
     transform_reg_weight: float = 0.001
@@ -152,10 +152,10 @@ def build_deblur_mlp_state(blur_mode: str, options: dict[str, Any], *, device: t
         use_position=use_position,
         hidden=read_int(options.get("fine_deblur_hidden"), 3, minimum=1, maximum=8),
         width=read_int(options.get("fine_deblur_width"), 64, minimum=16, maximum=256),
-        num_moments=read_int(options.get("fine_deblur_num_moments"), 4, minimum=1, maximum=8),
+        num_moments=read_int(options.get("fine_deblur_num_moments"), 5, minimum=1, maximum=8),
         lambda_s=read_float(options.get("fine_deblur_lambda_s"), 0.01, minimum=0.0, maximum=0.1),
         lambda_p=read_float(options.get("fine_deblur_lambda_p"), 0.01, minimum=0.0, maximum=0.1),
-        min_clamp=read_float(options.get("fine_deblur_min_clamp"), 0.9, minimum=0.5, maximum=1.0),
+        min_clamp=read_float(options.get("fine_deblur_min_clamp"), 1.0, minimum=1.0, maximum=1.0),
         max_clamp=read_float(options.get("fine_deblur_max_clamp"), 1.1, minimum=1.0, maximum=1.8),
         max_position_delta=read_float(options.get("fine_deblur_max_position_delta"), 0.02, minimum=0.0, maximum=1.0),
         transform_reg_weight=read_float(options.get("fine_deblur_transform_reg_weight"), 0.001, minimum=0.0, maximum=1.0),

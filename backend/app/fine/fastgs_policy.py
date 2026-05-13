@@ -26,6 +26,9 @@ class FastGSPolicy:
         self.percentile = read_float(options.get("fine_vcd_percentile"), 0.60, minimum=0.05, maximum=0.95)
         self.lambda_dssim = read_float(options.get("fine_lambda_dssim"), 0.2, minimum=0.0, maximum=1.0)
         self.compact_box_mult = read_float(options.get("fine_fastergs_compact_box_mult"), 0.5, minimum=0.1, maximum=2.0)
+        self.late_prune_enabled = read_bool(options.get("fine_fastgs_late_prune_enabled"), False)
+        self.final_prune_score_thresh = read_float(options.get("fine_fastgs_final_prune_score_thresh"), 0.97, minimum=0.5, maximum=1.0)
+        self.final_prune_min_opacity = read_float(options.get("fine_fastgs_final_prune_min_opacity"), 0.05, minimum=0.001, maximum=0.2)
         self.score_sum: torch.Tensor | None = None
         self.metric_counts: torch.Tensor | None = None
         self.importance_score: torch.Tensor | None = None
@@ -166,13 +169,19 @@ class FastGSPolicy:
         self.densify_events += 1
         return original
 
-    def apply_final_prune(self, gaussians: Any, *, min_opacity: float = 0.1) -> None:
+    def apply_final_prune(self, gaussians: Any, *, min_opacity: float | None = None) -> None:
+        if min_opacity is None:
+            min_opacity = self.final_prune_min_opacity
         before = int(gaussians.get_xyz.shape[0])
         pruning_score = self._aligned_pruning_score(gaussians)
         if hasattr(gaussians, "final_prune_fastgs"):
-            gaussians.final_prune_fastgs(min_opacity=min_opacity, pruning_score=pruning_score)
+            gaussians.final_prune_fastgs(
+                min_opacity=min_opacity,
+                pruning_score=pruning_score,
+                score_thresh=self.final_prune_score_thresh,
+            )
         else:
-            score_mask = pruning_score > 0.9
+            score_mask = pruning_score > self.final_prune_score_thresh
             opacity_mask = gaussians.get_opacity.squeeze(-1) < min_opacity
             prune_mask = torch.logical_or(score_mask, opacity_mask)
             if bool(prune_mask.any().item()):
@@ -240,6 +249,9 @@ class FastGSPolicy:
             "fastgs_multiview_score_enabled": True,
             "fastgs_sample_cameras": self.sample_cameras,
             "fastgs_loss_thresh": self.loss_thresh,
+            "fastgs_late_prune_enabled": self.late_prune_enabled,
+            "fastgs_final_prune_min_opacity": self.final_prune_min_opacity,
+            "fastgs_final_prune_score_thresh": self.final_prune_score_thresh,
             "fastgs_multiview_evaluations": self.multiview_evaluations,
             "fastgs_densify_events": self.densify_events,
             "fastgs_prune_events": self.prune_events,
@@ -263,6 +275,17 @@ class FastGSPolicy:
 
 def vcp_min_opacity(policy: FastGSPolicy) -> float:
     return 0.005
+
+
+def read_bool(value: Any, fallback: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return fallback
 
 
 def visible_mean_loss_score(visibility_filter: torch.Tensor, gaussian_count: int, view_error: float) -> torch.Tensor:

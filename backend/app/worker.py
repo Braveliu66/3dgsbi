@@ -8,6 +8,7 @@ import sys
 import time
 import multiprocessing as mp
 import traceback
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -19,7 +20,7 @@ from sqlalchemy.orm import selectinload
 from app.algorithms import normalize_preview_pipeline
 from app.config import get_settings
 from app.database import SessionLocal, initialize_database_schema
-from app.models import Artifact, MediaAsset, Project, Task, TaskEvent, WorkerHeartbeat, utc_now
+from app.models import Artifact, MediaAsset, Project, Task, TaskEvent, User, WorkerHeartbeat, utc_now
 from app.preview.image_preprocess import normalize_image_directory
 from app.preview.runner import run_preview_pipeline
 from app.preview.types import PreviewContext, PreviewFailure
@@ -27,6 +28,7 @@ from app.preview.weights import ModelDownloadError, download_model_weights, weig
 from app.resources import collect_gpu
 from app.storage import Storage, sha256_path, storage_key
 from app.task_control import task_cancel_requested
+from app.work_names import work_save_stem
 
 settings = get_settings()
 storage = Storage(settings)
@@ -62,6 +64,12 @@ class TaskLogCapture:
         sys.stdout = self._stdout
         sys.stderr = self._stderr
         print(f"[task-log] capturing stdout/stderr to {self.path}", flush=True)
+        print(
+            "[task-log] process context "
+            f"pid={os.getpid()} cwd={Path.cwd()} python={sys.executable} "
+            f"started_at={datetime.now(timezone.utc).isoformat()}",
+            flush=True,
+        )
 
     def flush(self) -> None:
         for stream in (sys.stdout, sys.stderr):
@@ -131,7 +139,13 @@ def run_task_in_subprocess(
     context = mp.get_context(os.getenv("WORKER_TASK_START_METHOD", "spawn"))
     process = context.Process(target=target, args=(task_id, worker_id))
     process.start()
+    print(
+        f"[{label}] spawned task process task_id={task_id} worker_id={worker_id} "
+        f"pid={process.pid} start_method={context.get_start_method()}",
+        flush=True,
+    )
     canceled = False
+    started = time.monotonic()
     try:
         while process.is_alive():
             process.join(TASK_PROCESS_POLL_SECONDS)
@@ -142,6 +156,11 @@ def run_task_in_subprocess(
                 mark_task_canceled(task_id)
                 break
         process.join()
+        print(
+            f"[{label}] task process finished task_id={task_id} pid={process.pid} "
+            f"exitcode={process.exitcode} elapsed_seconds={round(time.monotonic() - started, 3)}",
+            flush=True,
+        )
         if not canceled and process.exitcode not in (0, None):
             print(f"[{label}] task process exited with code {process.exitcode} for {task_id}", flush=True)
             mark_task_process_failed(task_id, process.exitcode, label)
@@ -272,7 +291,7 @@ def heartbeat(worker_id: str, current_task_id: str | None = None) -> None:
 
 def run_preview_task(task_id: str, worker_id: str) -> None:
     started = time.monotonic()
-    work_dir = settings.local_work_root / task_id
+    work_dir = task_work_dir(task_id)
     if work_dir.exists():
         shutil.rmtree(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -321,6 +340,14 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
                 return
 
             pipeline = normalize_preview_pipeline((task.options or {}).get("preview_pipeline"), project.input_type)
+            print(
+                "[preview-worker] task context "
+                f"task_id={task.id} project_id={project.id} project_name={project.name!r} "
+                f"owner_id={project.owner_id} input_type={project.input_type} pipeline={pipeline} "
+                f"source_version={source_version} work_dir={work_dir} output_spz={work_dir / 'preview.spz'} "
+                f"media={media_summary(project.media)} options={format_options(task.options or {})}",
+                flush=True,
+            )
             ensure_pipeline_weights(db, task, project, pipeline, started)
             input_dir = download_media(project, work_dir)
             update_task(db, task, project, "input_downloaded", 13, started, f"downloaded {len(project.media)} media files")
@@ -336,6 +363,11 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
                 )
                 input_dir = normalized.output_dir
                 input_metrics = normalized.metrics()
+                print(
+                    "[preview-worker] normalized image input "
+                    f"input_dir={input_dir} metrics={format_options(input_metrics)}",
+                    flush=True,
+                )
                 update_task(
                     db,
                     task,
@@ -365,10 +397,27 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
                 ),
             )
             update_task(db, task, project, stage_for_pipeline(pipeline), 20, started, f"running bundled preview adapter: {pipeline}")
+            print(
+                "[preview-worker] invoking preview adapter "
+                f"task_id={task.id} pipeline={pipeline} input_dir={input_dir} work_dir={work_dir}",
+                flush=True,
+            )
             result = run_preview_pipeline(ctx)
+            print(
+                "[preview-worker] adapter returned "
+                f"task_id={task.id} pipeline={pipeline} output_spz={output_spz} "
+                f"intermediate_ply={result.intermediate_ply} splat_count={result.splat_count} "
+                f"metrics={format_options(result.metrics)} source_commits={format_options(result.source_commits)}",
+                flush=True,
+            )
 
             if not output_spz.exists() or output_spz.stat().st_size <= 0:
                 raise PreviewFailure("ARTIFACT_NOT_FOUND", f"Algorithm finished but did not create non-empty SPZ: {output_spz}")
+            print(
+                "[preview-worker] validated preview output "
+                f"path={output_spz} bytes={output_spz.stat().st_size} sha256_pending=true",
+                flush=True,
+            )
 
             with SessionLocal() as upload_db:
                 task = upload_db.get(Task, task_id)
@@ -471,6 +520,11 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
                     **input_metrics,
                     **result.metrics,
                 }
+                print(
+                    "[preview-worker] final task metrics "
+                    f"task_id={task.id} metrics={format_options(task.metrics)}",
+                    flush=True,
+                )
                 task.logs = append_log(task.logs, f"uploaded {preview_file_name}")
                 if ply_artifact:
                     task.logs = append_log(task.logs, "uploaded original.ply")
@@ -525,6 +579,12 @@ def ensure_gpu_available() -> None:
 
 def ensure_pipeline_weights(db, task: Task, project: Project, pipeline: str, started: float) -> None:
     specs = weights_for_pipeline(pipeline)
+    print(
+        "[preview-worker] weight preflight "
+        f"pipeline={pipeline} count={len(specs)} auto_download={settings.model_auto_download} "
+        f"model_cache_dir={settings.model_cache_dir} specs={[spec.relative_path for spec in specs]}",
+        flush=True,
+    )
     if not specs:
         return
     if not settings.model_auto_download:
@@ -547,15 +607,46 @@ def download_media(project: Project, work_dir: Path) -> Path:
     input_dir = work_dir / "input"
     input_dir.mkdir(parents=True, exist_ok=True)
     media_items = list(project.media)
+    print(
+        "[worker] downloading project media "
+        f"project_id={project.id} count={len(media_items)} input_dir={input_dir}",
+        flush=True,
+    )
     for index, media in enumerate(media_items):
         suffix = Path(media.file_name).suffix or (".jpg" if media.kind == "image" else ".mp4")
         target = input_dir / f"{index:06d}-{media.id}{suffix}"
+        started = time.monotonic()
+        print(
+            "[worker] media download start "
+            f"index={index} media_id={media.id} kind={media.kind} file_name={media.file_name!r} "
+            f"object_uri={media.object_uri} target={target}",
+            flush=True,
+        )
         storage.download_to_path(media.object_uri, target)
+        print(
+            "[worker] media download complete "
+            f"index={index} media_id={media.id} target={target} bytes={target.stat().st_size if target.exists() else None} "
+            f"elapsed_seconds={round(time.monotonic() - started, 3)}",
+            flush=True,
+        )
     return input_dir
 
 
+def task_work_dir(task_id: str) -> Path:
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        if not task:
+            return settings.local_work_root / work_save_stem("unknown", "task", "unknown")
+        project = db.get(Project, task.project_id)
+        if not project:
+            return settings.local_work_root / work_save_stem("unknown", task.type, "unknown", task.created_at)
+        owner = db.get(User, project.owner_id)
+        username = owner.username if owner else project.owner_id
+        return settings.local_work_root / work_save_stem(username, task.type, project.input_type, task.created_at)
+
+
 def task_log_path(task_id: str) -> Path:
-    return settings.local_work_root / task_id / "task.log"
+    return task_work_dir(task_id) / "task.log"
 
 
 def task_log_file_name(task: Task) -> str:
@@ -664,10 +755,18 @@ def preview_artifact_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "lingbot_keyframes_only_points",
         "lingbot_predictions_dir",
         "lingbot_point_source",
+        "lingbot_point_source_frames",
+        "lingbot_point_skipped_frames",
         "lingbot_depth_reprojection_fallback",
         "lingbot_ply_format",
+        "lingbot_points_before_confidence_filter",
+        "lingbot_points_filtered_by_confidence",
+        "lingbot_points_after_confidence_filter",
         "lingbot_points_before_downsample",
+        "lingbot_points_after_voxel",
+        "lingbot_points_removed_by_voxel",
         "lingbot_points_after_downsample",
+        "lingbot_points_removed_by_limit",
         "lingbot_point_frame_count",
         "point_source",
         "point_count_raw",
@@ -681,6 +780,9 @@ def preview_artifact_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "intermediate_points_ply_size",
         "intermediate_splats_ply_size",
         "preview_meta_json_size",
+        "fixed_splat_base_point_radius",
+        "fixed_splat_point_radius_scale",
+        "fixed_splat_point_radius",
         "cuda_memory_peak_mb",
     )
     return {key: metrics.get(key) for key in keys if key in metrics}
@@ -692,6 +794,12 @@ def update_task(db, task: Task, project: Project, stage: str, progress: int, sta
     task.eta_seconds = estimate_eta(task, project, started)
     if logs:
         task.logs = append_log(task.logs, *logs)
+    print(
+        "[preview-worker] progress "
+        f"task_id={task.id} project_id={project.id} stage={stage} progress={task.progress} "
+        f"eta_seconds={task.eta_seconds} messages={list(logs)}",
+        flush=True,
+    )
     emit(db, project.id, "task_progress", task_payload(task), task.id)
     db.commit()
 
@@ -716,6 +824,12 @@ def progress_task(
 
 
 def fail_task(db, task: Task | None, project: Project | None, code: str, message: str) -> None:
+    print(
+        "[worker] failing task "
+        f"task_id={task.id if task else None} project_id={project.id if project else None} "
+        f"code={code} message={message}",
+        flush=True,
+    )
     if task:
         task.status = "failed"
         task.error_code = code
@@ -737,6 +851,22 @@ def append_log(existing: list[str] | None, *lines: str) -> list[str]:
         if line and (not logs or logs[-1] != line):
             logs.append(line)
     return logs[-TASK_LOG_LINE_LIMIT:]
+
+
+def media_summary(media_items) -> str:
+    counts: dict[str, int] = {}
+    parts = []
+    for item in media_items:
+        counts[item.kind] = counts.get(item.kind, 0) + 1
+        parts.append(f"{item.kind}:{item.file_name}:{item.file_size or 'unknown'}B:{item.id}")
+    return f"counts={counts} files=[{'; '.join(parts)}]"
+
+
+def format_options(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    except TypeError:
+        return str(value)
 
 
 def emit(db, project_id: str, event: str, payload: dict[str, Any], task_id: str | None = None) -> None:

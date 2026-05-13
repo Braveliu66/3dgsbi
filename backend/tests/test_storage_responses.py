@@ -57,6 +57,30 @@ class FakeRedis:
 
 
 class StorageResponseTests(unittest.TestCase):
+    def test_task_work_dir_uses_user_mode_type_time_without_changing_project_name(self) -> None:
+        fake_redis = FakeRedis()
+        with TestClient(app) as client, patch("app.main.get_redis", return_value=fake_redis):
+            from app.worker import task_work_dir
+
+            headers = auth_headers(client)
+            project_id = create_image_project(client, headers, "preview naming")
+            upload_response = client.post(
+                f"/api/projects/{project_id}/media",
+                files={"file": ("one.png", PNG_BYTES, "image/png")},
+                headers=headers,
+            )
+            upload_response.raise_for_status()
+
+            task_response = client.post(f"/api/projects/{project_id}/tasks/preview", json={"options": {}}, headers=headers)
+            task_response.raise_for_status()
+            task_id = task_response.json()["id"]
+
+            project_response = client.get(f"/api/projects/{project_id}", headers=headers)
+            project_response.raise_for_status()
+            self.assertEqual(project_response.json()["name"], "preview naming")
+            self.assertRegex(task_work_dir(task_id).name, r"^admin-preview-images-\d{20}$")
+            self.assertNotEqual(task_work_dir(task_id).name, task_id)
+
     def test_db_upload_can_be_previewed(self) -> None:
         with TestClient(app) as client:
             headers = auth_headers(client)

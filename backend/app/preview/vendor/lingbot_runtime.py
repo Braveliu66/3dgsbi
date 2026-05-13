@@ -49,6 +49,10 @@ DEFAULT_PREVIEW_OPACITY = 0.65
 SH_C0 = np.float32(0.28209479177387814)
 
 
+def _log(message: str) -> None:
+    print(f"[lingbot-preview] {message}", flush=True)
+
+
 @dataclass(frozen=True, slots=True)
 class LingBotInferenceProfile:
     image_size: int
@@ -71,6 +75,27 @@ class ExtractedLingBotFrames:
     sampled_fps: int
     width: int
     height: int
+
+
+@dataclass(frozen=True, slots=True)
+class ExtractedFramePoints:
+    points: np.ndarray
+    colors: np.ndarray
+    confidence: np.ndarray | None
+    point_source: str
+    raw_count: int
+    filtered_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class DownsampledPreviewPoints:
+    points: np.ndarray
+    colors: np.ndarray
+    confidence: np.ndarray | None
+    input_count: int
+    valid_count: int
+    voxel_count: int
+    final_count: int
 
 
 def run_lingbot_video_preview(
@@ -107,8 +132,23 @@ def run_lingbot_video_preview(
         raise PreviewFailure("LINGBOT_WEIGHT_MISSING", f"LingBot-Map weight not found: {model_path}")
 
     started = time.monotonic()
+    _log(
+        "runtime start "
+        f"video={video_path} model={model_path} fps={fps} max_frames={max_frames} image_size={image_size} "
+        f"mode={mode} keyframe_interval={keyframe_interval} camera_iterations={camera_iterations} "
+        f"num_scale_frames={num_scale_frames} window_size={window_size} overlap_keyframes={overlap_keyframes} "
+        f"frame_stride={frame_stride} pixel_stride={pixel_stride} conf_percentile={conf_percentile} "
+        f"min_conf={min_conf} max_points={max_points} save_predictions={save_predictions} "
+        f"compile={compile_model} keyframes_only_points={keyframes_only_points} "
+        f"allow_sdpa_fallback={allow_sdpa_fallback} min_inference_fps={min_inference_fps}"
+    )
     frames = extract_video_frames(video_path, work_dir / "lingbot_frames", fps=fps, max_frames=max_frames)
-    progress("lingbot_frames_ready", 28, f"sampled {frames.count} video frames for LingBot-Map")
+    frame_message = (
+        f"sampled {frames.count} LingBot frames from source_fps={frames.source_fps} "
+        f"target_fps={frames.sampled_fps} size={frames.width}x{frames.height}"
+    )
+    progress("lingbot_frames_ready", 28, frame_message)
+    _log(f"frames ready {frame_message}")
 
     try:
         import torch
@@ -167,6 +207,15 @@ def run_lingbot_video_preview(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         fallback_profile = make_lingbot_oom_fallback_profile(profile)
+        _log(
+            "CUDA OOM fallback "
+            f"from image_size={profile.image_size} max_frames={profile.max_frames} "
+            f"window_size={profile.window_size} num_scale_frames={profile.num_scale_frames} "
+            f"keyframe_interval={profile.keyframe_interval} "
+            f"to image_size={fallback_profile.image_size} max_frames={fallback_profile.max_frames} "
+            f"window_size={fallback_profile.window_size} num_scale_frames={fallback_profile.num_scale_frames} "
+            f"keyframe_interval={fallback_profile.keyframe_interval}"
+        )
         progress(
             "lingbot_inference_retry",
             46,
@@ -215,6 +264,13 @@ def run_lingbot_video_preview(
     attach_depth_world_points(
         pred_np,
         unproject_depth_map_to_point_map=unproject_depth_map_to_point_map,
+    )
+    _log(
+        "prediction keys "
+        f"depth={'depth' in pred_np} extrinsic={'extrinsic' in pred_np} intrinsic={'intrinsic' in pred_np} "
+        f"world_points_from_depth={'world_points_from_depth' in pred_np} "
+        f"depth_conf={'depth_conf' in pred_np} world_points={'world_points' in pred_np} "
+        f"images={'images' in pred_np}"
     )
     pred_np["is_keyframe"] = build_keyframe_mask(
         int(images.shape[0]),
@@ -302,6 +358,11 @@ def extract_video_frames(video_path: Path, output_dir: Path, *, fps: int, max_fr
     interval = max(1, int(round((source_fps or fps) / max(1, fps))))
     if total_frames > 0 and max_frames > 0:
         interval = max(interval, math.ceil(total_frames / max_frames))
+    _log(
+        "video decode "
+        f"path={video_path} source_fps={source_fps} total_frames={total_frames} "
+        f"target_fps={fps} max_frames={max_frames} sample_interval={interval}"
+    )
 
     written = 0
     frame_index = 0
@@ -328,6 +389,11 @@ def extract_video_frames(video_path: Path, output_dir: Path, *, fps: int, max_fr
 
     if written < 2:
         raise PreviewFailure("VIDEO_DECODE_FAILED", "Video did not yield enough readable frames")
+    _log(
+        "video sampled "
+        f"written_frames={written} decoded_frames={frame_index} size={width}x{height} "
+        f"source_fps={source_fps} target_fps={fps} sample_interval={interval}"
+    )
     return ExtractedLingBotFrames(output_dir, written, source_fps, fps, width, height)
 
 
@@ -347,7 +413,7 @@ def resolve_mode(value: str, frame_count: int) -> str:
     normalized = (value or "auto").strip().lower()
     if normalized in {"streaming", "windowed"}:
         return normalized
-    return "streaming" if frame_count <= 512 else "windowed"
+    return "streaming" if frame_count <= 320 else "windowed"
 
 
 def resolve_keyframe_interval(value: int | None, mode: str, frame_count: int) -> int:
@@ -435,6 +501,17 @@ def run_lingbot_inference_profile(
     frame_count = int(images.shape[0])
     resolved_mode = resolve_mode(profile.mode, frame_count)
     resolved_keyframe_interval = resolve_keyframe_interval(profile.keyframe_interval, resolved_mode, frame_count)
+    _log(
+        "resolved inference "
+        f"selected_frames={len(selected_frame_paths)} available_frames={len(frame_paths)} "
+        f"requested_max_frames={profile.max_frames} requested_mode={profile.mode} "
+        f"resolved_mode={resolved_mode} resolved_keyframe_interval={resolved_keyframe_interval} "
+        f"image_size={profile.image_size} camera_iterations={profile.camera_iterations} "
+        f"num_scale_frames={profile.num_scale_frames} window_size={profile.window_size} "
+        f"overlap_keyframes={profile.overlap_keyframes} kv_cache_sliding_window={profile.kv_cache_sliding_window} "
+        f"compile_requested={compile_requested} use_sdpa={use_sdpa} flashinfer_available={flashinfer_found} "
+        f"allow_sdpa_fallback={allow_sdpa_fallback} dtype={dtype} oom_fallback={profile.oom_fallback}"
+    )
     model = load_lingbot_model(
         model_path,
         device,
@@ -547,6 +624,13 @@ def run_lingbot_inference_profile(
         "lingbot_inference_fps": round(inference_fps, 3),
         "cuda_memory_peak_mb": round(peak_mb, 2),
     }
+    _log(
+        "inference metrics "
+        f"seconds={metrics['lingbot_inference_seconds']} fps={metrics['lingbot_inference_fps']} "
+        f"peak_mb={metrics['cuda_memory_peak_mb']} model_image_size={metrics['lingbot_model_image_size']} "
+        f"dtype={metrics['lingbot_aggregator_dtype']} compile={metrics['lingbot_compile']} "
+        f"compile_fallback={metrics['lingbot_compile_fallback']} oom_fallback={metrics['lingbot_oom_fallback']}"
+    )
     return predictions, images, metrics
 
 
@@ -957,20 +1041,26 @@ def write_spark_plain_ply_from_arrays(
     color_batches = []
     conf_batches = []
     point_source = None
+    raw_point_count = 0
+    filtered_point_count = 0
+    skipped_frame_count = 0
     for frame_index, frame in iter_prediction_frames(predictions, frame_indices):
         if not should_export_prediction_frame(frame, keyframes_only_points=keyframes_only_points):
+            skipped_frame_count += 1
             continue
-        points, colors, conf, source = extract_frame_points(
+        batch = extract_frame_points_for_export(
             frame,
             pixel_stride=pixel_stride,
             conf_percentile=conf_percentile,
             min_conf=min_conf,
             source_name=f"in-memory frame {frame_index}",
         )
-        point_batches.append(points)
-        color_batches.append(colors)
-        conf_batches.append(conf)
-        point_source = point_source or source
+        raw_point_count += batch.raw_count
+        filtered_point_count += batch.filtered_count
+        point_batches.append(batch.points)
+        color_batches.append(batch.colors)
+        conf_batches.append(batch.confidence)
+        point_source = point_source or batch.point_source
         selected_indices.append(frame_index)
 
     return write_lingbot_preview_assets(
@@ -984,6 +1074,10 @@ def write_spark_plain_ply_from_arrays(
         empty_selection_message="No LingBot-Map frames selected for point export",
         output_points_ply=output_points_ply,
         output_meta_json=output_meta_json,
+        source_frame_count=len(frame_indices),
+        skipped_frame_count=skipped_frame_count,
+        raw_point_count=raw_point_count,
+        confidence_filtered_point_count=max(0, raw_point_count - filtered_point_count),
     )
 
 
@@ -1010,21 +1104,27 @@ def write_spark_plain_ply_from_npz(
     color_batches = []
     conf_batches = []
     point_source = None
+    raw_point_count = 0
+    filtered_point_count = 0
+    skipped_frame_count = 0
     for path in files:
         with np.load(path, allow_pickle=False) as data:
             if not should_export_prediction_frame(data, keyframes_only_points=keyframes_only_points):
+                skipped_frame_count += 1
                 continue
-            points, colors, conf, source = extract_frame_points(
+            batch = extract_frame_points_for_export(
                 data,
                 pixel_stride=pixel_stride,
                 conf_percentile=conf_percentile,
                 min_conf=min_conf,
                 source_name=str(path),
             )
-        point_batches.append(points)
-        color_batches.append(colors)
-        conf_batches.append(conf)
-        point_source = point_source or source
+        raw_point_count += batch.raw_count
+        filtered_point_count += batch.filtered_count
+        point_batches.append(batch.points)
+        color_batches.append(batch.colors)
+        conf_batches.append(batch.confidence)
+        point_source = point_source or batch.point_source
         selected_files.append(path)
 
     return write_lingbot_preview_assets(
@@ -1038,6 +1138,10 @@ def write_spark_plain_ply_from_npz(
         empty_selection_message=f"No frame_*.npz selected in {predictions_dir}",
         output_points_ply=output_points_ply,
         output_meta_json=output_meta_json,
+        source_frame_count=len(files),
+        skipped_frame_count=skipped_frame_count,
+        raw_point_count=raw_point_count,
+        confidence_filtered_point_count=max(0, raw_point_count - filtered_point_count),
     )
 
 
@@ -1053,6 +1157,10 @@ def write_lingbot_preview_assets(
     empty_selection_message: str,
     output_points_ply: Path | None = None,
     output_meta_json: Path | None = None,
+    source_frame_count: int | None = None,
+    skipped_frame_count: int = 0,
+    raw_point_count: int | None = None,
+    confidence_filtered_point_count: int = 0,
 ) -> dict[str, Any]:
     if frame_count <= 0:
         raise PreviewFailure("LINGBOT_PREDICTIONS_MISSING", empty_selection_message)
@@ -1066,7 +1174,10 @@ def write_lingbot_preview_assets(
     if total_points <= 0:
         raise PreviewFailure("LINGBOT_EMPTY_POINT_CLOUD", "LingBot-Map produced no valid 3D points")
 
-    points, colors, conf = downsample_preview_points(points, colors, conf, max_points=max_points)
+    downsampled = downsample_preview_points(points, colors, conf, max_points=max_points)
+    points = downsampled.points
+    colors = downsampled.colors
+    conf = downsampled.confidence
     point_radius = fixed_preview_radius(points)
     bbox = preview_bounds(points)
 
@@ -1076,7 +1187,7 @@ def write_lingbot_preview_assets(
         write_preview_meta_json(
             output_meta_json,
             point_source=point_source,
-            point_count_raw=total_points,
+            point_count_raw=raw_point_count if raw_point_count is not None else total_points,
             point_count_exported=points_count,
             bbox=bbox,
         )
@@ -1086,16 +1197,37 @@ def write_lingbot_preview_assets(
         if point_source != "world_points_from_depth"
         else None
     )
+    _log(
+        "export metrics "
+        f"source={point_source} depth_fallback={point_source != 'world_points_from_depth'} "
+        f"source_frames={source_frame_count if source_frame_count is not None else frame_count} "
+        f"used_frames={frame_count} skipped_frames={skipped_frame_count} "
+        f"raw_points={raw_point_count if raw_point_count is not None else total_points} "
+        f"confidence_filtered={confidence_filtered_point_count} after_confidence={total_points} "
+        f"finite_points={downsampled.valid_count} after_voxel={downsampled.voxel_count} "
+        f"removed_by_voxel={max(0, downsampled.valid_count - downsampled.voxel_count)} "
+        f"exported={points_count} removed_by_limit={max(0, downsampled.voxel_count - downsampled.final_count)} "
+        f"bbox_min={bbox['bbox_min']} bbox_max={bbox['bbox_max']} bbox_center={bbox['center']} "
+        f"bbox_radius={bbox['radius']} point_radius={point_radius} warning={quality_warning}"
+    )
     return {
         "point_count": int(points_count),
-        "point_count_raw": int(total_points),
+        "point_count_raw": int(raw_point_count if raw_point_count is not None else total_points),
         "point_count_exported": int(points_count),
         "lingbot_point_source": point_source,
         "lingbot_depth_reprojection_fallback": bool(point_source != "world_points_from_depth"),
         "lingbot_ply_format": "point_cloud",
-        "lingbot_points_before_downsample": int(total_points),
-        "lingbot_points_after_downsample": int(points_count),
+        "lingbot_point_source_frames": int(source_frame_count if source_frame_count is not None else frame_count),
         "lingbot_point_frame_count": int(frame_count),
+        "lingbot_point_skipped_frames": int(skipped_frame_count),
+        "lingbot_points_before_confidence_filter": int(raw_point_count if raw_point_count is not None else total_points),
+        "lingbot_points_filtered_by_confidence": int(confidence_filtered_point_count),
+        "lingbot_points_after_confidence_filter": int(total_points),
+        "lingbot_points_before_downsample": int(downsampled.valid_count),
+        "lingbot_points_after_voxel": int(downsampled.voxel_count),
+        "lingbot_points_removed_by_voxel": int(max(0, downsampled.valid_count - downsampled.voxel_count)),
+        "lingbot_points_after_downsample": int(points_count),
+        "lingbot_points_removed_by_limit": int(max(0, downsampled.voxel_count - downsampled.final_count)),
         "lingbot_preview_point_radius": float(point_radius),
         "bbox_min": bbox["bbox_min"],
         "bbox_max": bbox["bbox_max"],
@@ -1231,7 +1363,8 @@ def downsample_preview_points(
     conf: np.ndarray | None,
     *,
     max_points: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+) -> DownsampledPreviewPoints:
+    input_count = int(points.shape[0])
     mask = np.isfinite(points).all(axis=1)
     if conf is not None:
         mask &= np.isfinite(conf)
@@ -1241,18 +1374,27 @@ def downsample_preview_points(
     if points.shape[0] == 0:
         raise PreviewFailure("LINGBOT_EMPTY_POINT_CLOUD", "LingBot-Map produced no valid 3D points")
 
-    limit = int(max_points)
-    if limit <= 0 or points.shape[0] <= limit:
-        return points, colors, conf
-
+    valid_count = int(points.shape[0])
     bbox = preview_bounds(points)
     voxel_size = max(float(bbox["radius"]) * 2.0 / 800.0, 1e-5)
     points, colors, conf = voxel_downsample(points, colors, conf, voxel_size)
-    if points.shape[0] <= limit:
-        return points, colors, conf
+    voxel_count = int(points.shape[0])
 
-    keep = np.linspace(0, points.shape[0] - 1, limit, dtype=np.int64)
-    return points[keep], colors[keep], None if conf is None else conf[keep]
+    limit = int(max_points)
+    if limit > 0 and points.shape[0] > limit:
+        keep = np.linspace(0, points.shape[0] - 1, limit, dtype=np.int64)
+        points = points[keep]
+        colors = colors[keep]
+        conf = None if conf is None else conf[keep]
+    return DownsampledPreviewPoints(
+        points=points,
+        colors=colors,
+        confidence=conf,
+        input_count=input_count,
+        valid_count=valid_count,
+        voxel_count=voxel_count,
+        final_count=int(points.shape[0]),
+    )
 
 
 def voxel_downsample(
@@ -1264,9 +1406,22 @@ def voxel_downsample(
     if points.shape[0] == 0:
         return points, colors, conf
     keys = np.floor(points / max(float(voxel_size), 1e-6)).astype(np.int64)
-    _, unique_idx = np.unique(keys, axis=0, return_index=True)
+    if conf is None:
+        _, unique_idx = np.unique(keys, axis=0, return_index=True)
+        unique_idx = np.sort(unique_idx)
+        return points[unique_idx], colors[unique_idx], None
+
+    _, inverse = np.unique(keys, axis=0, return_inverse=True)
+    best_idx = np.full(int(inverse.max()) + 1, -1, dtype=np.int64)
+    best_conf = np.full(best_idx.shape[0], -np.inf, dtype=np.float32)
+    for index, voxel_index in enumerate(inverse):
+        confidence = float(conf[index])
+        if confidence > best_conf[voxel_index]:
+            best_conf[voxel_index] = confidence
+            best_idx[voxel_index] = index
+    unique_idx = best_idx[best_idx >= 0]
     unique_idx = np.sort(unique_idx)
-    return points[unique_idx], colors[unique_idx], None if conf is None else conf[unique_idx]
+    return points[unique_idx], colors[unique_idx], conf[unique_idx]
 
 
 def estimate_preview_scale(points: np.ndarray) -> float:
@@ -1419,6 +1574,24 @@ def extract_frame_points(
     min_conf: float,
     source_name: str,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, str]:
+    batch = extract_frame_points_for_export(
+        data,
+        pixel_stride=pixel_stride,
+        conf_percentile=conf_percentile,
+        min_conf=min_conf,
+        source_name=source_name,
+    )
+    return batch.points, batch.colors, batch.confidence, batch.point_source
+
+
+def extract_frame_points_for_export(
+    data: Any,
+    *,
+    pixel_stride: int,
+    conf_percentile: float,
+    min_conf: float,
+    source_name: str,
+) -> ExtractedFramePoints:
     keys = tuple(data.files if hasattr(data, "files") else data.keys())
     try:
         point_key, points_grid, confidence_grid = select_lingbot_points(data)
@@ -1433,6 +1606,7 @@ def extract_frame_points(
     if points_grid.ndim != 3 or points_grid.shape[-1] != 3:
         raise PreviewFailure("LINGBOT_POINT_FIELD_INVALID", f"{source_name}: {point_key} shape {points_grid.shape}")
     points = points_grid[::stride, ::stride, :].reshape(-1, 3)
+    raw_count = int(points.shape[0])
 
     colors = None
     color_key = pick_key(keys, COLOR_KEYS)
@@ -1463,7 +1637,15 @@ def extract_frame_points(
     filtered_conf = None
     if confidence is not None and confidence.shape[0] == points.shape[0]:
         filtered_conf = confidence[mask].astype(np.float32, copy=False)
-    return points[mask].astype("<f4", copy=False), colors[mask].astype(np.uint8, copy=False), filtered_conf, point_key
+    filtered_points = points[mask].astype("<f4", copy=False)
+    return ExtractedFramePoints(
+        points=filtered_points,
+        colors=colors[mask].astype(np.uint8, copy=False),
+        confidence=filtered_conf,
+        point_source=point_key,
+        raw_count=raw_count,
+        filtered_count=int(filtered_points.shape[0]),
+    )
 
 
 def select_lingbot_points(predictions: Any) -> tuple[str, np.ndarray, np.ndarray | None]:

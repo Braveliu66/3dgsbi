@@ -119,10 +119,18 @@ def train_mobile_3dgs(
         if not cameras:
             raise FineFailure("FINE_CAMERA_LOAD_FAILED", "3DGS scene contains no train cameras")
         blur_registry = blur_registry or {}
-        blurred_train_cameras = sum(1 for camera in cameras if is_blurred_view(camera, blur_registry))
-        clear_train_cameras = max(0, len(cameras) - blurred_train_cameras)
-        deblur_options = options if blurred_train_cameras > 0 else {**options, "fine_deblur_enabled": "false"}
-        deblur_state = build_deblur_mlp_state(blur_mode if blurred_train_cameras > 0 else "sharp", deblur_options, device=background.device)
+        force_deblur = read_bool(options.get("fine_deblur_enabled"), False)
+        if force_deblur:
+            blurred_train_cameras = len(cameras)
+            clear_train_cameras = 0
+            deblur_options = options
+            deblur_mode = blur_mode if blur_mode != "sharp" else str(options.get("fine_deblur_mode") or "motion")
+        else:
+            blurred_train_cameras = sum(1 for camera in cameras if is_blurred_view(camera, blur_registry))
+            clear_train_cameras = max(0, len(cameras) - blurred_train_cameras)
+            deblur_options = options if blurred_train_cameras > 0 else {**options, "fine_deblur_enabled": "false"}
+            deblur_mode = blur_mode if blurred_train_cameras > 0 else "sharp"
+        deblur_state = build_deblur_mlp_state(deblur_mode, deblur_options, device=background.device)
         attach_deblur_mlp_optimizer(gaussians, deblur_state)
         deblur_warmup_iters = resolve_deblur_warmup(iterations, options, deblur_state.enabled)
         deblur_xyz_lr_scale = read_float(options.get("fine_deblur_xyz_lr_scale"), 0.1, minimum=0.001, maximum=1.0)
@@ -137,7 +145,7 @@ def train_mobile_3dgs(
             45,
             (
                 "[mobilegs] DeblurMLP setup: "
-                f"enabled={deblur_state.enabled}, mode={blur_mode}, warmup_iters={deblur_warmup_iters}, "
+                f"enabled={deblur_state.enabled}, mode={deblur_mode}, warmup_iters={deblur_warmup_iters}, "
                 f"xyz_lr_scale={deblur_xyz_lr_scale}, blurred_train_cameras={blurred_train_cameras}, "
                 f"clear_train_cameras={clear_train_cameras}"
             ),
@@ -177,8 +185,13 @@ def train_mobile_3dgs(
         def topology_render(viewpoint, model, pipeline, bg, **render_options):
             return normalize_render_pkg(render_gaussians(viewpoint, model, pipeline, bg, **render_options), int(model.get_xyz.shape[0]))
 
+        def should_deblur_view(viewpoint) -> bool:
+            if force_deblur:
+                return True
+            return is_blurred_view(viewpoint, blur_registry)
+
         def photometric_render(viewpoint, model, pipeline, bg, *, use_deblur: bool = True, **render_options):
-            if deblur_state.enabled and use_deblur and is_blurred_view(viewpoint, blur_registry):
+            if deblur_state.enabled and use_deblur and should_deblur_view(viewpoint):
                 return normalize_render_pkg(render_with_deblur_mlp(viewpoint, model, pipeline, bg, deblur_state), int(model.get_xyz.shape[0]))
             return topology_render(viewpoint, model, pipeline, bg, **render_options)
 
@@ -263,7 +276,7 @@ def train_mobile_3dgs(
             viewpoint = train_stack.pop(random.randrange(len(train_stack)))
             gt_image = viewpoint.original_image.to("cuda")
 
-            deblur_view_active = bool(deblur_active and is_blurred_view(viewpoint, blur_registry))
+            deblur_view_active = bool(deblur_active and should_deblur_view(viewpoint))
             render_pkg = photometric_render(viewpoint, gaussians, pipe, background, use_deblur=deblur_active)
             image = render_pkg["render"]
             l1_value = l1_loss(image, gt_image)
@@ -330,7 +343,7 @@ def train_mobile_3dgs(
                             min(84, 42 + int(iteration / max(1, iterations) * 42)),
                             f"[mobilegs] opacity reset at iteration {iteration}, gaussians={gaussian_count(gaussians)}",
                         )
-                elif iteration > 15_000 and iteration < iterations and iteration % 3000 == 0:
+                elif policy.late_prune_enabled and iteration > 15_000 and iteration < iterations and iteration % 3000 == 0:
                     policy.update_multiview_scores(
                         cameras=cameras,
                         gaussians=gaussians,
@@ -340,7 +353,7 @@ def train_mobile_3dgs(
                         metric_render_fn=topology_render,
                         ssim_fn=ssim,
                     )
-                    policy.apply_final_prune(gaussians)
+                    policy.apply_final_prune(gaussians, min_opacity=policy.final_prune_min_opacity)
                     policy.observe_gaussian_count(gaussians)
                     progress(
                         "fine_fastgs_final_prune",
@@ -372,7 +385,7 @@ def train_mobile_3dgs(
                 metric_render_fn=topology_render,
                 ssim_fn=ssim,
             )
-            policy.apply_final_prune(gaussians)
+            policy.apply_final_prune(gaussians, min_opacity=policy.final_prune_min_opacity)
             policy.observe_gaussian_count(gaussians)
         progress("fine_gaussian_save", 86, f"[mobilegs] saving Gaussian scene at iteration {iterations}, gaussians={gaussian_count(gaussians)}")
 
@@ -390,12 +403,13 @@ def train_mobile_3dgs(
                 f"ema_loss={ema_loss:.5f}, last_l1={last_l1:.5f}, last_ssim_loss={last_ssim:.5f}"
             ),
         )
+        scene_backend = str(options.get("_fine_scene_backend") or "unknown")
         return MobileGSTrainResult(
             ply_path=ply_path,
             iterations=iterations,
             point_count=int(gaussians.get_xyz.shape[0]),
             metrics={
-                "training_backend": "litevggt_initialized_local_3dgs_fastgs_deblur" if deblur_state.enabled else "litevggt_initialized_local_3dgs_fastgs",
+                "training_backend": f"{scene_backend}_initialized_local_3dgs_fastgs_deblur" if deblur_state.enabled else f"{scene_backend}_initialized_local_3dgs_fastgs",
                 "local_3dgs_root": str(runtime.root),
                 "raster_backend": "diff_gaussian_rasterization_fastgs",
                 "target_raster_backend": "diff_gaussian_rasterization_fastgs",
@@ -405,7 +419,7 @@ def train_mobile_3dgs(
                 "last_l1_loss": last_l1,
                 "last_ssim_loss": last_ssim,
                 "ema_loss": ema_loss,
-                "deblur_mode": blur_mode,
+                "deblur_mode": deblur_mode,
                 "deblur_warmup_iters": deblur_warmup_iters,
                 "deblur_xyz_lr_scale": deblur_xyz_lr_scale,
                 "deblur_activated_after_warmup": deblur_activated,

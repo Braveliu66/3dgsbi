@@ -35,6 +35,13 @@ SOURCE_COMMITS_FINE = {
 def run_fine_pipeline(ctx: FineContext) -> FineResult:
     settings = get_settings()
     pipeline = normalize_fine_pipeline(ctx.pipeline)
+    print(
+        "[fine-runner] start "
+        f"task_id={ctx.task_id} project_id={ctx.project_id} requested_pipeline={ctx.pipeline} "
+        f"normalized_pipeline={pipeline} input_dir={ctx.input_dir} work_dir={ctx.work_dir} "
+        f"source_version={ctx.source_version} options={_format_for_log(ctx.options)}",
+        flush=True,
+    )
     if pipeline != PIPELINE_NAME:
         raise FineFailure("UNSUPPORTED_FINE_PIPELINE", f"Unsupported fine pipeline: {ctx.pipeline}")
     if read_bool(ctx.options.get("fine_edgs_enabled"), False):
@@ -42,6 +49,11 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
     assert_runtime_ready()
 
     image_count = len(image_files(ctx.input_dir))
+    print(
+        "[fine-runner] input summary "
+        f"input_dir={ctx.input_dir} image_count={image_count} first_images={_first_image_names(ctx.input_dir)}",
+        flush=True,
+    )
     if image_count < 8:
         raise FineFailure("INSUFFICIENT_IMAGES", "LiteVGGT fine reconstruction requires at least 8 images")
 
@@ -53,19 +65,43 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
     colmap_threads = read_int(ctx.options.get("fine_colmap_threads"), 8, minimum=1, maximum=32)
 
     ctx_progress(ctx, "fine_blur_analysis", 20, "analyzing image sharpness and filtering lowest quality frames")
+    print(
+        "[fine-runner] blur analysis start "
+        f"reject_ratio={reject_ratio} min_images=3 input_dir={ctx.input_dir}",
+        flush=True,
+    )
     train_input_dir, blur = prepare_mobile_images(
         ctx.input_dir,
         ctx.work_dir / "fine_input",
         reject_ratio=reject_ratio,
         min_images=3,
     )
+    print(
+        "[fine-runner] blur analysis complete "
+        f"train_input_dir={train_input_dir} blur_metrics={_format_for_log(blur.metrics())}",
+        flush=True,
+    )
     blur_mode = str(ctx.options.get("fine_blur_mode") or blur.mode)
     lm_default = iterations
     lm_start_iter = read_int(explicit_lm_start_iter, lm_default, minimum=1, maximum=iterations)
+    print(
+        "[fine-runner] resolved training params "
+        f"iterations={iterations} lm_start_iter={lm_start_iter} blur_mode={blur_mode} "
+        f"sfm_backend={ctx.options.get('fine_sfm_backend') or 'pycolmap'} colmap_features={colmap_features} "
+        f"colmap_max_size={colmap_max_size} colmap_threads={colmap_threads}",
+        flush=True,
+    )
 
     scene_dir = ctx.work_dir / "fine_scene"
     output_dir = ctx.work_dir / "fine_mobilegs"
     scene_result = build_scene(ctx, train_input_dir, scene_dir, colmap_features, colmap_max_size, colmap_threads)
+    print(
+        "[fine-runner] scene build complete "
+        f"backend={scene_result.backend} scene_dir={scene_result.scene_dir} "
+        f"image_count={scene_result.image_count} registered_images={scene_result.registered_images} "
+        f"point_count={scene_result.point_count} metrics={_format_for_log(scene_result.metrics)}",
+        flush=True,
+    )
     if scene_result.backend == "pycolmap":
         scene_result.metrics.update(assess_sfm_scene_quality(scene_result.scene_dir, prefix="pycolmap").metrics)
     if scene_result.backend == "litevggt":
@@ -80,7 +116,13 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
 
     ctx_progress(ctx, "fine_gaussian_train_start", 42, f"training Gaussian model with {scene_result.backend} initialization")
     from app.fine.mobilegs_trainer import train_mobile_3dgs
-    train_options = {**ctx.options}
+    train_options = {**ctx.options, "_fine_scene_backend": scene_result.backend}
+    print(
+        "[fine-runner] gaussian training start "
+        f"scene_dir={scene_result.scene_dir} output_dir={output_dir} iterations={iterations} "
+        f"lm_start_iter={lm_start_iter} blur_mode={blur_mode} train_options={_format_for_log(train_options)}",
+        flush=True,
+    )
 
     train_result = train_mobile_3dgs(
         scene_dir=scene_result.scene_dir,
@@ -92,6 +134,11 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         options=train_options,
         progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
     )
+    print(
+        "[fine-runner] gaussian training complete "
+        f"ply_path={train_result.ply_path} metrics={_format_for_log(train_result.metrics)}",
+        flush=True,
+    )
 
     ply_path = Path(train_result.ply_path)
     if not ply_path.exists() or ply_path.stat().st_size <= 0:
@@ -99,12 +146,24 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
 
     ctx.final_ply.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(ply_path, ctx.final_ply)
+    print(
+        "[fine-runner] copied final ply "
+        f"source={ply_path} target={ctx.final_ply} bytes={ctx.final_ply.stat().st_size}",
+        flush=True,
+    )
 
     ctx_progress(ctx, "final_spz_converting", 88, "converting final.ply to Spark-readable final_web.spz")
     try:
         splat_count = convert_ply_to_spz(ctx.final_ply, ctx.final_spz)
     except PreviewFailure as exc:
         raise FineFailure(exc.code, exc.message) from exc
+    print(
+        "[fine-runner] final SPZ conversion complete "
+        f"final_ply={ctx.final_ply} final_ply_bytes={ctx.final_ply.stat().st_size} "
+        f"final_spz={ctx.final_spz} final_spz_bytes={ctx.final_spz.stat().st_size if ctx.final_spz.exists() else None} "
+        f"splat_count={splat_count}",
+        flush=True,
+    )
 
     warnings = []
     lod_rad = build_lod_rad_if_available(ctx)
@@ -131,6 +190,11 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
     }
     ctx.metrics_json.parent.mkdir(parents=True, exist_ok=True)
     ctx.metrics_json.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(
+        "[fine-runner] metrics json written "
+        f"path={ctx.metrics_json} bytes={ctx.metrics_json.stat().st_size} metrics={_format_for_log(metrics)}",
+        flush=True,
+    )
     ctx_progress(ctx, "fine_outputs_ready", 90, "validated final.ply and final_web.spz", metrics)
     return FineResult(
         final_ply=ctx.final_ply,
@@ -151,7 +215,13 @@ def build_scene(
     colmap_max_size: int,
     colmap_threads: int,
 ):
-    sfm_backend = str(ctx.options.get("fine_sfm_backend") or "litevggt").strip().lower()
+    sfm_backend = str(ctx.options.get("fine_sfm_backend") or "pycolmap").strip().lower()
+    print(
+        "[fine-runner] scene build start "
+        f"requested_sfm_backend={sfm_backend} input_dir={input_dir} scene_dir={scene_dir} "
+        f"colmap_features={colmap_features} colmap_max_size={colmap_max_size} colmap_threads={colmap_threads}",
+        flush=True,
+    )
     if sfm_backend not in {"litevggt", "pycolmap", "colmap"}:
         raise FineFailure("UNSUPPORTED_FINE_SFM_BACKEND", f"Unsupported fine SfM backend: {sfm_backend}")
     if sfm_backend == "litevggt":
@@ -163,15 +233,41 @@ def build_scene(
             progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
         )
 
-    result = build_pycolmap_scene(
-        input_dir,
-        scene_dir,
-        max_num_features=colmap_features,
-        max_image_size=colmap_max_size,
-        min_model_size=max(3, min(10, len(image_files(input_dir)))),
-        num_threads=colmap_threads,
-        progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
-    )
+    try:
+        result = build_pycolmap_scene(
+            input_dir,
+            scene_dir,
+            max_num_features=colmap_features,
+            max_image_size=colmap_max_size,
+            min_model_size=max(3, min(10, len(image_files(input_dir)))),
+            num_threads=colmap_threads,
+            progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
+        )
+    except FineFailure as exc:
+        print(
+            "[fine-runner] pycolmap scene build failed "
+            f"code={exc.code} message={exc.message} allow_litevggt_fallback={read_bool(ctx.options.get('fine_allow_litevggt_fallback'), True)}",
+            flush=True,
+        )
+        if not read_bool(ctx.options.get("fine_allow_litevggt_fallback"), True):
+            raise
+        ctx_progress(
+            ctx,
+            "fine_sfm_fallback",
+            34,
+            f"pycolmap scene build failed ({exc.code}); falling back to LiteVGGT initialization",
+        )
+        result = build_litevggt_scene(
+            input_dir,
+            scene_dir,
+            model_cache_dir=ctx.model_cache_dir,
+            options=ctx.options,
+            progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
+        )
+        result.metrics["sfm_backend_requested"] = sfm_backend
+        result.metrics["sfm_fallback_reason"] = exc.code
+        result.metrics["sfm_fallback_message"] = exc.message
+        return result
     if sfm_backend == "colmap":
         result.metrics["sfm_backend_requested_alias"] = "colmap_maps_to_pycolmap"
     return result
@@ -199,16 +295,25 @@ def normalize_fine_pipeline(value: str | None) -> str:
 
 
 def assert_runtime_ready() -> None:
+    print("[fine-runner] checking CUDA and fine reconstruction modules", flush=True)
     try:
         import torch
     except Exception as exc:
         raise FineFailure("TORCH_UNAVAILABLE", f"PyTorch import failed: {exc}") from exc
     if not torch.cuda.is_available():
         raise FineFailure("GPU_RESOURCE_UNAVAILABLE", "CUDA GPU is required for fine reconstruction")
+    print(
+        "[fine-runner] torch CUDA ready "
+        f"torch_version={getattr(torch, '__version__', 'unknown')} cuda_version={getattr(torch.version, 'cuda', None)} "
+        f"device_count={torch.cuda.device_count()} current_device={torch.cuda.current_device() if torch.cuda.device_count() else None} "
+        f"device_name={torch.cuda.get_device_name(0) if torch.cuda.device_count() else None}",
+        flush=True,
+    )
     missing = []
     for module_name in ("diff_gaussian_rasterization", "diff_gaussian_rasterization_fastgs", "simple_knn", "fused_ssim"):
         try:
             __import__(module_name)
+            print(f"[fine-runner] module import ok module={module_name}", flush=True)
         except Exception as exc:
             missing.append(f"{module_name}: {exc}")
     if missing:
@@ -226,7 +331,7 @@ def deblur_mlp_enabled_by_default(blur_mode: str, options: dict[str, Any]) -> bo
     if value in {"0", "false", "no", "off"}:
         return False
     if value in {"1", "true", "yes", "on"}:
-        return blur_mode != "sharp"
+        return True
     return blur_mode in {"motion", "defocus", "mixed"}
 
 
@@ -259,3 +364,17 @@ def build_lod_rad_if_available(ctx: FineContext) -> Path | None:
 def ctx_progress(ctx: FineContext, stage: str, progress: int, message: str | None = None, metrics: dict[str, Any] | None = None) -> None:
     if ctx.progress:
         ctx.progress(stage, progress, message, metrics)
+
+
+def _first_image_names(input_dir: Path, limit: int = 8) -> str:
+    files = image_files(input_dir)
+    names = [path.name for path in files[:limit]]
+    suffix = "" if len(files) <= limit else f", ... +{len(files) - limit}"
+    return "[" + ", ".join(names) + suffix + "]"
+
+
+def _format_for_log(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    except TypeError:
+        return str(value)

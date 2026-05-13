@@ -71,7 +71,7 @@ def render_gaussians(
     )
     image, radii, depth, accum_metric_counts = _unpack(output, fastgs_get_flag=fastgs_get_flag)
     result = {
-        "render": image.clamp(0.0, 1.0),
+        "render": image,
         "viewspace_points": screen,
         "visibility_filter": radii > 0,
         "radii": radii,

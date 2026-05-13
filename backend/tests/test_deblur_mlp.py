@@ -57,8 +57,8 @@ class DeblurMLPTests(unittest.TestCase):
         self.assertEqual(tuple(scale_delta.shape), (4, 12))
         self.assertEqual(tuple(rotation_delta.shape), (4, 16))
         self.assertEqual(tuple(position_delta.shape), (4, 9))
-        self.assertTrue(bool(torch.all(scale_delta >= 0.9)))
-        self.assertTrue(bool(torch.all(rotation_delta >= 0.9)))
+        self.assertTrue(bool(torch.all(scale_delta >= 1.0)))
+        self.assertTrue(bool(torch.all(rotation_delta >= 1.0)))
         self.assertTrue(bool(torch.all(torch.abs(position_delta) <= state.config.max_position_delta + 1e-6)))
 
     def test_defocus_state_disables_position_moments(self) -> None:
@@ -67,7 +67,7 @@ class DeblurMLPTests(unittest.TestCase):
         self.assertTrue(state.enabled)
         self.assertFalse(state.config.use_position)
         self.assertEqual(state.metrics()["deblur_algorithm"], "Deblurring-3DGS_GTnet")
-        self.assertEqual(state.metrics()["deblur_mlp_min_clamp"], 0.9)
+        self.assertEqual(state.metrics()["deblur_mlp_min_clamp"], 1.0)
         self.assertIn("deblur_mlp_max_position_delta", state.metrics())
         self.assertIn("deblur_mlp_transform_reg_weight", state.metrics())
 

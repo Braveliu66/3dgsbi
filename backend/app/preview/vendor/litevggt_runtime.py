@@ -50,6 +50,10 @@ class LiteVGGTWindowResult:
     point_count_after_filter: int
 
 
+class LiteVGGTWindowFrameMismatch(RuntimeError):
+    pass
+
+
 def build_litevggt_windows(frame_count: int, window_size: int, overlap: int) -> list[tuple[int, int]]:
     frame_count = int(frame_count)
     window_size = max(8, int(window_size))
@@ -88,9 +92,50 @@ def resolve_litevggt_window_attempts(initial_window_size: int, oom_window_sizes:
     attempts: list[int] = []
     for value in [initial_window_size, *oom_window_sizes]:
         window_size = max(8, int(value))
+        window_size = max(8, (window_size // 8) * 8)
         if window_size not in attempts:
             attempts.append(window_size)
     return attempts
+
+
+def _first_dim(array: np.ndarray) -> int | None:
+    shape = getattr(array, "shape", ())
+    if len(shape) == 0:
+        return None
+    return int(shape[0])
+
+
+def _validate_litevggt_window_frame_counts(
+    *,
+    start: int,
+    end: int,
+    fields: dict[str, np.ndarray],
+) -> None:
+    expected = int(end) - int(start)
+    mismatches = []
+    for name, value in fields.items():
+        actual = _first_dim(value)
+        if actual != expected:
+            mismatches.append(f"{name}={actual}")
+
+    if mismatches:
+        detail = ", ".join(mismatches)
+        raise LiteVGGTWindowFrameMismatch(
+            f"LiteVGGT window frames {start + 1}-{end} expected {expected} frames, got {detail}"
+        )
+
+
+def _validate_litevggt_window_result(result: LiteVGGTWindowResult) -> None:
+    _validate_litevggt_window_frame_counts(
+        start=result.start,
+        end=result.end,
+        fields={
+            "images": result.images,
+            "valid_masks": result.valid_masks,
+            "w2c": result.w2c,
+            "intrinsics": result.intrinsics,
+        },
+    )
 
 
 def estimate_sim3_umeyama(source: np.ndarray, target: np.ndarray) -> tuple[float, np.ndarray, np.ndarray]:
@@ -133,10 +178,24 @@ def estimate_sim3_umeyama(source: np.ndarray, target: np.ndarray) -> tuple[float
 
 
 def camera_centers_from_w2c(w2c: np.ndarray) -> np.ndarray:
-    matrices = np.asarray(w2c, dtype=np.float64).reshape(-1, 4, 4)
+    matrices = w2c_to_homogeneous(w2c)
     rotations = matrices[:, :3, :3]
     translations = matrices[:, :3, 3]
     return -np.einsum("nij,nj->ni", np.transpose(rotations, (0, 2, 1)), translations).astype(np.float32)
+
+
+def w2c_to_homogeneous(w2c: np.ndarray) -> np.ndarray:
+    matrices = np.asarray(w2c, dtype=np.float64)
+    if matrices.ndim < 3:
+        raise PreviewFailure("LITEVGGT_CAMERA_SHAPE_INVALID", f"LiteVGGT camera matrices must be 3D, got shape {matrices.shape}")
+    if matrices.shape[-2:] == (4, 4):
+        return matrices.reshape(-1, 4, 4)
+    if matrices.shape[-2:] == (3, 4):
+        matrices_3x4 = matrices.reshape(-1, 3, 4)
+        homogeneous = np.tile(np.eye(4, dtype=np.float64), (matrices_3x4.shape[0], 1, 1))
+        homogeneous[:, :3, :] = matrices_3x4
+        return homogeneous
+    raise PreviewFailure("LITEVGGT_CAMERA_SHAPE_INVALID", f"LiteVGGT camera matrices must be Nx3x4 or Nx4x4, got shape {matrices.shape}")
 
 
 def transform_points_sim3(points: np.ndarray, scale: float, rotation: np.ndarray, translation: np.ndarray) -> np.ndarray:
@@ -145,7 +204,7 @@ def transform_points_sim3(points: np.ndarray, scale: float, rotation: np.ndarray
 
 
 def transform_w2c_sim3(w2c: np.ndarray, scale: float, rotation: np.ndarray, translation: np.ndarray) -> np.ndarray:
-    matrices = np.asarray(w2c, dtype=np.float64).reshape(-1, 4, 4)
+    matrices = w2c_to_homogeneous(w2c)
     align_rotation = np.asarray(rotation, dtype=np.float64).reshape(3, 3)
     align_translation = np.asarray(translation, dtype=np.float64).reshape(3)
     transformed = np.empty_like(matrices)
@@ -659,9 +718,24 @@ def _run_litevggt_window(
             image_array = image_batch[0].permute(0, 2, 3, 1).detach().cpu().numpy()
             color_image = image_array.reshape(-1, 3)
             colors = np.clip(color_image * 255.0, 0, 255).astype(np.uint8)
+            valid_mask_array = valid_mask_batch.detach().cpu().numpy().astype(bool)
+            w2c_array = w2c_pre.squeeze(0).detach().float().cpu().numpy()
+            intrinsic_array = intrinsic.squeeze(0).detach().float().cpu().numpy()
+
+            _validate_litevggt_window_frame_counts(
+                start=start,
+                end=end,
+                fields={
+                    "images": image_array,
+                    "valid_masks": valid_mask_array,
+                    "w2c": w2c_array,
+                    "intrinsics": intrinsic_array,
+                    "points_3d": points_3d,
+                    "depth_conf": depth_conf.squeeze(0),
+                },
+            )
 
             confidence = depth_conf.reshape(-1).detach().cpu().numpy()
-            valid_mask_array = valid_mask_batch.detach().cpu().numpy().astype(bool)
             valid_pixels = valid_mask_array.reshape(-1)
             finite = np.isfinite(points).all(axis=1) & np.isfinite(confidence)
             valid_pixels = valid_pixels & finite
@@ -680,8 +754,6 @@ def _run_litevggt_window(
                 width=width,
                 selection_strategy=selection_strategy,
             )
-            w2c_array = w2c_pre.squeeze(0).detach().float().cpu().numpy()
-            intrinsic_array = intrinsic.squeeze(0).detach().float().cpu().numpy()
 
             return LiteVGGTWindowResult(
                 start=start,
@@ -731,6 +803,7 @@ def _merge_litevggt_windows(
     merged_confidence: list[np.ndarray] = []
 
     for window_index, result in enumerate(window_results):
+        _validate_litevggt_window_result(result)
         local_w2c = result.w2c
         local_points = result.points
 
@@ -755,6 +828,14 @@ def _merge_litevggt_windows(
         transformed_w2c = transform_w2c_sim3(local_w2c, scale, rotation, translation)
         transformed_centers = camera_centers_from_w2c(transformed_w2c)
         transformed_points = transform_points_sim3(local_points, scale, rotation, translation)
+        _validate_litevggt_window_frame_counts(
+            start=result.start,
+            end=result.end,
+            fields={
+                "transformed_w2c": transformed_w2c,
+                "transformed_centers": transformed_centers,
+            },
+        )
 
         for local_index, frame_index in enumerate(range(result.start, result.end)):
             if images_by_frame[frame_index] is None:
@@ -848,6 +929,13 @@ def run_litevggt_reconstruction(
                 max_frames=max_input_frames,
                 mode="tail",
             )
+        elif frame_selection == "all":
+            files = select_aligned_frames(
+                files,
+                multiple=8,
+                max_frames=max_input_frames,
+                mode="head",
+            )
         else:
             files = select_aligned_frames(
                 files,
@@ -906,7 +994,9 @@ def run_litevggt_reconstruction(
         selected_overlap = 0
         selected_window_count = 1
         oom_retry_count = 0
+        window_frame_retry_count = 0
         window_results: list[LiteVGGTWindowResult] = []
+        merged_arrays: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None
 
         for attempt_index, attempt_window_size in enumerate(attempts):
             selected_attempt = min(int(attempt_window_size), aligned_count)
@@ -952,8 +1042,27 @@ def run_litevggt_reconstruction(
                             pose_encoding_to_extri_intri=pose_encoding_to_extri_intri,
                         )
                     )
+                progress("litevggt_unproject", 58, "aligning LiteVGGT windows and merging point clouds")
+                merged_arrays = _merge_litevggt_windows(
+                    window_results,
+                    aligned_count,
+                )
                 last_oom = None
                 break
+            except LiteVGGTWindowFrameMismatch as exc:
+                if resolved_mode == "windowed" and attempt_index < len(attempts) - 1:
+                    window_frame_retry_count += 1
+                    window_results = []
+                    reset_litevggt_aggregator_cache(model)
+                    torch.cuda.empty_cache()
+                    next_size = attempts[attempt_index + 1]
+                    progress(
+                        "litevggt_inference",
+                        40,
+                        f"{exc}; retrying with window_size={next_size}",
+                    )
+                    continue
+                raise PreviewFailure("LITEVGGT_WINDOW_FRAME_MISMATCH", str(exc)) from exc
             except RuntimeError as exc:
                 if resolved_mode == "windowed" and is_cuda_oom_error(exc) and attempt_index < len(attempts) - 1:
                     last_oom = exc
@@ -973,11 +1082,10 @@ def run_litevggt_reconstruction(
         if last_oom is not None:
             raise last_oom
 
-        progress("litevggt_unproject", 58, "aligning LiteVGGT windows and merging point clouds")
-        image_array, valid_mask_array, w2c_array, intrinsic_array, selected_points, selected_colors, selected_confidence = _merge_litevggt_windows(
-            window_results,
-            aligned_count,
-        )
+        if merged_arrays is None:
+            raise PreviewFailure("LITEVGGT_EMPTY_WINDOWS", "LiteVGGT windowed inference produced no merged result")
+
+        image_array, valid_mask_array, w2c_array, intrinsic_array, selected_points, selected_colors, selected_confidence = merged_arrays
 
         if spatial_keep_quantile >= 1.0:
             trimmed_points, trimmed_colors, trimmed_confidence = trim_axis_quantile_outliers(
@@ -1038,6 +1146,7 @@ def run_litevggt_reconstruction(
                 "litevggt_window_overlap": int(selected_overlap),
                 "litevggt_window_count": int(selected_window_count),
                 "litevggt_oom_retry_count": int(oom_retry_count),
+                "litevggt_window_frame_retry_count": int(window_frame_retry_count),
                 "valid_pixel_count": int(valid_pixel_count),
                 "point_count_before_filter": int(point_count_before_filter),
                 "point_count_after_filter": int(point_count_after_filter),

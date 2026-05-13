@@ -279,14 +279,30 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertEqual(summary.mode, "sharp")
         self.assertFalse(deblur_mlp_enabled_by_default(summary.mode, {}))
 
-    def test_sfm_defaults_to_litevggt(self) -> None:
+    def test_sfm_defaults_to_pycolmap(self) -> None:
+        _, SceneBuildResult, _, build_scene, *_ = import_fine_runtime()
+        expected = SceneBuildResult(Path("scene"), "pycolmap", 8, 8, 100, {"sfm_backend": "pycolmap"})
+        ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={}, progress=None)
+        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_pycolmap_scene", return_value=expected) as pycolmap:
+            result = build_scene(ctx, Path(tmp), Path(tmp) / "scene", 8192, 1600, 8)
+
+        self.assertEqual(result.backend, "pycolmap")
+        pycolmap.assert_called_once()
+
+    def test_pycolmap_default_can_fallback_to_litevggt(self) -> None:
         _, SceneBuildResult, _, build_scene, *_ = import_fine_runtime()
         expected = SceneBuildResult(Path("scene"), "litevggt", 8, 8, 100, {"sfm_backend": "litevggt"})
         ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={}, progress=None)
-        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_litevggt_scene", return_value=expected) as litevggt:
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "app.fine.runner.build_pycolmap_scene",
+            side_effect=FineFailure("COLMAP_FAILED", "no model"),
+        ) as pycolmap, patch("app.fine.runner.build_litevggt_scene", return_value=expected) as litevggt:
             result = build_scene(ctx, Path(tmp), Path(tmp) / "scene", 8192, 1600, 8)
 
         self.assertEqual(result.backend, "litevggt")
+        self.assertEqual(result.metrics["sfm_backend_requested"], "pycolmap")
+        self.assertEqual(result.metrics["sfm_fallback_reason"], "COLMAP_FAILED")
+        pycolmap.assert_called_once()
         litevggt.assert_called_once()
 
     def test_explicit_pycolmap_backend_uses_same_default_path(self) -> None:
@@ -387,7 +403,7 @@ class FineRuntimeTests(unittest.TestCase):
 
         self.assertIn("can_densify = bool(iteration < opt.densify_until_iter and not deblur_active)", trainer_source)
         self.assertIn("deblur_densify_disabled_after_activation", trainer_source)
-        self.assertIn("policy.apply_final_prune(gaussians)", trainer_source)
+        self.assertIn("policy.apply_final_prune(gaussians, min_opacity=policy.final_prune_min_opacity)", trainer_source)
 
     def test_xyz_lr_setter_is_not_cumulative(self) -> None:
         try:
@@ -420,6 +436,7 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertTrue(deblur_mlp_enabled_by_default("mixed", {}))
         self.assertFalse(deblur_mlp_enabled_by_default("sharp", {}))
         self.assertFalse(deblur_mlp_enabled_by_default("motion", {"fine_deblur_enabled": "false"}))
+        self.assertTrue(deblur_mlp_enabled_by_default("sharp", {"fine_deblur_enabled": "true"}))
 
     def test_worker_runtime_avoids_duplicate_cuda_stacks(self) -> None:
         worker_root = BACKEND_ROOT.parent / "worker"

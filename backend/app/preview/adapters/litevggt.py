@@ -3,9 +3,11 @@ from __future__ import annotations
 # LiteVGGT adapter：负责系统参数、权重路径、进度映射和 SPZ 转换。
 # 真正的模型推理在 preview.vendor.litevggt_runtime 中，避免 worker 直接拼命令。
 
+from typing import Any
+
 from app.preview.io.spz import convert_ply_to_spz
 from app.preview.types import PreviewContext, PreviewResult, SOURCE_COMMITS
-from app.preview.utils import StageTimer, require_file
+from app.preview.utils import StageTimer, image_files, require_file
 from app.preview.vendor.litevggt_runtime import run_litevggt_pointcloud
 
 
@@ -17,6 +19,7 @@ def run(ctx: PreviewContext) -> PreviewResult:
         "LiteVGGT weight",
     )
     ply_path = ctx.work_dir / "litevggt" / "recon.ply"
+    files = image_files(ctx.input_dir)
 
     coverage_mode = str(ctx.options.get("litevggt_coverage_mode") or "complete")
     if coverage_mode == "complete":
@@ -51,6 +54,42 @@ def run(ctx: PreviewContext) -> PreviewResult:
     axis_trim_low_quantile = float(ctx.options.get("litevggt_axis_trim_low_quantile") or 0.0005)
     axis_trim_high_quantile = float(ctx.options.get("litevggt_axis_trim_high_quantile") or 0.9995)
     selection_strategy = str(ctx.options.get("litevggt_point_selection_strategy") or "per_frame")
+    params: dict[str, Any] = {
+        "coverage_mode": coverage_mode,
+        "keep_ratio": keep_ratio,
+        "spatial_keep_quantile": spatial_keep_quantile,
+        "preserve_full_image": preserve_full_image,
+        "frame_selection": frame_selection,
+        "max_points": max_points,
+        "letterbox_size": letterbox_size,
+        "window_size": window_size,
+        "window_overlap": window_overlap,
+        "oom_window_sizes": oom_window_sizes,
+        "max_input_frames": max_input_frames,
+        "min_scene_change": min_scene_change,
+        "edge_keep_ratio": edge_keep_ratio,
+        "axis_trim_low_quantile": axis_trim_low_quantile,
+        "axis_trim_high_quantile": axis_trim_high_quantile,
+        "selection_strategy": selection_strategy,
+    }
+    print(
+        "[litevggt-preview] adapter params "
+        f"task_id={ctx.task_id} project_id={ctx.project_id} input_dir={ctx.input_dir} "
+        f"image_count={len(files)} first_images={_first_names(files)} weight={weight} "
+        f"weight_bytes={weight.stat().st_size} output_ply={ply_path} output_spz={ctx.output_spz} "
+        + " ".join(f"{key}={value}" for key, value in params.items()),
+        flush=True,
+    )
+    ctx.report(
+        "litevggt_preflight",
+        22,
+        (
+            "LiteVGGT params: "
+            f"images={len(files)} coverage={coverage_mode} keep_ratio={keep_ratio} "
+            f"max_points={max_points} window={window_size}/{window_overlap} "
+            f"frame_selection={frame_selection}"
+        ),
+    )
 
     def report(stage: str, progress: int, message: str) -> None:
         ctx.report(stage, progress, message)
@@ -78,9 +117,23 @@ def run(ctx: PreviewContext) -> PreviewResult:
         progress=report,
     )
     timer.mark("litevggt_inference")
+    print(
+        "[litevggt-preview] inference metrics "
+        f"task_id={ctx.task_id} output_ply={ply_path} "
+        f"ply_exists={ply_path.exists()} ply_bytes={ply_path.stat().st_size if ply_path.exists() else None} "
+        f"metrics={_format_metrics(metrics)}",
+        flush=True,
+    )
     ctx.report("spz_conversion", 86, "converting LiteVGGT point cloud PLY to Spark SPZ")
     splat_count = convert_ply_to_spz(ply_path, ctx.output_spz)
     timer.mark("spz_conversion")
+    print(
+        "[litevggt-preview] conversion complete "
+        f"task_id={ctx.task_id} output_spz={ctx.output_spz} "
+        f"spz_exists={ctx.output_spz.exists()} spz_bytes={ctx.output_spz.stat().st_size if ctx.output_spz.exists() else None} "
+        f"splat_count={splat_count} stage_durations={timer.metrics().get('stage_durations')}",
+        flush=True,
+    )
 
     return PreviewResult(
         output_spz=ctx.output_spz,
@@ -124,3 +177,13 @@ def _read_int_list(value, fallback: list[int]) -> list[int]:
         except (TypeError, ValueError):
             continue
     return parsed or fallback
+
+
+def _first_names(paths, limit: int = 8) -> str:
+    names = [path.name for path in paths[:limit]]
+    suffix = "" if len(paths) <= limit else f", ... +{len(paths) - limit}"
+    return "[" + ", ".join(names) + suffix + "]"
+
+
+def _format_metrics(metrics: dict[str, Any]) -> str:
+    return " ".join(f"{key}={value}" for key, value in sorted(metrics.items()))
