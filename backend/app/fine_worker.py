@@ -161,6 +161,7 @@ def run_fine_task(task_id: str, worker_id: str) -> None:
                 final_ply=work_dir / "final.ply",
                 final_spz=work_dir / "final_web.spz",
                 metrics_json=work_dir / "metrics.json",
+                viewer_meta_json=work_dir / "final_viewer_meta.json",
                 lod_rad=work_dir / "final_lod.rad",
                 source_version=source_version,
                 options=task.options or {},
@@ -220,6 +221,8 @@ def run_fine_task(task_id: str, worker_id: str) -> None:
                     flush=True,
                 )
                 task.logs = append_log(task.logs, "uploaded final.ply", "uploaded final_web.spz", "uploaded metrics.json")
+                if result.viewer_meta_json:
+                    task.logs = append_log(task.logs, "uploaded final_viewer_meta.json")
                 if result.lod_rad:
                     task.logs = append_log(task.logs, "uploaded final_lod.rad")
                 log_capture.flush()
@@ -283,6 +286,15 @@ def upload_fine_artifacts(
         ("final_spz", result.final_spz, storage_key("users", project.owner_id, "projects", project.id, "final", "final_web.spz"), "final_web.spz"),
         ("metrics_json", result.metrics_json, storage_key("users", project.owner_id, "projects", project.id, "final", "metrics.json"), "metrics.json"),
     ]
+    if result.viewer_meta_json:
+        specs.append(
+            (
+                "viewer_meta_json",
+                result.viewer_meta_json,
+                storage_key("users", project.owner_id, "projects", project.id, "final", "final_viewer_meta.json"),
+                "final_viewer_meta.json",
+            )
+        )
     if result.lod_rad:
         specs.append(
             ("lod_rad", result.lod_rad, storage_key("users", project.owner_id, "projects", project.id, "final", "lod", "final_lod.rad"), "final_lod.rad")

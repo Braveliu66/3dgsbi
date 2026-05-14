@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -212,6 +213,7 @@ class FineRuntimeTests(unittest.TestCase):
                 model_cache_dir=root / "model-cache",
                 final_ply=root / "work" / "final.ply",
                 final_spz=root / "work" / "final_web.spz",
+                viewer_meta_json=root / "work" / "final_viewer_meta.json",
                 metrics_json=root / "work" / "metrics.json",
                 lod_rad=None,
                 source_version=7,
@@ -222,6 +224,42 @@ class FineRuntimeTests(unittest.TestCase):
                 run_fine_pipeline(ctx)
 
         self.assertEqual(raised.exception.code, "UNSUPPORTED_FINE_PIPELINE")
+
+    def test_viewer_ply_scale_multiplier_and_clamp_binary_ply(self) -> None:
+        from app.fine.viewer_meta import write_scaled_viewer_ply
+
+        header = (
+            "ply\n"
+            "format binary_little_endian 1.0\n"
+            "element vertex 2\n"
+            "property float x\n"
+            "property float y\n"
+            "property float z\n"
+            "property float scale_0\n"
+            "property float scale_1\n"
+            "property float scale_2\n"
+            "end_header\n"
+        ).encode("ascii")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "final.ply"
+            target = root / "final_viewer.ply"
+            source.write_bytes(
+                header
+                + struct.pack("<ffffff", 0.0, 0.0, 0.0, 0.0, -2.0, -4.0)
+                + struct.pack("<ffffff", 1.0, 1.0, 1.0, 2.0, -2.0, -4.0)
+            )
+
+            metrics = write_scaled_viewer_ply(source, target, scale_multiplier=0.5, max_scale=1.0)
+
+            body = target.read_bytes().split(b"end_header\n", 1)[1]
+            first = struct.unpack("<ffffff", body[:24])
+            second = struct.unpack("<ffffff", body[24:48])
+            self.assertAlmostEqual(first[3], -0.69314718, places=6)
+            self.assertAlmostEqual(first[4], -2.69314718, places=6)
+            self.assertAlmostEqual(second[3], 0.0, places=6)
+            self.assertEqual(metrics["viewer_scale_clamped"], 1)
+            self.assertEqual(metrics["viewer_scale_fields"], ["scale_0", "scale_1", "scale_2"])
 
     def test_blur_summary_reports_kept_images(self) -> None:
         BlurScore, _, summarize_blur_scores, *_ = import_fine_runtime()

@@ -11,6 +11,8 @@
 
 import torch
 import numpy as np
+import sys
+from pathlib import Path
 from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation, identity_gate
 from torch import nn
 import os
@@ -26,6 +28,12 @@ try:
     from diff_gaussian_rasterization import SparseGaussianAdam
 except:
     pass
+
+_BACKEND_ROOT = Path(__file__).resolve().parents[5]
+if str(_BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_ROOT))
+
+from app.fine.fastgs_defaults import FASTGS_FINAL_PRUNE_SCORE_THRESH
 
 class GaussianModel:
 
@@ -554,11 +562,11 @@ class GaussianModel:
         self.xyz_gradient_accum_abs[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter, 2:], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
 
-    def final_prune_fastgs(self, min_opacity, pruning_score = None):
+    def final_prune_fastgs(self, min_opacity, pruning_score = None, score_thresh = FASTGS_FINAL_PRUNE_SCORE_THRESH):
         """Final-stage pruning: remove Gaussians based on opacity and multi-view consistency.
         In the final stage we remove Gaussians that have low opacity or that are flagged by
         our multi-view reconstruction consistency metric (provided as `pruning_score`)."""
         prune_mask = (self.get_opacity < min_opacity).squeeze() 
-        scores_mask = pruning_score > 0.9
+        scores_mask = pruning_score > score_thresh
         final_prune = torch.logical_or(prune_mask, scores_mask)
         self.prune_points(final_prune)

@@ -30,9 +30,9 @@ def run(ctx: PreviewContext) -> PreviewResult:
     depth_conf_thresh = _read_optional_float(ctx.options.get("litevggt_depth_conf_thresh"), None)
     preprocess_mode = str(ctx.options.get("litevggt_preprocess_mode") or "pad")
     point_selection_strategy = str(ctx.options.get("litevggt_point_selection_strategy") or "scene_coverage")
-    axis_trim_low_quantile = _read_float(ctx.options.get("litevggt_axis_trim_low_quantile"), 0.0)
-    axis_trim_high_quantile = _read_float(ctx.options.get("litevggt_axis_trim_high_quantile"), 1.0)
-    spatial_keep_quantile = _read_float(ctx.options.get("litevggt_spatial_keep_quantile"), 1.0)
+    axis_trim_low_quantile = _read_float(ctx.options.get("litevggt_axis_trim_low_quantile"), 0.001)
+    axis_trim_high_quantile = _read_float(ctx.options.get("litevggt_axis_trim_high_quantile"), 0.999)
+    spatial_keep_quantile = _read_float(ctx.options.get("litevggt_spatial_keep_quantile"), 0.9975)
     params: dict[str, Any] = {
         "keep_ratio": keep_ratio,
         "max_points": max_points,
@@ -93,13 +93,20 @@ def run(ctx: PreviewContext) -> PreviewResult:
     )
 
     base_point_radius = _read_bounded_float(metrics.get("litevggt_preview_point_radius"), 0.002, 1e-8, 1.0)
-    point_radius_scale = _read_bounded_float(ctx.options.get("litevggt_point_radius_scale"), 1.0, 0.1, 20.0)
+    point_radius_scale = _read_bounded_float(
+        ctx.options.get("preview_fixed_splat_radius_scale", ctx.options.get("litevggt_point_radius_scale")),
+        0.22,
+        0.05,
+        20.0,
+    )
+    fixed_splat_opacity = _read_bounded_float(ctx.options.get("preview_fixed_splat_opacity"), 0.55, 0.05, 0.99)
     point_radius = base_point_radius * point_radius_scale
     ctx.report("splat_conversion", 82, "converting LiteVGGT point cloud PLY to fixed Gaussian PLY")
     converted_splat_count = convert_pointcloud_ply_to_fixed_splat_ply(
         points_ply_path,
         splats_ply_path,
         point_radius=point_radius,
+        opacity=fixed_splat_opacity,
     )
     timer.mark("fixed_splat_conversion")
 
@@ -134,6 +141,7 @@ def run(ctx: PreviewContext) -> PreviewResult:
             "fixed_splat_base_point_radius": base_point_radius,
             "fixed_splat_point_radius_scale": point_radius_scale,
             "fixed_splat_point_radius": point_radius,
+            "fixed_splat_opacity": fixed_splat_opacity,
             "fixed_splat_count": converted_splat_count,
         },
         source_commits={"LiteVGGT": SOURCE_COMMITS["LiteVGGT"], "Spark": SOURCE_COMMITS["Spark"]},

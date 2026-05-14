@@ -5,6 +5,16 @@ from typing import Any, Callable
 
 import torch
 
+from app.fine.fastgs_defaults import (
+    FASTGS_COMPACT_BOX_MULT,
+    FASTGS_FINAL_PRUNE_MIN_OPACITY,
+    FASTGS_FINAL_PRUNE_SCORE_THRESH,
+    FASTGS_LAMBDA_DSSIM,
+    FASTGS_LATE_PRUNE_ENABLED,
+    FASTGS_LOSS_THRESH,
+    FASTGS_SAMPLE_CAMERAS,
+    FASTGS_VCD_PERCENTILE,
+)
 from app.fine.local_3dgs.runtime import normalize_render_pkg, normalize_visibility_filter
 from app.fine.option_utils import read_float, read_int
 
@@ -21,14 +31,14 @@ class FastGSPolicy:
 
     def __init__(self, options: dict[str, Any] | None = None) -> None:
         options = options or {}
-        self.sample_cameras = read_int(options.get("fine_fastgs_sample_cameras"), 10, minimum=1, maximum=32)
-        self.loss_thresh = read_float(options.get("fine_fastgs_loss_thresh"), 0.1, minimum=0.0, maximum=1.0)
-        self.percentile = read_float(options.get("fine_vcd_percentile"), 0.60, minimum=0.05, maximum=0.95)
-        self.lambda_dssim = read_float(options.get("fine_lambda_dssim"), 0.2, minimum=0.0, maximum=1.0)
-        self.compact_box_mult = read_float(options.get("fine_fastergs_compact_box_mult"), 0.5, minimum=0.1, maximum=2.0)
-        self.late_prune_enabled = read_bool(options.get("fine_fastgs_late_prune_enabled"), False)
-        self.final_prune_score_thresh = read_float(options.get("fine_fastgs_final_prune_score_thresh"), 0.97, minimum=0.5, maximum=1.0)
-        self.final_prune_min_opacity = read_float(options.get("fine_fastgs_final_prune_min_opacity"), 0.05, minimum=0.001, maximum=0.2)
+        self.sample_cameras = read_int(options.get("fine_fastgs_sample_cameras"), FASTGS_SAMPLE_CAMERAS, minimum=1, maximum=32)
+        self.loss_thresh = read_float(options.get("fine_fastgs_loss_thresh"), FASTGS_LOSS_THRESH, minimum=0.0, maximum=1.0)
+        self.percentile = read_float(options.get("fine_vcd_percentile"), FASTGS_VCD_PERCENTILE, minimum=0.05, maximum=0.95)
+        self.lambda_dssim = read_float(options.get("fine_lambda_dssim"), FASTGS_LAMBDA_DSSIM, minimum=0.0, maximum=1.0)
+        self.compact_box_mult = read_float(options.get("fine_fastergs_compact_box_mult"), FASTGS_COMPACT_BOX_MULT, minimum=0.1, maximum=2.0)
+        self.late_prune_enabled = read_bool(options.get("fine_fastgs_late_prune_enabled"), FASTGS_LATE_PRUNE_ENABLED)
+        self.final_prune_score_thresh = read_float(options.get("fine_fastgs_final_prune_score_thresh"), FASTGS_FINAL_PRUNE_SCORE_THRESH, minimum=0.5, maximum=1.0)
+        self.final_prune_min_opacity = read_float(options.get("fine_fastgs_final_prune_min_opacity"), FASTGS_FINAL_PRUNE_MIN_OPACITY, minimum=0.001, maximum=0.2)
         self.score_sum: torch.Tensor | None = None
         self.metric_counts: torch.Tensor | None = None
         self.importance_score: torch.Tensor | None = None

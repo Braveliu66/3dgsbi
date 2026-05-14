@@ -1,10 +1,31 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import sys
+from pathlib import Path
 from typing import Any
 
 import torch
 import torch.nn as nn
+
+_BACKEND_ROOT = Path(__file__).resolve().parents[5]
+if str(_BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_ROOT))
+
+from app.fine.fastgs_defaults import (
+    FASTGS_DEBLUR_ENABLED,
+    FASTGS_DEBLUR_GTNET_LR,
+    FASTGS_DEBLUR_HIDDEN,
+    FASTGS_DEBLUR_LAMBDA_P,
+    FASTGS_DEBLUR_LAMBDA_S,
+    FASTGS_DEBLUR_MAX_CLAMP,
+    FASTGS_DEBLUR_MAX_POSITION_DELTA,
+    FASTGS_DEBLUR_MODE,
+    FASTGS_DEBLUR_NUM_MOMENTS,
+    FASTGS_DEBLUR_TRANSFORM_REG_WEIGHT,
+    FASTGS_DEBLUR_WIDTH,
+    FASTGS_OPTIMIZER_TYPE,
+)
 
 
 class FourierEmbedding(nn.Module):
@@ -38,10 +59,10 @@ class GTnet(nn.Module):
         *,
         res_pos: int = 3,
         res_view: int = 10,
-        num_hidden: int = 3,
-        width: int = 64,
+        num_hidden: int = FASTGS_DEBLUR_HIDDEN,
+        width: int = FASTGS_DEBLUR_WIDTH,
         pos_delta: bool = False,
-        num_moments: int = 4,
+        num_moments: int = FASTGS_DEBLUR_NUM_MOMENTS,
     ) -> None:
         super().__init__()
         self.pos_delta = pos_delta
@@ -81,18 +102,18 @@ class GTnet(nn.Module):
 
 @dataclass(slots=True)
 class DeblurConfig:
-    mode: str = "sharp"
+    mode: str = FASTGS_DEBLUR_MODE
     use_position: bool = False
-    hidden: int = 3
-    width: int = 64
-    num_moments: int = 4
-    lambda_s: float = 0.01
-    lambda_p: float = 0.01
+    hidden: int = FASTGS_DEBLUR_HIDDEN
+    width: int = FASTGS_DEBLUR_WIDTH
+    num_moments: int = FASTGS_DEBLUR_NUM_MOMENTS
+    lambda_s: float = FASTGS_DEBLUR_LAMBDA_S
+    lambda_p: float = FASTGS_DEBLUR_LAMBDA_P
     min_clamp: float = 1.0
-    max_clamp: float = 1.1
-    max_position_delta: float = 0.02
-    transform_reg_weight: float = 0.001
-    lr: float = 1e-3
+    max_clamp: float = FASTGS_DEBLUR_MAX_CLAMP
+    max_position_delta: float = FASTGS_DEBLUR_MAX_POSITION_DELTA
+    transform_reg_weight: float = FASTGS_DEBLUR_TRANSFORM_REG_WEIGHT
+    lr: float = FASTGS_DEBLUR_GTNET_LR
 
 
 @dataclass(slots=True)
@@ -125,28 +146,28 @@ class DeblurState:
 
 
 def build_deblur_state(opt: Any, *, device: torch.device | str = "cuda") -> DeblurState:
-    enabled_value = str(getattr(opt, "deblur_enabled", "auto")).strip().lower()
-    mode = str(getattr(opt, "deblur_mode", "sharp")).strip().lower()
+    enabled_value = str(getattr(opt, "deblur_enabled", FASTGS_DEBLUR_ENABLED)).strip().lower()
+    mode = str(getattr(opt, "deblur_mode", FASTGS_DEBLUR_MODE)).strip().lower()
     if enabled_value in {"0", "false", "no", "off"}:
         return DeblurState()
     if enabled_value not in {"1", "true", "yes", "on"} and mode == "sharp":
         return DeblurState()
-    if getattr(opt, "optimizer_type", "default") != "default":
+    if getattr(opt, "optimizer_type", FASTGS_OPTIMIZER_TYPE) != FASTGS_OPTIMIZER_TYPE:
         return DeblurState()
 
     use_position = mode in {"motion", "mixed"}
     config = DeblurConfig(
         mode=mode,
         use_position=use_position,
-        hidden=int(getattr(opt, "deblur_hidden", 3)),
-        width=int(getattr(opt, "deblur_width", 64)),
-        num_moments=int(getattr(opt, "deblur_num_moments", 4)),
-        lambda_s=float(getattr(opt, "deblur_lambda_s", 0.01)),
-        lambda_p=float(getattr(opt, "deblur_lambda_p", 0.01)),
-        max_clamp=float(getattr(opt, "deblur_max_clamp", 1.1)),
-        max_position_delta=float(getattr(opt, "deblur_max_position_delta", 0.02)),
-        transform_reg_weight=float(getattr(opt, "deblur_transform_reg_weight", 0.001)),
-        lr=float(getattr(opt, "deblur_gtnet_lr", 1e-3)),
+        hidden=int(getattr(opt, "deblur_hidden", FASTGS_DEBLUR_HIDDEN)),
+        width=int(getattr(opt, "deblur_width", FASTGS_DEBLUR_WIDTH)),
+        num_moments=int(getattr(opt, "deblur_num_moments", FASTGS_DEBLUR_NUM_MOMENTS)),
+        lambda_s=float(getattr(opt, "deblur_lambda_s", FASTGS_DEBLUR_LAMBDA_S)),
+        lambda_p=float(getattr(opt, "deblur_lambda_p", FASTGS_DEBLUR_LAMBDA_P)),
+        max_clamp=float(getattr(opt, "deblur_max_clamp", FASTGS_DEBLUR_MAX_CLAMP)),
+        max_position_delta=float(getattr(opt, "deblur_max_position_delta", FASTGS_DEBLUR_MAX_POSITION_DELTA)),
+        transform_reg_weight=float(getattr(opt, "deblur_transform_reg_weight", FASTGS_DEBLUR_TRANSFORM_REG_WEIGHT)),
+        lr=float(getattr(opt, "deblur_gtnet_lr", FASTGS_DEBLUR_GTNET_LR)),
     )
     model = GTnet(
         num_hidden=config.hidden,

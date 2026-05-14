@@ -28,9 +28,9 @@ def run(ctx: PreviewContext) -> PreviewResult:
     params = {
         "fps": read_int(ctx.options.get("preview_lingbot_fps"), 3, minimum=0, maximum=60),
         "max_frames": read_int(ctx.options.get("preview_lingbot_max_frames"), 0, minimum=0, maximum=100_000),
-        "image_size": read_int(ctx.options.get("preview_lingbot_image_size"), 518, minimum=224, maximum=1024),
-        "target_width": read_int(ctx.options.get("preview_lingbot_target_width"), 518, minimum=14, maximum=2048),
-        "target_height": read_int(ctx.options.get("preview_lingbot_target_height"), 378, minimum=14, maximum=2048),
+        "image_size": read_int(ctx.options.get("preview_lingbot_image_size"), 512, minimum=224, maximum=1024),
+        "target_width": read_int(ctx.options.get("preview_lingbot_target_width"), 512, minimum=14, maximum=2048),
+        "target_height": read_int(ctx.options.get("preview_lingbot_target_height"), 512, minimum=14, maximum=2048),
         "mode": str(ctx.options.get("preview_lingbot_mode") or "windowed"),
         "keyframe_interval": read_int(ctx.options.get("preview_lingbot_keyframe_interval"), 4, minimum=1, maximum=100_000),
         "camera_iterations": read_int(ctx.options.get("preview_lingbot_camera_iterations"), 1, minimum=1, maximum=8),
@@ -38,14 +38,14 @@ def run(ctx: PreviewContext) -> PreviewResult:
         "preprocess_mode": str(ctx.options.get("preview_lingbot_preprocess_mode") or "crop"),
         "window_size": read_int(ctx.options.get("preview_lingbot_window_size"), 64, minimum=8, maximum=512),
         "overlap_keyframes": read_int(ctx.options.get("preview_lingbot_overlap_keyframes"), 8, minimum=1, maximum=128),
-        "max_points": read_int(ctx.options.get("preview_lingbot_max_points"), 1_000_000_000, minimum=0, maximum=1_000_000_000),
+        "max_points": read_int(ctx.options.get("preview_lingbot_max_points"), 2_000_000, minimum=0, maximum=1_000_000_000),
         "frame_stride": read_int(ctx.options.get("preview_lingbot_frame_stride"), 1, minimum=1, maximum=10_000),
-        "pixel_stride": read_int(ctx.options.get("preview_lingbot_pixel_stride"), 2, minimum=1, maximum=512),
+        "pixel_stride": read_int(ctx.options.get("preview_lingbot_pixel_stride"), 1, minimum=1, maximum=512),
         "conf_percentile": read_float(ctx.options.get("preview_lingbot_conf_percentile"), 20.0, minimum=0.0, maximum=100.0),
-        "min_conf": read_float(ctx.options.get("preview_lingbot_min_conf"),  1.2, minimum=-100.0, maximum=100.0),
+        "min_conf": read_float(ctx.options.get("preview_lingbot_min_conf"), 1e-5, minimum=-100.0, maximum=100.0),
         "save_predictions": read_bool(ctx.options.get("preview_lingbot_save_predictions"), True),
         "compile_model": read_bool(ctx.options.get("preview_lingbot_compile"), False),
-        "keyframes_only_points": read_bool(ctx.options.get("preview_lingbot_keyframes_only_points"), True),
+        "keyframes_only_points": read_bool(ctx.options.get("preview_lingbot_keyframes_only_points"), False),
         "allow_sdpa_fallback": read_bool(ctx.options.get("preview_lingbot_allow_sdpa_fallback"), False),
         "min_inference_fps": read_float(ctx.options.get("preview_lingbot_min_inference_fps"), 3.0, minimum=0.0, maximum=1000.0),
     }
@@ -90,7 +90,13 @@ def run(ctx: PreviewContext) -> PreviewResult:
     )
 
     base_point_radius = read_float(metrics.get("lingbot_preview_point_radius"), 0.002, minimum=1e-8, maximum=1.0)
-    point_radius_scale = read_float(ctx.options.get("preview_lingbot_point_radius_scale"), 1.0, minimum=0.1, maximum=20.0)
+    point_radius_scale = read_float(
+        ctx.options.get("preview_fixed_splat_radius_scale", ctx.options.get("preview_lingbot_point_radius_scale")),
+        0.22,
+        minimum=0.05,
+        maximum=20.0,
+    )
+    fixed_splat_opacity = read_float(ctx.options.get("preview_fixed_splat_opacity"), 0.55, minimum=0.05, maximum=0.99)
     point_radius = base_point_radius * point_radius_scale
     print(
         "[lingbot-preview] pointcloud summary "
@@ -117,14 +123,14 @@ def run(ctx: PreviewContext) -> PreviewResult:
     print(
         "[lingbot-preview] converting point cloud to fixed Gaussian PLY "
         f"input={points_ply_path} input_bytes={points_ply_path.stat().st_size if points_ply_path.exists() else None} "
-        f"output={splats_ply_path} point_radius={point_radius} opacity=0.75",
+        f"output={splats_ply_path} point_radius={point_radius} opacity={fixed_splat_opacity}",
         flush=True,
     )
     splat_ply_count = convert_pointcloud_ply_to_fixed_splat_ply(
         points_ply_path,
         splats_ply_path,
         point_radius=point_radius,
-        opacity=0.75,
+        opacity=fixed_splat_opacity,
     )
     timer.mark("splat_ply_conversion")
     print(
@@ -159,6 +165,7 @@ def run(ctx: PreviewContext) -> PreviewResult:
             "fixed_splat_point_radius": point_radius,
             "fixed_splat_base_point_radius": base_point_radius,
             "fixed_splat_point_radius_scale": point_radius_scale,
+            "fixed_splat_opacity": fixed_splat_opacity,
             "intermediate_points_ply": str(points_ply_path),
             "intermediate_splats_ply": str(splats_ply_path),
             "preview_meta_json": str(meta_path),

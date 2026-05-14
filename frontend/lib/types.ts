@@ -110,9 +110,14 @@ export interface ViewerConfig {
   mode?: "single";
   source?: "final" | "preview";
   artifact_id?: string;
+  file_size?: number | null;
   model_url?: string | null;
+  download_spz_url?: string | null;
+  download_ply_url?: string | null;
+  gaussian_ply_url?: string | null;
   debug_points_ply_url?: string | null;
   debug_splats_ply_url?: string | null;
+  viewer_meta_url?: string | null;
   preview_meta_url?: string | null;
   quality_warning?: string | null;
   point_source?: string | null;
@@ -120,6 +125,22 @@ export interface ViewerConfig {
   format?: "spz" | "rad";
   message?: string;
   stale?: boolean;
+}
+
+export interface SharedProject {
+  id: string;
+  name: string;
+  tags: string[];
+  total_size_bytes?: number;
+  created_at: string;
+  updated_at: string;
+  viewer: ViewerConfig;
+}
+
+export interface ProjectShareResponse {
+  share_token: string;
+  share_url: string;
+  project: SharedProject;
 }
 
 export interface AlgorithmEntry {

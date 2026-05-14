@@ -7,6 +7,7 @@ import socket
 import sys
 import time
 import multiprocessing as mp
+import threading
 import traceback
 import json
 from datetime import datetime, timezone
@@ -120,9 +121,42 @@ def main() -> None:
             continue
         _, task_id = item
         try:
-            run_task_in_subprocess(task_id, worker_id, redis_client, run_preview_task, "worker")
+            run_preview_task_in_process(task_id, worker_id, redis_client)
         except Exception as exc:
             print(f"[worker] unexpected failure for {task_id}: {exc}", flush=True)
+
+
+def run_preview_task_in_process(task_id: str, worker_id: str, redis_client: redis.Redis) -> None:
+    if should_stop_task(redis_client, task_id):
+        mark_task_canceled(task_id)
+        return
+
+    stop_heartbeat = threading.Event()
+    heartbeat_thread = threading.Thread(
+        target=heartbeat_until_stopped,
+        args=(stop_heartbeat, worker_id, task_id),
+        name=f"preview-heartbeat-{task_id}",
+        daemon=True,
+    )
+    started = time.monotonic()
+    print(f"[worker] running preview task in resident process task_id={task_id} worker_id={worker_id}", flush=True)
+    heartbeat_thread.start()
+    try:
+        run_preview_task(task_id, worker_id)
+        print(
+            f"[worker] resident preview task finished task_id={task_id} "
+            f"elapsed_seconds={round(time.monotonic() - started, 3)}",
+            flush=True,
+        )
+    finally:
+        stop_heartbeat.set()
+        heartbeat_thread.join(TASK_PROCESS_POLL_SECONDS)
+        heartbeat(worker_id)
+
+
+def heartbeat_until_stopped(stop_event: threading.Event, worker_id: str, task_id: str) -> None:
+    while not stop_event.wait(TASK_PROCESS_POLL_SECONDS):
+        heartbeat(worker_id, task_id)
 
 
 def run_task_in_subprocess(
@@ -787,6 +821,7 @@ def preview_artifact_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "fixed_splat_base_point_radius",
         "fixed_splat_point_radius_scale",
         "fixed_splat_point_radius",
+        "fixed_splat_opacity",
         "cuda_memory_peak_mb",
     )
     return {key: metrics.get(key) for key in keys if key in metrics}

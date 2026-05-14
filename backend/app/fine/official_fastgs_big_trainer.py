@@ -10,6 +10,58 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from app.config import get_settings
+from app.fine.fastgs_defaults import (
+    FASTGS_DATA_DEVICE,
+    FASTGS_DEBLUR_BLURRED_VIEWS_ONLY,
+    FASTGS_DEBLUR_ENABLED,
+    FASTGS_DEBLUR_GTNET_LR,
+    FASTGS_DEBLUR_HIDDEN,
+    FASTGS_DEBLUR_LAMBDA_P,
+    FASTGS_DEBLUR_LAMBDA_S,
+    FASTGS_DEBLUR_MAX_CLAMP,
+    FASTGS_DEBLUR_MAX_POSITION_DELTA,
+    FASTGS_DEBLUR_MODE,
+    FASTGS_DEBLUR_NUM_MOMENTS,
+    FASTGS_DEBLUR_TRANSFORM_REG_WEIGHT,
+    FASTGS_DEBLUR_WARMUP_ITERS,
+    FASTGS_DEBLUR_WIDTH,
+    FASTGS_DEBLUR_XYZ_LR_SCALE,
+    FASTGS_DENSE,
+    FASTGS_DENSIFICATION_INTERVAL,
+    FASTGS_DENSIFY_FROM_ITER,
+    FASTGS_DENSIFY_GRAD_THRESHOLD,
+    FASTGS_DENSIFY_UNTIL_ITER,
+    FASTGS_FEATURE_LR,
+    FASTGS_FINAL_PRUNE_MIN_OPACITY,
+    FASTGS_FINAL_PRUNE_SCORE_THRESH,
+    FASTGS_GRAD_ABS_THRESH,
+    FASTGS_GRAD_THRESH,
+    FASTGS_HIGHFEATURE_LR,
+    FASTGS_LAMBDA_DSSIM,
+    FASTGS_LATE_PRUNE_ENABLED,
+    FASTGS_LATE_PRUNE_FROM_ITER,
+    FASTGS_LATE_PRUNE_INTERVAL,
+    FASTGS_LATE_PRUNE_MIN_OPACITY,
+    FASTGS_LATE_PRUNE_SCORE_THRESH,
+    FASTGS_LATE_PRUNE_UNTIL_ITER,
+    FASTGS_LOSS_THRESH,
+    FASTGS_LOWFEATURE_LR,
+    FASTGS_MULT,
+    FASTGS_OPACITY_LR,
+    FASTGS_OPACITY_RESET_INTERVAL,
+    FASTGS_OPTIMIZER_TYPE,
+    FASTGS_PERCENT_DENSE,
+    FASTGS_POSITION_LR_DELAY_MULT,
+    FASTGS_POSITION_LR_FINAL,
+    FASTGS_POSITION_LR_INIT,
+    FASTGS_POSITION_LR_MAX_STEPS,
+    FASTGS_RESOLUTION,
+    FASTGS_ROTATION_LR,
+    FASTGS_SAMPLE_CAMERAS,
+    FASTGS_SCALING_LR,
+    FASTGS_SHFEATURE_LR,
+)
 from app.fine.option_utils import read_float, read_int
 from app.fine.types import FineFailure
 
@@ -35,48 +87,61 @@ def train_official_fastgs_big(
     vendor_root = _fastgs_vendor_root()
     _require_fastgs_vendor(vendor_root)
     output_dir.mkdir(parents=True, exist_ok=True)
+    settings = get_settings()
 
     iterations = read_int((options or {}).get("fine_iterations"), iterations, minimum=5_000, maximum=60_000)
-    densification_interval = read_int(
-        (options or {}).get("fine_densification_interval"),
-        100,
-        minimum=1,
-        maximum=10_000,
-    )
-    data_device = str((options or {}).get("fine_data_device") or "cpu").strip().lower()
+    options = options or {}
+    densification_interval = read_int(options.get("fine_densification_interval"), FASTGS_DENSIFICATION_INTERVAL, minimum=1, maximum=10_000)
+    data_device = str(options.get("fine_data_device") or FASTGS_DATA_DEVICE).strip().lower()
     if data_device not in {"cpu", "cuda"}:
         raise FineFailure("UNSUPPORTED_FASTGS_DATA_DEVICE", f"Unsupported FastGS data_device: {data_device}")
-    grad_abs_thresh = read_float((options or {}).get("fine_grad_abs_thresh"), 0.0004, minimum=1e-7, maximum=0.1)
-    dense = read_float((options or {}).get("fine_dense"), 0.005, minimum=0.0, maximum=1.0)
-    mult = read_float((options or {}).get("fine_mult"), 0.7, minimum=0.01, maximum=10.0)
-    lambda_dssim = read_float((options or {}).get("fine_lambda_dssim"), 0.2, minimum=0.0, maximum=1.0)
-    highfeature_lr = _optional_float(options or {}, "fine_highfeature_lr", fallback=0.02, minimum=1e-7, maximum=1.0)
-    lowfeature_lr = _optional_float(options or {}, "fine_lowfeature_lr", fallback=None, minimum=1e-7, maximum=1.0)
-    resolution = _optional_int(options or {}, "fine_train_resolution", minimum=1, maximum=16_384)
-    deblur_enabled = _choice_string((options or {}).get("fine_deblur_enabled"), "auto", {"auto", "true", "false"})
-    deblur_mode = _choice_string((options or {}).get("fine_deblur_mode"), "sharp", {"sharp", "defocus", "motion", "mixed"})
-    deblur_blur_registry = str((options or {}).get("fine_deblur_blur_registry") or "").strip()
-    deblur_warmup_iters = read_int(
-        (options or {}).get("fine_deblur_warmup_iters"),
-        min(3000, max(1, iterations // 3)),
-        minimum=0,
-        maximum=max(0, iterations - 1),
-    )
-    deblur_num_moments = read_int((options or {}).get("fine_deblur_num_moments"), 4, minimum=1, maximum=8)
-    deblur_gtnet_lr = read_float((options or {}).get("fine_deblur_gtnet_lr"), 0.001, minimum=1e-6, maximum=0.1)
-    deblur_hidden = read_int((options or {}).get("fine_deblur_hidden"), 3, minimum=1, maximum=8)
-    deblur_width = read_int((options or {}).get("fine_deblur_width"), 64, minimum=16, maximum=256)
-    deblur_lambda_s = read_float((options or {}).get("fine_deblur_lambda_s"), 0.01, minimum=0.0, maximum=0.1)
-    deblur_lambda_p = read_float((options or {}).get("fine_deblur_lambda_p"), 0.01, minimum=0.0, maximum=0.1)
-    deblur_max_clamp = read_float((options or {}).get("fine_deblur_max_clamp"), 1.1, minimum=1.0, maximum=1.8)
-    deblur_max_position_delta = read_float((options or {}).get("fine_deblur_max_position_delta"), 0.02, minimum=0.0, maximum=1.0)
-    deblur_transform_reg_weight = read_float((options or {}).get("fine_deblur_transform_reg_weight"), 0.001, minimum=0.0, maximum=1.0)
-    deblur_xyz_lr_scale = read_float((options or {}).get("fine_deblur_xyz_lr_scale"), 0.1, minimum=0.0, maximum=1.0)
-    deblur_blurred_views_only = _choice_string(
-        (options or {}).get("fine_deblur_blurred_views_only"),
-        "true",
-        {"true", "false"},
-    )
+    position_lr_init = read_float(options.get("fine_position_lr_init"), FASTGS_POSITION_LR_INIT, minimum=1e-8, maximum=1.0)
+    position_lr_final = read_float(options.get("fine_position_lr_final"), FASTGS_POSITION_LR_FINAL, minimum=1e-9, maximum=1.0)
+    position_lr_delay_mult = read_float(options.get("fine_position_lr_delay_mult"), FASTGS_POSITION_LR_DELAY_MULT, minimum=0.0, maximum=1.0)
+    position_lr_max_steps = read_int(options.get("fine_position_lr_max_steps"), FASTGS_POSITION_LR_MAX_STEPS, minimum=1, maximum=100_000)
+    feature_lr = read_float(options.get("fine_feature_lr"), FASTGS_FEATURE_LR, minimum=1e-7, maximum=1.0)
+    shfeature_lr = read_float(options.get("fine_shfeature_lr"), FASTGS_SHFEATURE_LR, minimum=1e-7, maximum=1.0)
+    opacity_lr = read_float(options.get("fine_opacity_lr"), FASTGS_OPACITY_LR, minimum=1e-7, maximum=1.0)
+    scaling_lr = read_float(options.get("fine_scaling_lr"), FASTGS_SCALING_LR, minimum=1e-7, maximum=1.0)
+    rotation_lr = read_float(options.get("fine_rotation_lr"), FASTGS_ROTATION_LR, minimum=1e-7, maximum=1.0)
+    percent_dense = read_float(options.get("fine_percent_dense"), FASTGS_PERCENT_DENSE, minimum=0.0, maximum=1.0)
+    grad_thresh = read_float(_first_option(options, "fine_grad_thresh", "fine_fastgs_grad_thresh"), FASTGS_GRAD_THRESH, minimum=1e-7, maximum=0.1)
+    grad_abs_thresh = read_float(_first_option(options, "fine_grad_abs_thresh", "fine_fastgs_grad_abs_thresh"), FASTGS_GRAD_ABS_THRESH, minimum=1e-7, maximum=0.1)
+    densify_grad_threshold = read_float(options.get("fine_densify_grad_threshold"), FASTGS_DENSIFY_GRAD_THRESHOLD, minimum=1e-7, maximum=0.1)
+    dense = read_float(options.get("fine_dense"), FASTGS_DENSE, minimum=0.0, maximum=1.0)
+    mult = read_float(options.get("fine_mult"), FASTGS_MULT, minimum=0.01, maximum=10.0)
+    loss_thresh = read_float(options.get("fine_fastgs_loss_thresh"), FASTGS_LOSS_THRESH, minimum=0.0, maximum=1.0)
+    sample_cameras = read_int(options.get("fine_fastgs_sample_cameras"), FASTGS_SAMPLE_CAMERAS, minimum=1, maximum=32)
+    lambda_dssim = read_float(options.get("fine_lambda_dssim"), FASTGS_LAMBDA_DSSIM, minimum=0.0, maximum=1.0)
+    highfeature_lr = _optional_float(options, "fine_highfeature_lr", fallback=FASTGS_HIGHFEATURE_LR, minimum=1e-7, maximum=1.0)
+    lowfeature_lr = _optional_float(options, "fine_lowfeature_lr", fallback=FASTGS_LOWFEATURE_LR, minimum=1e-7, maximum=1.0)
+    resolution = _optional_int(options, "fine_train_resolution", fallback=min(settings.fine_image_max_side, FASTGS_RESOLUTION), minimum=1, maximum=16_384)
+    densify_from_iter = read_int(options.get("fine_densify_from_iter"), FASTGS_DENSIFY_FROM_ITER, minimum=0, maximum=100_000)
+    densify_until_iter = read_int(options.get("fine_densify_until_iter"), FASTGS_DENSIFY_UNTIL_ITER, minimum=0, maximum=100_000)
+    opacity_reset_interval = read_int(options.get("fine_opacity_reset_interval"), FASTGS_OPACITY_RESET_INTERVAL, minimum=1, maximum=100_000)
+    late_prune_enabled = _bool_string(options.get("fine_fastgs_late_prune_enabled"), FASTGS_LATE_PRUNE_ENABLED)
+    late_prune_interval = read_int(options.get("fine_fastgs_late_prune_interval"), FASTGS_LATE_PRUNE_INTERVAL, minimum=1, maximum=100_000)
+    late_prune_from_iter = read_int(options.get("fine_fastgs_late_prune_from_iter"), FASTGS_LATE_PRUNE_FROM_ITER, minimum=0, maximum=100_000)
+    late_prune_until_iter = read_int(options.get("fine_fastgs_late_prune_until_iter"), FASTGS_LATE_PRUNE_UNTIL_ITER, minimum=0, maximum=100_000)
+    late_prune_min_opacity = read_float(options.get("fine_fastgs_late_prune_min_opacity"), FASTGS_LATE_PRUNE_MIN_OPACITY, minimum=0.001, maximum=0.2)
+    late_prune_score_thresh = read_float(options.get("fine_fastgs_late_prune_score_thresh"), FASTGS_LATE_PRUNE_SCORE_THRESH, minimum=0.5, maximum=1.0)
+    final_prune_min_opacity = read_float(options.get("fine_fastgs_final_prune_min_opacity"), FASTGS_FINAL_PRUNE_MIN_OPACITY, minimum=0.001, maximum=0.2)
+    final_prune_score_thresh = read_float(options.get("fine_fastgs_final_prune_score_thresh"), FASTGS_FINAL_PRUNE_SCORE_THRESH, minimum=0.5, maximum=1.0)
+    deblur_enabled = _choice_string(options.get("fine_deblur_enabled"), FASTGS_DEBLUR_ENABLED, {"auto", "true", "false"})
+    deblur_mode = _choice_string(options.get("fine_deblur_mode"), FASTGS_DEBLUR_MODE, {"sharp", "defocus", "motion", "mixed"})
+    deblur_blur_registry = str(options.get("fine_deblur_blur_registry") or "").strip()
+    deblur_warmup_iters = read_int(options.get("fine_deblur_warmup_iters"), min(FASTGS_DEBLUR_WARMUP_ITERS, max(1, iterations // 3)), minimum=0, maximum=max(0, iterations - 1))
+    deblur_num_moments = read_int(options.get("fine_deblur_num_moments"), FASTGS_DEBLUR_NUM_MOMENTS, minimum=1, maximum=8)
+    deblur_gtnet_lr = read_float(options.get("fine_deblur_gtnet_lr"), FASTGS_DEBLUR_GTNET_LR, minimum=1e-6, maximum=0.1)
+    deblur_hidden = read_int(options.get("fine_deblur_hidden"), FASTGS_DEBLUR_HIDDEN, minimum=1, maximum=8)
+    deblur_width = read_int(options.get("fine_deblur_width"), FASTGS_DEBLUR_WIDTH, minimum=16, maximum=256)
+    deblur_lambda_s = read_float(options.get("fine_deblur_lambda_s"), FASTGS_DEBLUR_LAMBDA_S, minimum=0.0, maximum=0.1)
+    deblur_lambda_p = read_float(options.get("fine_deblur_lambda_p"), FASTGS_DEBLUR_LAMBDA_P, minimum=0.0, maximum=0.1)
+    deblur_max_clamp = read_float(options.get("fine_deblur_max_clamp"), FASTGS_DEBLUR_MAX_CLAMP, minimum=1.0, maximum=1.8)
+    deblur_max_position_delta = read_float(options.get("fine_deblur_max_position_delta"), FASTGS_DEBLUR_MAX_POSITION_DELTA, minimum=0.0, maximum=1.0)
+    deblur_transform_reg_weight = read_float(options.get("fine_deblur_transform_reg_weight"), FASTGS_DEBLUR_TRANSFORM_REG_WEIGHT, minimum=0.0, maximum=1.0)
+    deblur_xyz_lr_scale = read_float(options.get("fine_deblur_xyz_lr_scale"), FASTGS_DEBLUR_XYZ_LR_SCALE, minimum=0.0, maximum=1.0)
+    deblur_blurred_views_only = _choice_string(options.get("fine_deblur_blurred_views_only"), FASTGS_DEBLUR_BLURRED_VIEWS_ONLY, {"true", "false"})
 
     command = [
         sys.executable,
@@ -97,10 +162,44 @@ def train_official_fastgs_big(
         str(iterations),
         "--densification_interval",
         str(densification_interval),
+        "--opacity_reset_interval",
+        str(opacity_reset_interval),
+        "--densify_from_iter",
+        str(densify_from_iter),
+        "--densify_until_iter",
+        str(densify_until_iter),
+        "--densify_grad_threshold",
+        str(densify_grad_threshold),
         "--optimizer_type",
-        "default",
+        FASTGS_OPTIMIZER_TYPE,
         "--data_device",
         data_device,
+        "--position_lr_init",
+        str(position_lr_init),
+        "--position_lr_final",
+        str(position_lr_final),
+        "--position_lr_delay_mult",
+        str(position_lr_delay_mult),
+        "--position_lr_max_steps",
+        str(position_lr_max_steps),
+        "--feature_lr",
+        str(feature_lr),
+        "--shfeature_lr",
+        str(shfeature_lr),
+        "--opacity_lr",
+        str(opacity_lr),
+        "--scaling_lr",
+        str(scaling_lr),
+        "--rotation_lr",
+        str(rotation_lr),
+        "--percent_dense",
+        str(percent_dense),
+        "--loss_thresh",
+        str(loss_thresh),
+        "--fastgs_sample_cameras",
+        str(sample_cameras),
+        "--grad_thresh",
+        str(grad_thresh),
         "--grad_abs_thresh",
         str(grad_abs_thresh),
         "--dense",
@@ -137,6 +236,22 @@ def train_official_fastgs_big(
         str(deblur_xyz_lr_scale),
         "--deblur_blurred_views_only",
         deblur_blurred_views_only,
+        "--fastgs_final_prune_min_opacity",
+        str(final_prune_min_opacity),
+        "--fastgs_final_prune_score_thresh",
+        str(final_prune_score_thresh),
+        "--fastgs_late_prune_enabled",
+        late_prune_enabled,
+        "--fastgs_late_prune_interval",
+        str(late_prune_interval),
+        "--fastgs_late_prune_from_iter",
+        str(late_prune_from_iter),
+        "--fastgs_late_prune_until_iter",
+        str(late_prune_until_iter),
+        "--fastgs_late_prune_min_opacity",
+        str(late_prune_min_opacity),
+        "--fastgs_late_prune_score_thresh",
+        str(late_prune_score_thresh),
     ]
     if deblur_blur_registry:
         command.extend(["--deblur_blur_registry", deblur_blur_registry])
@@ -189,11 +304,37 @@ def train_official_fastgs_big(
         "fastgs_mode": "big",
         "iterations": iterations,
         "data_device": data_device,
+        "optimizer_type": FASTGS_OPTIMIZER_TYPE,
         "densification_interval": densification_interval,
+        "opacity_reset_interval": opacity_reset_interval,
+        "densify_from_iter": densify_from_iter,
+        "densify_until_iter": densify_until_iter,
+        "densify_grad_threshold": densify_grad_threshold,
+        "position_lr_init": position_lr_init,
+        "position_lr_final": position_lr_final,
+        "position_lr_delay_mult": position_lr_delay_mult,
+        "position_lr_max_steps": position_lr_max_steps,
+        "feature_lr": feature_lr,
+        "shfeature_lr": shfeature_lr,
+        "opacity_lr": opacity_lr,
+        "scaling_lr": scaling_lr,
+        "rotation_lr": rotation_lr,
+        "percent_dense": percent_dense,
+        "loss_thresh": loss_thresh,
+        "fastgs_sample_cameras": sample_cameras,
+        "grad_thresh": grad_thresh,
         "grad_abs_thresh": grad_abs_thresh,
         "dense": dense,
         "mult": mult,
         "lambda_dssim": lambda_dssim,
+        "fastgs_final_prune_min_opacity": final_prune_min_opacity,
+        "fastgs_final_prune_score_thresh": final_prune_score_thresh,
+        "fastgs_late_prune_enabled": late_prune_enabled,
+        "fastgs_late_prune_interval": late_prune_interval,
+        "fastgs_late_prune_from_iter": late_prune_from_iter,
+        "fastgs_late_prune_until_iter": late_prune_until_iter,
+        "fastgs_late_prune_min_opacity": late_prune_min_opacity,
+        "fastgs_late_prune_score_thresh": late_prune_score_thresh,
         "deblur_enabled": deblur_enabled,
         "deblur_mode": deblur_mode,
         "deblur_blur_registry": deblur_blur_registry or None,
@@ -263,15 +404,33 @@ def _optional_float(
     return read_float(options.get(key), fallback if fallback is not None else minimum, minimum=minimum, maximum=maximum)
 
 
-def _optional_int(options: dict[str, Any], key: str, *, minimum: int, maximum: int) -> int | None:
+def _optional_int(options: dict[str, Any], key: str, *, fallback: int | None = None, minimum: int, maximum: int) -> int | None:
     if key not in options or options.get(key) in {None, ""}:
-        return None
-    return read_int(options.get(key), minimum, minimum=minimum, maximum=maximum)
+        return fallback
+    return read_int(options.get(key), fallback if fallback is not None else minimum, minimum=minimum, maximum=maximum)
 
 
 def _choice_string(value: Any, fallback: str, allowed: set[str]) -> str:
     normalized = str(value if value not in {None, ""} else fallback).strip().lower()
     return normalized if normalized in allowed else fallback
+
+
+def _bool_string(value: Any, fallback: bool) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    normalized = str(value if value not in {None, ""} else fallback).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return "true"
+    if normalized in {"0", "false", "no", "off"}:
+        return "false"
+    return "true" if fallback else "false"
+
+
+def _first_option(options: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in options and options.get(key) not in {None, ""}:
+            return options.get(key)
+    return None
 
 
 def _is_progress_line(line: str) -> bool:

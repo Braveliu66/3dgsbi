@@ -41,6 +41,7 @@ class Project(Base):
     tags: Mapped[list[str]] = mapped_column(JSON, default=list)
     total_size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     preview_image_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    share_token: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True, index=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_version: Mapped[int] = mapped_column(Integer, default=0)
     preview_source_version: Mapped[int | None] = mapped_column(Integer, nullable=True)

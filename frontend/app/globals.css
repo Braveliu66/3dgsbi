@@ -1102,6 +1102,27 @@ p { line-height: 1.55; }
   background: rgba(220, 236, 227, 0.52);
 }
 
+.share-meta-list {
+  display: grid;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.share-meta-list .list-row {
+  grid-template-columns: 86px minmax(0, 1fr);
+}
+
+.compact-tag-list {
+  gap: 6px;
+}
+
+.compact-tag-list .tag-pill {
+  min-height: 24px;
+  padding: 0 7px;
+  font-size: 11px;
+}
+
 .viewer-shell {
   position: relative;
   min-height: 420px;
@@ -1109,31 +1130,8 @@ p { line-height: 1.55; }
   overflow: hidden;
   border: 1px solid rgba(24, 30, 26, 0.7);
   border-radius: var(--radius);
-  background:
-    radial-gradient(circle at 40% 35%, rgba(199, 121, 24, 0.14), transparent 28%),
-    radial-gradient(circle at 66% 58%, rgba(31, 111, 88, 0.16), transparent 32%),
-    var(--dark);
+  background: var(--dark);
   box-shadow: inset 0 0 36px rgba(0,0,0,0.25);
-}
-
-.viewer-shell::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background-image: radial-gradient(circle, rgba(255,255,255,0.1) 1px, transparent 1px);
-  background-size: 24px 24px;
-  opacity: 0.24;
-}
-
-.viewer-shell::after {
-  content: "";
-  position: absolute;
-  inset: -60% 0 auto;
-  height: 42%;
-  pointer-events: none;
-  background: linear-gradient(to bottom, transparent, rgba(199,121,24,0.14), transparent);
-  animation: vertical-scan 4.8s linear infinite;
 }
 
 .viewer-canvas {
@@ -1150,6 +1148,108 @@ p { line-height: 1.55; }
 
 .viewer-canvas canvas:active {
   cursor: grabbing;
+}
+
+.tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tag-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid rgba(31, 111, 88, 0.18);
+  border-radius: 999px;
+  background: rgba(220, 236, 227, 0.42);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.viewer-camera-panel {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 5;
+  display: grid;
+  gap: 6px;
+  width: min(220px, calc(100% - 24px));
+  padding: 7px;
+  border: 1px solid rgba(255, 253, 247, 0.18);
+  border-radius: var(--radius);
+  background: rgba(15, 21, 18, 0.78);
+  backdrop-filter: blur(12px);
+}
+
+.viewer-fps-badge {
+  color: #f7efe1;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.viewer-camera-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.camera-button {
+  min-width: 0;
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 253, 247, 0.2);
+  border-radius: 6px;
+  color: #f7efe1;
+  background: rgba(255, 253, 247, 0.08);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.camera-button:hover:not(:disabled) {
+  border-color: rgba(255, 253, 247, 0.42);
+  background: rgba(199, 121, 24, 0.26);
+}
+
+.camera-button.active {
+  border-color: rgba(255, 253, 247, 0.5);
+  background: rgba(31, 111, 88, 0.7);
+}
+
+.camera-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.viewer-sensitivity {
+  display: grid;
+  gap: 5px;
+}
+
+.viewer-sensitivity label {
+  display: grid;
+  grid-template-columns: 34px minmax(70px, 1fr) 36px;
+  align-items: center;
+  gap: 6px;
+  color: rgba(255, 253, 247, 0.82);
+  font-size: 11px;
+}
+
+.viewer-sensitivity input {
+  width: 100%;
+}
+
+.viewer-sensitivity strong {
+  color: #f7efe1;
+  font-size: 11px;
+  text-align: right;
 }
 
 .viewer-axis-panel {
@@ -1204,13 +1304,18 @@ p { line-height: 1.55; }
   opacity: 0.42;
 }
 
+.axis-button.active {
+  border-color: rgba(255, 253, 247, 0.48);
+  background: rgba(31, 111, 88, 0.56);
+}
+
 .viewer-overlay {
   position: absolute;
   inset: auto 12px 12px 12px;
   z-index: 3;
   min-height: 44px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
@@ -1235,15 +1340,27 @@ p { line-height: 1.55; }
   gap: 6px;
 }
 
+.viewer-mode-buttons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.viewer-mode-buttons .axis-button {
+  width: auto;
+  min-width: 42px;
+  padding: 0 8px;
+}
+
 .viewer-point-controls {
   position: absolute;
   top: 12px;
-  left: 12px;
+  right: 12px;
   z-index: 4;
-  width: min(300px, calc(100% - 24px));
+  width: min(230px, calc(100% - 24px));
   display: grid;
-  gap: 8px;
-  padding: 8px 10px;
+  gap: 6px;
+  padding: 7px;
   border: 1px solid rgba(255, 253, 247, 0.18);
   border-radius: var(--radius);
   color: #f7efe1;
@@ -1253,10 +1370,10 @@ p { line-height: 1.55; }
 
 .viewer-point-controls label {
   display: grid;
-  grid-template-columns: 82px minmax(90px, 1fr) 42px;
+  grid-template-columns: 44px minmax(70px, 1fr) 38px;
   align-items: center;
-  gap: 8px;
-  font-size: 12px;
+  gap: 6px;
+  font-size: 11px;
 }
 
 .viewer-point-controls input {
@@ -1353,7 +1470,8 @@ p { line-height: 1.55; }
   background: var(--dark);
 }
 
-.image-preview-body img {
+.image-preview-body img,
+.image-preview-body video {
   max-width: 100%;
   max-height: min(68vh, 680px);
   object-fit: contain;
@@ -1548,12 +1666,28 @@ pre.empty-state {
     grid-template-columns: minmax(0, 1fr) auto;
   }
   .viewer-point-controls {
-    top: 118px;
-    left: 8px;
+    top: 150px;
+    right: 8px;
     width: calc(100% - 16px);
   }
   .viewer-point-controls label {
-    grid-template-columns: 76px minmax(80px, 1fr) 38px;
+    grid-template-columns: 54px minmax(80px, 1fr) 38px;
+  }
+  .viewer-camera-panel {
+    top: 8px;
+    left: 8px;
+    width: calc(100% - 16px);
+    padding: 6px;
+  }
+  .viewer-camera-actions {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .camera-button {
+    min-height: 30px;
+    font-size: 11px;
+  }
+  .viewer-sensitivity label {
+    grid-template-columns: 42px minmax(80px, 1fr) 38px;
   }
   .viewer-axis-panel {
     top: 8px;

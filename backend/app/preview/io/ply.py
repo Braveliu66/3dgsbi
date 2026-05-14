@@ -16,9 +16,9 @@ POINT_CLOUD_PLY_DTYPE = np.dtype(
         ("red", "u1"),
         ("green", "u1"),
         ("blue", "u1"),
-        ("confidence", "<f4"),
     ]
 )
+LEGACY_POINT_CLOUD_PLY_DTYPE = np.dtype(POINT_CLOUD_PLY_DTYPE.descr + [("confidence", "<f4")])
 FIXED_SPLAT_PLY_DTYPE = np.dtype(
     [
         ("x", "<f4"),
@@ -50,24 +50,27 @@ def write_point_cloud_ply(
     confidence: Any | None = None,
     max_points: int = 15_000_000,
     default_alpha: int = 255,
+    include_confidence: bool = True,
 ) -> int:
     """Write a plain colored point-cloud PLY."""
 
     pts, rgb, conf = prepare_point_data(points, colors, confidence=confidence, max_points=max_points)
-    if conf is None:
+    if include_confidence and conf is None:
         conf = np.ones(pts.shape[0], dtype=np.float32)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    records = np.empty(pts.shape[0], dtype=POINT_CLOUD_PLY_DTYPE)
+    records = np.empty(pts.shape[0], dtype=LEGACY_POINT_CLOUD_PLY_DTYPE if include_confidence else POINT_CLOUD_PLY_DTYPE)
     records["x"] = pts[:, 0]
     records["y"] = pts[:, 1]
     records["z"] = pts[:, 2]
     records["red"] = rgb[:, 0]
     records["green"] = rgb[:, 1]
     records["blue"] = rgb[:, 2]
-    records["confidence"] = conf
+    if include_confidence:
+        records["confidence"] = conf
 
     with output_path.open("wb") as handle:
+        confidence_header = "property float confidence\n" if include_confidence else ""
         header = (
             "ply\n"
             "format binary_little_endian 1.0\n"
@@ -78,7 +81,7 @@ def write_point_cloud_ply(
             "property uchar red\n"
             "property uchar green\n"
             "property uchar blue\n"
-            "property float confidence\n"
+            f"{confidence_header}"
             "end_header\n"
         )
         handle.write(header.encode("ascii"))
@@ -97,7 +100,9 @@ def convert_pointcloud_ply_to_fixed_splat_ply(
     points = np.column_stack((records["x"], records["y"], records["z"])).astype(np.float32, copy=False)
     colors = np.column_stack((records["red"], records["green"], records["blue"])).astype(np.uint8, copy=False)
 
-    valid = np.isfinite(points).all(axis=1) & np.isfinite(records["confidence"])
+    valid = np.isfinite(points).all(axis=1)
+    if "confidence" in records.dtype.names:
+        valid &= np.isfinite(records["confidence"])
     points = points[valid]
     colors = colors[valid]
     count = int(points.shape[0])
@@ -135,28 +140,32 @@ def read_fixed_pointcloud_ply(input_points_ply: Path) -> tuple[int, np.ndarray]:
         raise PreviewFailure("PLY_INVALID", f"PLY header terminator missing: {input_points_ply}")
     header = payload[: header_end + len(b"end_header\n")].decode("ascii", errors="strict")
     lines = header.splitlines()
-    if len(lines) < 11 or lines[0] != "ply" or lines[1] != "format binary_little_endian 1.0":
+    if len(lines) < 10 or lines[0] != "ply" or lines[1] != "format binary_little_endian 1.0":
         raise PreviewFailure("PLY_INVALID", f"unsupported point-cloud PLY header: {input_points_ply}")
     count = parse_vertex_count(lines, input_points_ply)
-    expected = [
+    expected_rgb = [
         "property float x",
         "property float y",
         "property float z",
         "property uchar red",
         "property uchar green",
         "property uchar blue",
-        "property float confidence",
     ]
-    if lines[3:10] != expected:
+    expected_legacy = expected_rgb + ["property float confidence"]
+    if lines[3:9] == expected_rgb and lines[9] == "end_header":
+        dtype = POINT_CLOUD_PLY_DTYPE
+    elif lines[3:10] == expected_legacy:
+        dtype = LEGACY_POINT_CLOUD_PLY_DTYPE
+    else:
         raise PreviewFailure(
             "PLY_INVALID",
             f"point-cloud PLY schema does not match LingBot preview schema: {input_points_ply}",
         )
     body = payload[header_end + len(b"end_header\n") :]
-    required_size = count * POINT_CLOUD_PLY_DTYPE.itemsize
+    required_size = count * dtype.itemsize
     if len(body) < required_size:
         raise PreviewFailure("PLY_INVALID", f"point-cloud PLY body is truncated: {input_points_ply}")
-    return count, np.frombuffer(body[:required_size], dtype=POINT_CLOUD_PLY_DTYPE, count=count)
+    return count, np.frombuffer(body[:required_size], dtype=dtype, count=count)
 
 
 def parse_vertex_count(lines: list[str], path: Path) -> int:

@@ -6,6 +6,7 @@ import io
 import json
 import mimetypes
 import os
+import secrets
 import shutil
 import tempfile
 import time
@@ -15,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import redis
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile, status
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -91,7 +92,8 @@ class UploadCheckPayload(BaseModel):
     file_size: int
     chunk_size: int
     total_chunks: int
-    file_hash: str
+    file_hash: str | None = None
+    file_signature: str | None = None
     content_type: str | None = None
 
 
@@ -367,8 +369,27 @@ def validate_upload_payload(payload: UploadCheckPayload) -> None:
     expected_chunks = (payload.file_size + payload.chunk_size - 1) // payload.chunk_size
     if payload.total_chunks != expected_chunks:
         raise HTTPException(status_code=400, detail="total_chunks does not match file_size and chunk_size")
-    if len(payload.file_hash) != 64 or any(char not in "0123456789abcdef" for char in payload.file_hash.lower()):
-        raise HTTPException(status_code=400, detail="file_hash must be a SHA-256 hex digest")
+    if payload.file_hash is not None:
+        if len(payload.file_hash) != 64 or any(char not in "0123456789abcdef" for char in payload.file_hash.lower()):
+            raise HTTPException(status_code=400, detail="file_hash must be a SHA-256 hex digest")
+        return
+    if not payload.file_signature or len(payload.file_signature) > 512:
+        raise HTTPException(status_code=400, detail="file_hash or file_signature is required")
+
+
+def upload_session_key(payload: UploadCheckPayload) -> str:
+    if payload.file_hash:
+        return payload.file_hash.lower()
+    signature = payload.file_signature or ""
+    return "sig-" + hashlib.sha256(signature.encode("utf-8")).hexdigest()
+
+
+def upload_has_strong_hash(payload: UploadCheckPayload) -> bool:
+    return payload.file_hash is not None
+
+
+def is_sha256_hex(value: str | None) -> bool:
+    return bool(value) and len(value) == 64 and all(char in "0123456789abcdef" for char in value.lower())
 
 
 def upload_session_dir(session: UploadSession) -> Path:
@@ -504,11 +525,27 @@ def ensure_algorithm_registry_schema() -> None:
         connection.execute(text("ALTER TABLE algorithm_registry ALTER COLUMN license TYPE TEXT"))
 
 
+def ensure_project_share_schema() -> None:
+    inspector = inspect(engine)
+    if "projects" not in inspector.get_table_names():
+        return
+    columns = {item["name"] for item in inspector.get_columns("projects")}
+    if "share_token" not in columns:
+        with engine.begin() as connection:
+            column_type = "VARCHAR(64)" if engine.dialect.name == "postgresql" else "VARCHAR(64)"
+            connection.execute(text(f"ALTER TABLE projects ADD COLUMN share_token {column_type}"))
+    index_names = {item["name"] for item in inspector.get_indexes("projects")}
+    if "ix_projects_share_token" not in index_names:
+        with engine.begin() as connection:
+            connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_projects_share_token ON projects (share_token)"))
+
+
 @app.on_event("startup")
 def startup() -> None:
     initialize_database_schema()
     ensure_upload_session_schema()
     ensure_algorithm_registry_schema()
+    ensure_project_share_schema()
     storage.ensure_bucket()
     with SessionLocal() as db:
         seed_database(db)
@@ -688,28 +725,31 @@ def check_upload(
     file_name = safe_filename(payload.file_name or "upload.bin")
     kind = media_kind_for_upload(file_name, payload.content_type)
     validate_media_kind(project, kind)
+    session_key = upload_session_key(payload)
+    has_strong_hash = upload_has_strong_hash(payload)
 
-    completed_session = db.scalar(
-        select(UploadSession)
-        .where(
-            UploadSession.project_id == project.id,
-            UploadSession.user_id == user.id,
-            UploadSession.file_hash == payload.file_hash.lower(),
-            UploadSession.status == "completed",
+    if has_strong_hash:
+        completed_session = db.scalar(
+            select(UploadSession)
+            .where(
+                UploadSession.project_id == project.id,
+                UploadSession.user_id == user.id,
+                UploadSession.file_hash == session_key,
+                UploadSession.status == "completed",
+            )
+            .order_by(UploadSession.updated_at.desc())
         )
-        .order_by(UploadSession.updated_at.desc())
-    )
-    if completed_session and completed_session.media_id:
-        media = db.get(MediaAsset, completed_session.media_id)
-        if media:
-            return {"upload_id": completed_session.id, "uploaded_chunks": list(range(completed_session.total_chunks)), "completed": True, "media": media_dict(media)}
+        if completed_session and completed_session.media_id:
+            media = db.get(MediaAsset, completed_session.media_id)
+            if media:
+                return {"upload_id": completed_session.id, "uploaded_chunks": list(range(completed_session.total_chunks)), "completed": True, "media": media_dict(media)}
 
     session = db.scalar(
         select(UploadSession)
         .where(
             UploadSession.project_id == project.id,
             UploadSession.user_id == user.id,
-            UploadSession.file_hash == payload.file_hash.lower(),
+            UploadSession.file_hash == session_key,
             UploadSession.status == "uploading",
         )
         .order_by(UploadSession.updated_at.desc())
@@ -718,7 +758,7 @@ def check_upload(
         session = UploadSession(
             project_id=project.id,
             user_id=user.id,
-            file_hash=payload.file_hash.lower(),
+            file_hash=session_key,
             file_name=file_name,
             file_size=payload.file_size,
             chunk_size=payload.chunk_size,
@@ -779,6 +819,49 @@ async def upload_chunk(
     return {"chunk_index": chunk_index, "uploaded_chunks": uploaded_chunk_indexes(session)}
 
 
+@app.put("/api/uploads/{upload_id}/chunks/{chunk_index}/raw")
+async def upload_chunk_raw(
+    upload_id: str,
+    chunk_index: int,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    session = owned_upload_session(db, upload_id, user)
+    if session.status == "completed":
+        return {"chunk_index": chunk_index, "uploaded_chunks": uploaded_chunk_indexes(session)}
+    if session.status == "failed":
+        raise HTTPException(status_code=409, detail=session.error_message or "Upload session failed")
+    expected_size = expected_chunk_size(session, chunk_index)
+    if expected_size > MAX_UPLOAD_CHUNK_SIZE:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Chunk exceeds 64MB limit")
+    root = upload_session_dir(session)
+    root.mkdir(parents=True, exist_ok=True)
+    target = chunk_path(session, chunk_index)
+    temp_path = root / f"{target.name}.{new_id()}.tmp"
+    size = 0
+    try:
+        with temp_path.open("wb") as handle:
+            async for chunk in request.stream():
+                if not chunk:
+                    continue
+                size += len(chunk)
+                if size > expected_size:
+                    temp_path.unlink(missing_ok=True)
+                    raise HTTPException(status_code=400, detail="Chunk size does not match expected size")
+                handle.write(chunk)
+        if size != expected_size:
+            temp_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail="Chunk size does not match expected size")
+        temp_path.replace(target)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+    session.updated_at = utc_now()
+    db.commit()
+    return {"chunk_index": chunk_index, "uploaded_chunks": uploaded_chunk_indexes(session)}
+
+
 @app.post("/api/uploads/{upload_id}/complete")
 def complete_upload(upload_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
     session = owned_upload_session(db, upload_id, user)
@@ -813,7 +896,7 @@ def complete_upload(upload_id: str, user: User = Depends(get_current_user), db: 
                 db.commit()
                 raise HTTPException(status_code=400, detail=session.error_message)
             merged_hash = sha256_file(merged_path)
-            if merged_hash != session.file_hash:
+            if is_sha256_hex(session.file_hash) and merged_hash != session.file_hash:
                 session.status = "failed"
                 session.error_message = "Merged file SHA-256 does not match expected hash"
                 session.updated_at = utc_now()
@@ -825,6 +908,7 @@ def complete_upload(upload_id: str, user: User = Depends(get_current_user), db: 
             session.status = "completed"
             session.object_uri = uri
             session.media_id = media.id
+            session.file_hash = merged_hash
             session.error_message = None
             session.updated_at = utc_now()
             db.commit()
@@ -1225,19 +1309,121 @@ def parse_range_header(range_header: str, size: int) -> tuple[int, int]:
     return start, min(end, size - 1)
 
 
+def fresh_final_viewer_artifacts(project: Project) -> dict[str, Artifact | None]:
+    final_artifacts = [
+        item
+        for item in project.artifacts
+        if item.kind in {"final_spz", "lod_rad"} and item.source_version == project.source_version
+    ]
+    model = sorted(final_artifacts, key=lambda item: (item.kind == "final_spz", item.created_at), reverse=True)[0] if final_artifacts else None
+    final_plys = [item for item in project.artifacts if item.kind == "final_ply" and item.source_version == project.source_version]
+    metas = [item for item in project.artifacts if item.kind == "viewer_meta_json" and item.source_version == project.source_version]
+    return {
+        "model": model,
+        "ply": sorted(final_plys, key=lambda item: item.created_at, reverse=True)[0] if final_plys else None,
+        "meta": sorted(metas, key=lambda item: item.created_at, reverse=True)[0] if metas else None,
+    }
+
+
+def fresh_preview_viewer_artifacts(project: Project) -> dict[str, Artifact | None]:
+    preview_artifacts = [
+        item
+        for item in project.artifacts
+        if item.kind == "preview_spz" and item.source_version == project.source_version
+    ]
+    model = sorted(preview_artifacts, key=lambda item: item.created_at, reverse=True)[0] if preview_artifacts else None
+    if not model:
+        return {"model": None, "ply": None, "debug_splats": None, "meta": None}
+    task_artifacts = [item for item in project.artifacts if item.task_id == model.task_id]
+    return {
+        "model": model,
+        "ply": next((item for item in task_artifacts if item.kind == "original_ply"), None),
+        "debug_splats": next((item for item in task_artifacts if item.kind == "debug_splats_ply"), None),
+        "meta": next((item for item in task_artifacts if item.kind == "preview_meta_json"), None),
+    }
+
+
+def project_viewer_payload(project: Project) -> dict[str, Any]:
+    final = fresh_final_viewer_artifacts(project)
+    final_model = final["model"]
+    if final_model:
+        final_ply = final["ply"]
+        final_meta = final["meta"]
+        return {
+            "status": "ready",
+            "mode": "single",
+            "source": "final",
+            "artifact_id": final_model.id,
+            "model_url": artifact_url(final_model),
+            "download_spz_url": artifact_url(final_model, download=True),
+            "file_size": final_model.file_size,
+            "gaussian_ply_url": artifact_url(final_ply) if final_ply else None,
+            "download_ply_url": artifact_url(final_ply, download=True) if final_ply else None,
+            "viewer_meta_url": artifact_url(final_meta) if final_meta else None,
+            "format": "rad" if final_model.kind == "lod_rad" or final_model.file_name.lower().endswith(".rad") else "spz",
+        }
+
+    preview = fresh_preview_viewer_artifacts(project)
+    preview_model = preview["model"]
+    if preview_model:
+        preview_ply = preview["ply"]
+        preview_meta = preview["meta"]
+        return {
+            "status": "ready",
+            "mode": "single",
+            "source": "preview",
+            "artifact_id": preview_model.id,
+            "model_url": artifact_url(preview_model),
+            "download_spz_url": artifact_url(preview_model, download=True),
+            "file_size": preview_model.file_size,
+            "format": "spz",
+            "debug_points_ply_url": artifact_url(preview_ply) if preview_ply else None,
+            "debug_splats_ply_url": artifact_url(preview["debug_splats"]) if preview["debug_splats"] else None,
+            "download_ply_url": artifact_url(preview_ply, download=True) if preview_ply else None,
+            "preview_meta_url": artifact_url(preview_meta) if preview_meta else None,
+            "quality_warning": (preview_model.metadata_json or {}).get("quality_warning"),
+            "point_source": (preview_model.metadata_json or {}).get("point_source")
+            or (preview_model.metadata_json or {}).get("lingbot_point_source"),
+        }
+
+    final_artifacts = [item for item in project.artifacts if item.kind in {"final_spz", "lod_rad"}]
+    preview_artifacts = [item for item in project.artifacts if item.kind == "preview_spz"]
+    if final_artifacts:
+        return {
+            "status": "unavailable",
+            "message": "Final artifact is stale because source media changed; start fine reconstruction again.",
+            "stale": True,
+        }
+    if preview_artifacts:
+        return {
+            "status": "unavailable",
+            "message": "Preview artifact is stale because source media changed; start preview again.",
+            "stale": True,
+        }
+    return {"status": "unavailable", "message": "No preview or final SPZ artifact is available."}
+
+
 @app.get("/api/projects/{project_id}/viewer-config")
 def viewer_config(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
     project = owned_project(db, project_id, user, include_children=True)
+    return project_viewer_payload(project)
     final_artifacts = [item for item in project.artifacts if item.kind in {"final_spz", "lod_rad"}]
     fresh_final = [item for item in final_artifacts if item.source_version == project.source_version]
     if fresh_final:
         artifact = sorted(fresh_final, key=lambda item: (item.kind == "final_spz", item.created_at), reverse=True)[0]
+        fresh_final_plys = [
+            item
+            for item in project.artifacts
+            if item.kind == "final_ply" and item.source_version == project.source_version
+        ]
+        gaussian_ply = sorted(fresh_final_plys, key=lambda item: item.created_at, reverse=True)[0] if fresh_final_plys else None
         return {
             "status": "ready",
             "mode": "single",
             "source": "final",
             "artifact_id": artifact.id,
             "model_url": artifact_url(artifact),
+            "gaussian_ply_url": artifact_url(gaussian_ply) if gaussian_ply else None,
             "format": "rad" if artifact.kind == "lod_rad" or artifact.file_name.lower().endswith(".rad") else "spz",
         }
     preview_artifacts = [item for item in project.artifacts if item.kind == "preview_spz"]
@@ -1275,6 +1461,56 @@ def viewer_config(project_id: str, user: User = Depends(get_current_user), db: S
             "stale": True,
         }
     return {"status": "unavailable", "message": "暂无真实 preview.spz 产物。"}
+
+
+@app.post("/api/projects/{project_id}/share")
+def create_project_share(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    project = owned_project(db, project_id, user, include_children=True)
+    if not project.share_token:
+        project.share_token = unique_share_token(db)
+        db.commit()
+        db.refresh(project)
+    return {"share_token": project.share_token, "share_url": f"/share/{project.share_token}", "project": shared_project_payload(project)}
+
+
+@app.delete("/api/projects/{project_id}/share")
+def delete_project_share(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    project = owned_project(db, project_id, user)
+    project.share_token = None
+    db.commit()
+    return {"deleted": True}
+
+
+@app.get("/api/shared-projects/{share_token}")
+def shared_project(share_token: str, db: Session = Depends(get_db)) -> dict[str, Any]:
+    project = db.scalar(
+        select(Project)
+        .where(Project.share_token == share_token)
+        .options(selectinload(Project.artifacts))
+    )
+    if not project:
+        raise HTTPException(status_code=404, detail="Shared project not found")
+    return shared_project_payload(project)
+
+
+def unique_share_token(db: Session) -> str:
+    for _ in range(8):
+        token = secrets.token_urlsafe(24)
+        if not db.scalar(select(Project.id).where(Project.share_token == token)):
+            return token
+    raise HTTPException(status_code=500, detail="Unable to allocate share token")
+
+
+def shared_project_payload(project: Project) -> dict[str, Any]:
+    return {
+        "id": project.id,
+        "name": project.name,
+        "tags": project.tags or [],
+        "total_size_bytes": project.total_size_bytes,
+        "created_at": iso(project.created_at),
+        "updated_at": iso(project.updated_at),
+        "viewer": project_viewer_payload(project),
+    }
 
 
 @app.post("/api/feedback")

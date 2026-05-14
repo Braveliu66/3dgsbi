@@ -5,12 +5,20 @@ from .loss_utils import l1_loss
 from fused_ssim import fused_ssim as fast_ssim
 import torchvision.transforms as transforms
 import random
+import sys
+from pathlib import Path
+
+_BACKEND_ROOT = Path(__file__).resolve().parents[5]
+if str(_BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_ROOT))
+
+from app.fine.fastgs_defaults import FASTGS_LAMBDA_DSSIM, FASTGS_SAMPLE_CAMERAS
 
 
-def sampling_cameras(my_viewpoint_stack):
+def sampling_cameras(my_viewpoint_stack, sample_count=FASTGS_SAMPLE_CAMERAS):
     ''' Randomly sample a given number of cameras from the viewpoint stack'''
 
-    num_cams = min(10, len(my_viewpoint_stack))
+    num_cams = min(int(sample_count), len(my_viewpoint_stack))
     camlist = []
     for _ in range(num_cams):
         loc = random.randint(0, len(my_viewpoint_stack) - 1)
@@ -24,10 +32,10 @@ def get_loss(reconstructed_image, original_image):
 
     return l1_loss_norm
 
-def compute_photometric_loss(viewpoint_cam, image):
+def compute_photometric_loss(viewpoint_cam, image, lambda_dssim=FASTGS_LAMBDA_DSSIM):
     gt_image = viewpoint_cam.original_image.cuda()
     Ll1 = l1_loss(image, gt_image)
-    loss = (1.0 - 0.2) * Ll1 + 0.2 * (1.0 - fast_ssim(image.unsqueeze(0), gt_image.unsqueeze(0)))
+    loss = (1.0 - lambda_dssim) * Ll1 + lambda_dssim * (1.0 - fast_ssim(image.unsqueeze(0), gt_image.unsqueeze(0)))
     return loss
 
 def normalize(config_value, value_tensor):
@@ -73,7 +81,7 @@ def compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, args, DENSIFY = 
     for view in range(len(camlist)):
         my_viewpoint_cam = camlist[view]
         render_image = render_fastgs(my_viewpoint_cam, gaussians, pipe, bg, args.mult)["render"]
-        photometric_loss = compute_photometric_loss(my_viewpoint_cam, render_image)
+        photometric_loss = compute_photometric_loss(my_viewpoint_cam, render_image, getattr(args, "lambda_dssim", FASTGS_LAMBDA_DSSIM))
 
         gt_image = my_viewpoint_cam.original_image.cuda()
         get_flag = True

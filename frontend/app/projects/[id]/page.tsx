@@ -1,13 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { Download, FileArchive, Film, Images, PauseCircle, PlayCircle, ScrollText, Trash2, X } from "lucide-react";
+import { Download, FileArchive, Film, Images, PauseCircle, PlayCircle, ScrollText, Share2, Trash2, X } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, artifactUrl, downloadFileWithProgress, formatBytes, mediaFileUrl, mediaThumbnailUrl, projectEventsUrl } from "@/lib/api";
 import type { TransferProgress } from "@/lib/api";
 import { formatDateTime, inputTypeLabel, isActiveTask, projectStatusLabel, taskStatusLabel, taskTypeLabel } from "@/lib/labels";
-import type { Artifact, Project, Task, ViewerConfig } from "@/lib/types";
+import type { Artifact, MediaAsset, Project, Task, ViewerConfig } from "@/lib/types";
 import { SplatViewer } from "@/components/SplatViewer";
 import { TaskProgress } from "@/components/TaskProgress";
 
@@ -22,6 +22,7 @@ export default function ProjectDetailPage() {
   const [showMedia, setShowMedia] = useState(false);
   const [brokenThumbIds, setBrokenThumbIds] = useState<Set<string>>(() => new Set());
   const [busy, setBusy] = useState(false);
+  const [shareUrl, setShareUrl] = useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<TransferProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -191,6 +192,19 @@ export default function ProjectDetailPage() {
     }
   }
 
+  async function shareProject() {
+    if (!project) return;
+    setError(null);
+    try {
+      const result = await api.createProjectShare(project.id);
+      const url = `${window.location.origin}${result.share_url}`;
+      setShareUrl(url);
+      await navigator.clipboard?.writeText(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create share link");
+    }
+  }
+
   function connectEvents(projectId: string) {
     eventSourceRef.current?.close();
     const source = new EventSource(projectEventsUrl(projectId));
@@ -254,6 +268,9 @@ export default function ProjectDetailPage() {
           <button className="ghost-button" type="button" onClick={() => setLogTask(latestTask ?? null)} disabled={!latestTask}>
             <ScrollText size={17} />查看日志
           </button>
+          <button className="ghost-button" type="button" onClick={() => void shareProject()} disabled={!project || busy}>
+            <Share2 size={17} />分享
+          </button>
           <button className="ghost-button" type="button" onClick={() => void startFine()} disabled={!canStartFine || busy}>
             <PlayCircle size={17} />精细重建
           </button>
@@ -280,6 +297,7 @@ export default function ProjectDetailPage() {
                     : "已加载极速预览 SPZ"
                   : viewer?.message ?? "等待真实预览产物"}
               </p>
+              {shareUrl ? <p className="muted small">分享链接已复制：{shareUrl}</p> : null}
             </div>
             {project ? <span className={`status-pill ${project.status}`}>{projectStatusLabel(project.status)}</span> : null}
           </div>
@@ -287,7 +305,8 @@ export default function ProjectDetailPage() {
             <SplatViewer
               modelUrl={viewer?.status === "ready" ? viewer.model_url : null}
               format={viewer?.format}
-              previewMetaUrl={viewer?.status === "ready" ? viewer.preview_meta_url : null}
+              viewerMetaUrl={viewer?.status === "ready" ? viewer.viewer_meta_url ?? viewer.preview_meta_url : null}
+              gaussianPlyUrl={viewer?.status === "ready" ? viewer.gaussian_ply_url : null}
               debugPointsUrl={viewer?.status === "ready" ? viewer.debug_points_ply_url : null}
               defaultViewMode={viewer?.status === "ready" && viewer.point_source ? "points" : "splats"}
             />
@@ -380,9 +399,9 @@ export default function ProjectDetailPage() {
                           key={item.id}
                           role="button"
                           tabIndex={0}
-                          onClick={() => item.kind === "image" ? setSelectedMedia(item) : undefined}
+                          onClick={() => setSelectedMedia(item)}
                           onKeyDown={(event) => {
-                            if ((event.key === "Enter" || event.key === " ") && item.kind === "image") setSelectedMedia(item);
+                            if (event.key === "Enter" || event.key === " ") setSelectedMedia(item);
                           }}
                         >
                           {thumb ? (
@@ -476,20 +495,28 @@ export default function ProjectDetailPage() {
             <div className="panel-head">
               <div>
                 <h2 className="truncate" title={selectedMedia.file_name}>{selectedMedia.file_name}</h2>
-                <p className="muted small">{formatBytes(selectedMedia.file_size)}</p>
+                <p className="muted small">{formatBytes(selectedMedia.file_size)} · {mediaResolutionLabel(selectedMedia)}</p>
               </div>
               <button className="icon-button" type="button" onClick={() => setSelectedMedia(null)} aria-label="关闭">
                 <X size={17} />
               </button>
             </div>
             <div className="image-preview-body">
-              <img src={mediaFileUrl(selectedMedia)} alt={selectedMedia.file_name} />
+              {selectedMedia.kind === "video" ? (
+                <video src={mediaFileUrl(selectedMedia)} controls preload="metadata" />
+              ) : (
+                <img src={mediaFileUrl(selectedMedia)} alt={selectedMedia.file_name} />
+              )}
             </div>
           </section>
         </div>
       ) : null}
     </div>
   );
+}
+
+function mediaResolutionLabel(media: MediaAsset): string {
+  return media.width && media.height ? `${media.width} x ${media.height}` : "resolution pending";
 }
 
 function formatTaskLog(task: Task): string {

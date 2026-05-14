@@ -3,6 +3,8 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.fine.fastgs_defaults import FINE_IMAGE_MAX_SIDE, FINE_ITERATIONS
+
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGE_DIR.parent.parent if PACKAGE_DIR.parent.name == "backend" else PACKAGE_DIR.parent
@@ -47,8 +49,8 @@ class Settings(BaseSettings):
     fine_queue_name: str = "fine_tasks"
     fine_expected_seconds_images: int = 7200
     fine_expected_seconds_video: int = 14_400
-    fine_image_max_side: int = 2400
-    fine_iterations: int = 30000
+    fine_image_max_side: int = FINE_IMAGE_MAX_SIDE
+    fine_iterations: int = FINE_ITERATIONS
 
     litevggt_repo_commit: str = "4767c17f8b6f176bb751566e92f60eb885040033"
     lingbot_map_repo_commit: str = "4cd986009b9adeded8a4e740919221940dedeffe"

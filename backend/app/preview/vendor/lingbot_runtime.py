@@ -18,12 +18,12 @@ from app.preview.types import PreviewFailure
 
 Progress = Callable[[str, int, str], None]
 LINGBOT_MAP_COMMIT = "4cd986009b9adeded8a4e740919221940dedeffe"
-POINT_KEYS = ("world_points", "points")
+POINT_KEYS = ("world_points", "world_points_from_depth", "points")
 COLOR_KEYS = ("images", "image", "rgb", "colors")
 CONF_KEYS_BY_POINT = {
     "world_points": ("world_points_conf", "conf"),
-    "points": ("conf", "world_points_conf"),
     "world_points_from_depth": ("depth_conf", "world_points_conf", "conf"),
+    "points": ("conf", "world_points_conf"),
 }
 _BATCHED_NDIMS = {
     "pose_enc": 3,
@@ -1014,6 +1014,12 @@ def attach_depth_world_points(
             return
         raise PreviewFailure("LINGBOT_DEPTH_REPROJECT_FAILED", f"LingBot depth reprojection failed: {exc}") from exc
     predictions["world_points_from_depth"] = np.asarray(depth_points, dtype=np.float32)
+    if "depth_conf" not in predictions:
+        depth = np.asarray(predictions["depth"])
+        if depth.ndim == 4 and depth.shape[-1] == 1:
+            depth = depth[..., 0]
+        if depth.ndim >= 2:
+            predictions["depth_conf"] = np.ones(depth.shape, dtype=np.float32)
 
 
 def to_numpy_array(value: Any, *, torch_module: Any) -> np.ndarray | None:
@@ -1167,6 +1173,7 @@ def write_spark_plain_ply_from_arrays(
     color_batches = []
     conf_batches = []
     point_source = None
+    recommended_view = None
     raw_point_count = 0
     filtered_point_count = 0
     skipped_frame_count = 0
@@ -1187,6 +1194,8 @@ def write_spark_plain_ply_from_arrays(
         color_batches.append(batch.colors)
         conf_batches.append(batch.confidence)
         point_source = point_source or batch.point_source
+        if recommended_view is None:
+            recommended_view = lingbot_camera_view_from_frame(frame, radius_hint=1.0)
         selected_indices.append(frame_index)
 
     return write_lingbot_preview_assets(
@@ -1204,6 +1213,7 @@ def write_spark_plain_ply_from_arrays(
         skipped_frame_count=skipped_frame_count,
         raw_point_count=raw_point_count,
         confidence_filtered_point_count=max(0, raw_point_count - filtered_point_count),
+        recommended_view=recommended_view,
     )
 
 
@@ -1230,6 +1240,7 @@ def write_spark_plain_ply_from_npz(
     color_batches = []
     conf_batches = []
     point_source = None
+    recommended_view = None
     raw_point_count = 0
     filtered_point_count = 0
     skipped_frame_count = 0
@@ -1245,13 +1256,15 @@ def write_spark_plain_ply_from_npz(
                 min_conf=min_conf,
                 source_name=str(path),
             )
-        raw_point_count += batch.raw_count
-        filtered_point_count += batch.filtered_count
-        point_batches.append(batch.points)
-        color_batches.append(batch.colors)
-        conf_batches.append(batch.confidence)
-        point_source = point_source or batch.point_source
-        selected_files.append(path)
+            raw_point_count += batch.raw_count
+            filtered_point_count += batch.filtered_count
+            point_batches.append(batch.points)
+            color_batches.append(batch.colors)
+            conf_batches.append(batch.confidence)
+            point_source = point_source or batch.point_source
+            if recommended_view is None:
+                recommended_view = lingbot_camera_view_from_frame(data, radius_hint=1.0)
+            selected_files.append(path)
 
     return write_lingbot_preview_assets(
         point_batches,
@@ -1268,6 +1281,7 @@ def write_spark_plain_ply_from_npz(
         skipped_frame_count=skipped_frame_count,
         raw_point_count=raw_point_count,
         confidence_filtered_point_count=max(0, raw_point_count - filtered_point_count),
+        recommended_view=recommended_view,
     )
 
 
@@ -1287,6 +1301,7 @@ def write_lingbot_preview_assets(
     skipped_frame_count: int = 0,
     raw_point_count: int | None = None,
     confidence_filtered_point_count: int = 0,
+    recommended_view: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if frame_count <= 0:
         raise PreviewFailure("LINGBOT_PREDICTIONS_MISSING", empty_selection_message)
@@ -1306,6 +1321,13 @@ def write_lingbot_preview_assets(
     conf = prepared.confidence
     point_radius = fixed_preview_radius(points)
     bbox = preview_bounds(points)
+    if recommended_view is not None:
+        recommended_view = {**recommended_view}
+        position = np.asarray(recommended_view.get("position"), dtype=np.float32)
+        target_direction = np.asarray(recommended_view.pop("_target_direction", [0.0, 0.0, 1.0]), dtype=np.float32)
+        if position.shape == (3,) and target_direction.shape == (3,):
+            target = position + target_direction * max(float(bbox["radius"]), 0.35)
+            recommended_view["target"] = [float(value) for value in target]
 
     points_ply = output_points_ply or output_ply
     points_count = write_lingbot_pointcloud_ply(points, colors, conf, points_ply)
@@ -1316,6 +1338,7 @@ def write_lingbot_preview_assets(
             point_count_raw=raw_point_count if raw_point_count is not None else total_points,
             point_count_exported=points_count,
             bbox=bbox,
+            recommended_view=recommended_view,
         )
 
     quality_warning = "LingBot preview used depth-reprojected world_points_from_depth fallback." if point_source == "world_points_from_depth" else None
@@ -1337,7 +1360,7 @@ def write_lingbot_preview_assets(
         "point_count_exported": int(points_count),
         "lingbot_point_source": point_source,
         "lingbot_depth_reprojection_fallback": bool(point_source == "world_points_from_depth"),
-        "lingbot_ply_format": "point_cloud",
+        "lingbot_ply_format": "rgb_point_cloud",
         "lingbot_point_source_frames": int(source_frame_count if source_frame_count is not None else frame_count),
         "lingbot_point_frame_count": int(frame_count),
         "lingbot_point_skipped_frames": int(skipped_frame_count),
@@ -1362,7 +1385,7 @@ def write_lingbot_pointcloud_ply(
     confidence: np.ndarray | None,
     output_ply: Path,
 ) -> int:
-    return write_point_cloud_ply(points, colors, output_ply, confidence=confidence, max_points=0)
+    return write_point_cloud_ply(points, colors, output_ply, confidence=confidence, max_points=0, include_confidence=False)
 
 
 def write_spark_plain_ply_records(
@@ -1579,6 +1602,7 @@ def write_preview_meta_json(
     point_count_raw: int,
     point_count_exported: int,
     bbox: dict[str, Any],
+    recommended_view: dict[str, Any] | None = None,
 ) -> None:
     output_meta_json.parent.mkdir(parents=True, exist_ok=True)
     radius = float(bbox["radius"])
@@ -1600,7 +1624,51 @@ def write_preview_meta_json(
             "far": max(radius * 100.0, 100.0),
         },
     }
+    if recommended_view is not None:
+        payload["recommended_view"] = recommended_view
     output_meta_json.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+
+
+def lingbot_camera_view_from_frame(frame: Any, *, radius_hint: float) -> dict[str, Any] | None:
+    try:
+        if "extrinsic" not in frame or "intrinsic" not in frame:
+            return None
+        extrinsic = np.asarray(frame["extrinsic"], dtype=np.float32)
+        intrinsic = np.asarray(frame["intrinsic"], dtype=np.float32)
+        if extrinsic.shape[0] == 4 and extrinsic.shape[1] == 4:
+            w2c = extrinsic[:3, :4]
+        else:
+            w2c = extrinsic[:3, :4]
+        rotation = w2c[:3, :3]
+        translation = w2c[:3, 3]
+        camera_to_world = rotation.T
+        position = (-camera_to_world @ translation).astype(np.float32)
+        forward = normalize_vector(camera_to_world @ np.asarray([0.0, 0.0, 1.0], dtype=np.float32))
+        up = normalize_vector(camera_to_world @ np.asarray([0.0, -1.0, 0.0], dtype=np.float32))
+        if forward is None or up is None:
+            return None
+        view: dict[str, Any] = {
+            "source": "first_frame_camera",
+            "position": [float(value) for value in position],
+            "_target_direction": [float(value) for value in forward],
+            "target": [float(value) for value in position + forward * max(float(radius_hint), 0.35)],
+            "up": [float(value) for value in up],
+        }
+        image = np.asarray(frame["images"]) if "images" in frame else None
+        image_height = int(image.shape[-2]) if image is not None and image.ndim >= 2 else 0
+        focal_y = float(intrinsic[1, 1]) if intrinsic.shape[0] >= 2 and intrinsic.shape[1] >= 2 else 0.0
+        if image_height > 0 and focal_y > 0:
+            view["fov_y_degrees"] = float(np.degrees(2.0 * np.arctan(float(image_height) / (2.0 * focal_y))))
+        return view
+    except Exception:
+        return None
+
+
+def normalize_vector(vector: np.ndarray) -> np.ndarray | None:
+    norm = float(np.linalg.norm(vector))
+    if not np.isfinite(norm) or norm <= 1e-6:
+        return None
+    return (vector / norm).astype(np.float32)
 
 
 def extract_prediction_frame_points(

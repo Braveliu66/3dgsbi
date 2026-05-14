@@ -14,12 +14,24 @@ import numpy as np
 import json
 import os, random, time
 from random import randint
+from pathlib import Path
 from lpipsPyTorch import lpips
 from utils.loss_utils import l1_loss
 from fused_ssim import fused_ssim as fast_ssim
 from gaussian_renderer import render_fastgs, network_gui_ws
 from gaussian_renderer.deblur import render_fastgs_deblur
 import sys
+_BACKEND_ROOT = Path(__file__).resolve().parents[4]
+if str(_BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_ROOT))
+
+from app.fine.fastgs_defaults import (
+    FASTGS_ITERATIONS,
+    FASTGS_LATE_PRUNE_ENABLED,
+    FASTGS_LATE_PRUNE_FROM_ITER,
+    FASTGS_LATE_PRUNE_INTERVAL,
+    FASTGS_LATE_PRUNE_UNTIL_ITER,
+)
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state
 import uuid
@@ -147,13 +159,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # Log and save
             # training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_time, testing_iterations, scene, render_fastgs, (pipe, background, opt.mult))
             if (iteration in saving_iterations):
-                if deblur_state.enabled and iteration == opt.iterations and not deblur_final_pruned:
+                if iteration == opt.iterations and not deblur_final_pruned:
                     my_viewpoint_stack = scene.getTrainCameras().copy()
-                    camlist = sampling_cameras(my_viewpoint_stack)
+                    camlist = sampling_cameras(my_viewpoint_stack, opt.fastgs_sample_cameras)
                     _, pruning_score = compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, opt)
-                    gaussians.final_prune_fastgs(min_opacity = 0.01, pruning_score = pruning_score)
+                    gaussians.final_prune_fastgs(
+                        min_opacity = opt.fastgs_final_prune_min_opacity,
+                        pruning_score = pruning_score,
+                        score_thresh = opt.fastgs_final_prune_score_thresh,
+                    )
                     deblur_final_pruned = True
-                    print(f"\n[ITER {iteration}] Deblur conservative sharp final prune complete")
+                    print(f"\n[ITER {iteration}] FastGS final prune complete")
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
             
@@ -169,7 +185,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                     my_viewpoint_stack = scene.getTrainCameras().copy()
-                    camlist = sampling_cameras(my_viewpoint_stack)
+                    camlist = sampling_cameras(my_viewpoint_stack, opt.fastgs_sample_cameras)
 
                     # The multiview consistent densification of fastgs
                     importance_score, pruning_score = compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, opt, DENSIFY=True)                    
@@ -184,15 +200,29 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
 
-            # The multiview consistent pruning of fastgs. We do it every 3k iterations after 15k
+            # The multiview consistent pruning of fastgs.
             # In this stage, the model converge basically. So we can prune more aggressively without degrading rendering quality.
             # You can check the rendering results of 20K iterations in arxiv version (https://arxiv.org/abs/2511.04283), the rendering quality is already very good.
-            if iteration % 3000 == 0 and iteration > 15_000 and iteration < 30_000 and not deblur_state.enabled:
+            late_prune_enabled = option_bool(getattr(opt, "fastgs_late_prune_enabled", None), FASTGS_LATE_PRUNE_ENABLED)
+            late_prune_interval = max(1, int(getattr(opt, "fastgs_late_prune_interval", FASTGS_LATE_PRUNE_INTERVAL)))
+            late_prune_from_iter = int(getattr(opt, "fastgs_late_prune_from_iter", FASTGS_LATE_PRUNE_FROM_ITER))
+            late_prune_until_iter = int(getattr(opt, "fastgs_late_prune_until_iter", FASTGS_LATE_PRUNE_UNTIL_ITER))
+            if (
+                late_prune_enabled
+                and iteration % late_prune_interval == 0
+                and iteration > late_prune_from_iter
+                and iteration < late_prune_until_iter
+                and not deblur_state.enabled
+            ):
                 my_viewpoint_stack = scene.getTrainCameras().copy()
-                camlist = sampling_cameras(my_viewpoint_stack)
+                camlist = sampling_cameras(my_viewpoint_stack, opt.fastgs_sample_cameras)
 
                 _, pruning_score = compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, opt)                    
-                gaussians.final_prune_fastgs(min_opacity = 0.1, pruning_score = pruning_score)
+                gaussians.final_prune_fastgs(
+                    min_opacity = opt.fastgs_late_prune_min_opacity,
+                    pruning_score = pruning_score,
+                    score_thresh = opt.fastgs_late_prune_score_thresh,
+                )
         
             # Optimization step
             if iteration < opt.iterations:
@@ -275,6 +305,15 @@ def set_xyz_learning_rate(gaussians, lr):
             param_group["lr"] = lr
             return lr
     return None
+
+
+def option_bool(value, fallback):
+    normalized = str(value if value not in {None, ""} else fallback).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return bool(fallback)
 
 
 def write_deblur_metrics(
@@ -389,10 +428,10 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[30_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[30_000])
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[FASTGS_ITERATIONS])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[FASTGS_ITERATIONS])
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[30_000])
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[FASTGS_ITERATIONS])
     parser.add_argument("--start_checkpoint", type=str, default = None)
     parser.add_argument("--websockets", action='store_true', default=False)
     parser.add_argument("--benchmark_dir", type=str, default=None)

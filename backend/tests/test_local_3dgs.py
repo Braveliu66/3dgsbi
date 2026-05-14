@@ -23,6 +23,7 @@ else:
 try:
     import torch
 
+    from app.fine.fastgs_defaults import FASTGS_FINAL_PRUNE_MIN_OPACITY, FASTGS_SAMPLE_CAMERAS
     from app.fine.fastgs_policy import FastGSPolicy, visible_mean_loss_score
 except Exception as exc:  # pragma: no cover
     torch = None
@@ -63,6 +64,7 @@ class Local3DGSTests(unittest.TestCase):
         self.assertEqual(tuple(score.shape), (4, 1))
         self.assertEqual(float(score[0].item()), 0.25)
         self.assertEqual(float(score[1].item()), 0.0)
+        self.assertEqual(FastGSPolicy().metrics()["fastgs_sample_cameras"], FASTGS_SAMPLE_CAMERAS)
         self.assertEqual(FastGSPolicy({"fine_fastgs_sample_cameras": 3}).metrics()["fastgs_sample_cameras"], 3)
 
     @unittest.skipIf(torch is None, f"torch import failed: {IMPORT_ERROR}")
@@ -94,6 +96,7 @@ class Local3DGSTests(unittest.TestCase):
 
         self.assertEqual(tuple(gaussians.get_xyz.shape), (2, 3))
         self.assertEqual(policy.metrics()["fastgs_final_pruned_points"], 2)
+        self.assertEqual(FastGSPolicy().metrics()["fastgs_final_prune_min_opacity"], FASTGS_FINAL_PRUNE_MIN_OPACITY)
 
 
 def write_test_ply(path: Path, xyz: np.ndarray, rgb: np.ndarray) -> None:

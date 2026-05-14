@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, call, patch
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_ROOT))
@@ -307,6 +308,55 @@ class LiteVGGTOfficialPathTests(unittest.TestCase):
 
         self.assertEqual(cm.exception.code, "LITEVGGT_EMPTY_POINT_CLOUD")
 
+    def test_litevggt_model_cache_reuses_cpu_model_across_gpu_loads(self) -> None:
+        from app.preview.vendor import litevggt_runtime
+
+        model = MagicMock()
+        model.to.return_value = model
+        model_cls = MagicMock(return_value=model)
+        fake_torch = types.SimpleNamespace(
+            bfloat16="bfloat16",
+            load=MagicMock(return_value={"weights": "ok"}),
+            cuda=types.SimpleNamespace(
+                is_available=MagicMock(return_value=True),
+                empty_cache=MagicMock(),
+            ),
+        )
+        vggt_module = types.ModuleType("vggt.models.vggt")
+        vggt_module.VGGT = model_cls
+
+        with patch.dict(
+            sys.modules,
+            {
+                "torch": fake_torch,
+                "vggt": types.ModuleType("vggt"),
+                "vggt.models": types.ModuleType("vggt.models"),
+                "vggt.models.vggt": vggt_module,
+            },
+        ):
+            litevggt_runtime.reset_litevggt_model_cache_for_tests()
+            try:
+                first = litevggt_runtime.get_litevggt_model_on_gpu(Path("model-cache/litevggt/te_dict.pt"))
+                litevggt_runtime.unload_litevggt_model_from_gpu()
+                second = litevggt_runtime.get_litevggt_model_on_gpu(Path("model-cache/litevggt/te_dict.pt"))
+                metrics = litevggt_runtime.get_litevggt_model_cache_metrics()
+            finally:
+                litevggt_runtime.reset_litevggt_model_cache_for_tests()
+
+        self.assertIs(first, model)
+        self.assertIs(second, model)
+        self.assertEqual(model_cls.call_count, 1)
+        self.assertEqual(fake_torch.load.call_count, 1)
+        self.assertEqual(model.load_state_dict.call_count, 1)
+        self.assertIn(call("bfloat16"), model.to.call_args_list)
+        self.assertIn(call("cuda:0", non_blocking=True), model.to.call_args_list)
+        self.assertIn(call("cpu"), model.to.call_args_list)
+        self.assertEqual(model.to.call_args_list.count(call("cuda:0", non_blocking=True)), 2)
+        self.assertEqual(metrics["litevggt_cpu_model_cached"], True)
+        self.assertEqual(metrics["litevggt_gpu_loaded_from_cpu"], True)
+        self.assertEqual(metrics["litevggt_model_loaded_from_disk"], False)
+        self.assertEqual(metrics["litevggt_gpu_model_loaded"], True)
+
 
 @unittest.skipIf(RUNTIME_IMPORT_ERROR is not None, f"LiteVGGT runtime dependencies unavailable: {RUNTIME_IMPORT_ERROR}")
 class LiteVGGTAdapterTests(unittest.TestCase):
@@ -385,9 +435,9 @@ class LiteVGGTAdapterTests(unittest.TestCase):
         self.assertIsNone(run.call_args.kwargs["depth_conf_thresh"])
         self.assertEqual(run.call_args.kwargs["preprocess_mode"], "pad")
         self.assertEqual(run.call_args.kwargs["selection_strategy"], "scene_coverage")
-        self.assertEqual(run.call_args.kwargs["axis_trim_low_quantile"], 0.0)
-        self.assertEqual(run.call_args.kwargs["axis_trim_high_quantile"], 1.0)
-        self.assertEqual(run.call_args.kwargs["spatial_keep_quantile"], 1.0)
+        self.assertEqual(run.call_args.kwargs["axis_trim_low_quantile"], 0.001)
+        self.assertEqual(run.call_args.kwargs["axis_trim_high_quantile"], 0.999)
+        self.assertEqual(run.call_args.kwargs["spatial_keep_quantile"], 0.9975)
         self.assertEqual(run.call_args.kwargs["output_ply"].name, "preview_points.ply")
         self.assertEqual(run.call_args.kwargs["output_meta_json"].name, "preview_meta.json")
 
@@ -397,11 +447,14 @@ class LiteVGGTAdapterTests(unittest.TestCase):
         self.assertEqual(Path(result.metrics["preview_meta_json"]).name, "preview_meta.json")
         self.assertEqual(result.metrics["point_source"], "litevggt_depth_unprojected")
         self.assertEqual(result.metrics["fixed_splat_base_point_radius"], 0.003)
-        self.assertEqual(result.metrics["fixed_splat_point_radius"], 0.003)
+        self.assertEqual(result.metrics["fixed_splat_point_radius_scale"], 0.22)
+        self.assertEqual(result.metrics["fixed_splat_opacity"], 0.55)
+        self.assertAlmostEqual(result.metrics["fixed_splat_point_radius"], 0.00066)
         self.assertEqual(result.metrics["fixed_splat_count"], 9)
         self.assertEqual(pointcloud_to_splats.call_args.args[0].name, "preview_points.ply")
         self.assertEqual(pointcloud_to_splats.call_args.args[1].name, "preview_splats.ply")
-        self.assertEqual(pointcloud_to_splats.call_args.kwargs["point_radius"], 0.003)
+        self.assertAlmostEqual(pointcloud_to_splats.call_args.kwargs["point_radius"], 0.00066)
+        self.assertAlmostEqual(pointcloud_to_splats.call_args.kwargs["opacity"], 0.55)
         self.assertEqual(splats_to_spz.call_args.args[0].name, "preview_splats.ply")
 
     def test_adapter_passes_only_minimal_runtime_options(self) -> None:
@@ -440,9 +493,9 @@ class LiteVGGTAdapterTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["max_points"], 1234)
         self.assertEqual(run.call_args.kwargs["max_input_frames"], 12)
         self.assertEqual(run.call_args.kwargs["selection_strategy"], "scene_coverage")
-        self.assertEqual(run.call_args.kwargs["axis_trim_low_quantile"], 0.0)
-        self.assertEqual(run.call_args.kwargs["axis_trim_high_quantile"], 1.0)
-        self.assertEqual(run.call_args.kwargs["spatial_keep_quantile"], 1.0)
+        self.assertEqual(run.call_args.kwargs["axis_trim_low_quantile"], 0.001)
+        self.assertEqual(run.call_args.kwargs["axis_trim_high_quantile"], 0.999)
+        self.assertEqual(run.call_args.kwargs["spatial_keep_quantile"], 0.9975)
         self.assertEqual(
             sorted(run.call_args.kwargs),
             [

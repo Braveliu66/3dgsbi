@@ -99,6 +99,7 @@ def run_video_artdeco_speed3r_pipeline(
         final_ply=ctx.final_ply,
         final_spz=ctx.final_spz,
         metrics_json=ctx.metrics_json,
+        viewer_meta_json=ctx.viewer_meta_json if ctx.viewer_meta_json and ctx.viewer_meta_json.exists() else None,
         lod_rad=lod_rad,
         splat_count=splat_count,
         source_commits=SOURCE_COMMITS_VIDEO_FINE,

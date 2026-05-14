@@ -4,20 +4,33 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { SpzReader, transcodeSpz } from "@sparkjsdev/spark";
 
+const DEFAULT_MAX_SH = 3;
+const DEFAULT_FRACTIONAL_BITS = 14;
+
+function readIntEnv(name, fallback, min, max) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+}
+
 async function main() {
   const [command, inputPath, outputPath] = process.argv.slice(2);
   if (command === "convert") {
     if (!inputPath || !outputPath) throw new Error("usage: convert input.ply output.spz");
     const fileBytes = new Uint8Array(await readFile(inputPath));
+    const maxSh = readIntEnv("SPARK_SPZ_MAX_SH", DEFAULT_MAX_SH, 0, 3);
+    const fractionalBits = readIntEnv("SPARK_SPZ_FRACTIONAL_BITS", DEFAULT_FRACTIONAL_BITS, 8, 16);
     const result = await transcodeSpz({
       inputs: [{ fileBytes, pathOrUrl: inputPath }],
-      maxSh: 0,
-      fractionalBits: 12,
+      maxSh,
+      fractionalBits,
     });
     await writeFile(outputPath, result.fileBytes);
     const reader = new SpzReader({ fileBytes: result.fileBytes });
     await reader.parseHeader();
-    console.log(JSON.stringify({ splats: reader.numSplats, bytes: result.fileBytes.byteLength }));
+    console.log(JSON.stringify({ splats: reader.numSplats, bytes: result.fileBytes.byteLength, maxSh, fractionalBits }));
     return;
   }
   if (command === "validate") {

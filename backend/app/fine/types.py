@@ -24,6 +24,7 @@ class FineContext:
     final_ply: Path
     final_spz: Path
     metrics_json: Path
+    viewer_meta_json: Path | None
     lod_rad: Path | None
     source_version: int
     options: dict[str, Any]
@@ -35,6 +36,7 @@ class FineResult:
     final_ply: Path
     final_spz: Path
     metrics_json: Path
+    viewer_meta_json: Path | None
     lod_rad: Path | None
     splat_count: int | None
     source_commits: dict[str, str]

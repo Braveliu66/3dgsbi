@@ -14,6 +14,7 @@ import { TaskProgress } from "@/components/TaskProgress";
 const MIN_INPUT_FRAMES = 1;
 const MIN_FINE_INPUT_FRAMES = 3;
 const MAX_INPUT_FRAMES = 800;
+const UPLOAD_FILE_CONCURRENCY = 3;
 export default function UploadPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const thumbsRef = useRef<Record<string, string>>({});
@@ -94,17 +95,35 @@ export default function UploadPage() {
     const fileList = Array.from(files);
     try {
       const active = await ensureProject();
-      const uploaded: MediaAsset[] = [];
-      for (const [index, file] of fileList.entries()) {
-        const asset = await api.uploadMedia(active.id, file, (progress) => {
-          setUploadProgress({ ...progress, fileIndex: index + 1, totalFiles: fileList.length });
+      const uploaded: MediaAsset[] = new Array(fileList.length);
+      const progressByIndex = new Map<number, TransferProgress>();
+      const reportProgress = (index: number, file: File, progress: TransferProgress) => {
+        progressByIndex.set(index, progress);
+        const loadedBytes = fileList.reduce((sum, item, itemIndex) => {
+          if (itemIndex === index) return sum + progress.loadedBytes;
+          return sum + (progressByIndex.get(itemIndex)?.loadedBytes ?? 0);
+        }, 0);
+        const totalBytes = fileList.reduce((sum, item) => sum + item.size, 0);
+        setUploadProgress({
+          ...progress,
+          loadedBytes,
+          totalBytes,
+          percent: totalBytes > 0 ? Math.round((loadedBytes / totalBytes) * 100) : progress.percent,
+          fileName: file.name,
+          fileIndex: index + 1,
+          totalFiles: fileList.length
         });
-        uploaded.push(asset);
+      };
+      await runUploadPool(fileList, UPLOAD_FILE_CONCURRENCY, async (file, index) => {
+        const asset = await api.uploadMedia(active.id, file, (progress) => {
+          reportProgress(index, file, progress);
+        });
+        uploaded[index] = asset;
         if (asset.kind === "image" && file.type.startsWith("image/")) {
           const url = URL.createObjectURL(file);
           thumbsRef.current[asset.id] = url;
         }
-      }
+      });
       setThumbs({ ...thumbsRef.current });
       setMedia((items) => [...items, ...uploaded]);
       await refreshProject(active.id);
@@ -275,9 +294,9 @@ export default function UploadPage() {
                     key={item.id}
                     role="button"
                     tabIndex={0}
-                    onClick={() => item.kind === "image" ? setSelectedMedia(item) : undefined}
+                    onClick={() => setSelectedMedia(item)}
                     onKeyDown={(event) => {
-                      if ((event.key === "Enter" || event.key === " ") && item.kind === "image") setSelectedMedia(item);
+                      if (event.key === "Enter" || event.key === " ") setSelectedMedia(item);
                     }}
                   >
                     {thumb ? <img src={thumb} alt={item.file_name} /> : item.kind === "image" ? <Images size={24} /> : <Film size={24} />}
@@ -340,7 +359,8 @@ export default function UploadPage() {
               <SplatViewer
                 modelUrl={viewer.model_url}
                 format={viewer.format}
-                previewMetaUrl={viewer.preview_meta_url}
+                viewerMetaUrl={viewer.viewer_meta_url ?? viewer.preview_meta_url}
+                gaussianPlyUrl={viewer.gaussian_ply_url}
                 debugPointsUrl={viewer.debug_points_ply_url}
                 defaultViewMode={viewer.point_source ? "points" : "splats"}
               />
@@ -369,20 +389,40 @@ export default function UploadPage() {
             <div className="panel-head">
               <div>
                 <h2 className="truncate" title={selectedMedia.file_name}>{selectedMedia.file_name}</h2>
-                <p className="muted small">{formatBytes(selectedMedia.file_size)}</p>
+                <p className="muted small">{formatBytes(selectedMedia.file_size)} · {mediaResolutionLabel(selectedMedia)}</p>
               </div>
               <button className="icon-button" type="button" onClick={() => setSelectedMedia(null)} aria-label="关闭">
                 <X size={17} />
               </button>
             </div>
             <div className="image-preview-body">
-              <img src={mediaFileUrl(selectedMedia)} alt={selectedMedia.file_name} />
+              {selectedMedia.kind === "video" ? (
+                <video src={mediaFileUrl(selectedMedia)} controls preload="metadata" />
+              ) : (
+                <img src={mediaFileUrl(selectedMedia)} alt={selectedMedia.file_name} />
+              )}
             </div>
           </section>
         </div>
       ) : null}
     </div>
   );
+}
+
+async function runUploadPool<T>(items: T[], concurrency: number, worker: (item: T, index: number) => Promise<unknown>): Promise<void> {
+  let next = 0;
+  const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      await worker(items[index], index);
+    }
+  });
+  await Promise.all(runners);
+}
+
+function mediaResolutionLabel(media: MediaAsset): string {
+  return media.width && media.height ? `${media.width} x ${media.height}` : "resolution pending";
 }
 
 function TransferProgressBar({ progress }: { progress: (TransferProgress & { fileIndex: number; totalFiles: number }) | null }) {

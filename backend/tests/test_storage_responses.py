@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.database import SessionLocal  # noqa: E402
+from app.fine.fastgs_defaults import FINE_ITERATIONS  # noqa: E402
 from app.main import app, storage  # noqa: E402
 from app.models import Artifact, MediaAsset, Task  # noqa: E402
 from app.task_control import task_cancel_key  # noqa: E402
@@ -223,7 +224,7 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(file_response.content, b"legacy ply\n")
             self.assertIn("attachment", file_response.headers["content-disposition"])
 
-    def test_fine_task_can_start_without_preview_after_three_images(self) -> None:
+    def test_fine_task_can_start_without_preview_after_eight_images(self) -> None:
         with TestClient(app) as client, patch("app.main.enqueue_fine_task", return_value=None):
             headers = auth_headers(client)
             project_id = create_image_project(client, headers, "direct fine start")
@@ -242,8 +243,8 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(payload["type"], "fine")
             self.assertEqual(payload["status"], "queued")
             self.assertEqual(payload["options"]["fine_pipeline"], "official_fastgs_big")
-            self.assertEqual(payload["options"]["source_version"], 3)
-            self.assertEqual(payload["options"]["fine_iterations"], 1000)
+            self.assertEqual(payload["options"]["source_version"], 8)
+            self.assertEqual(payload["options"]["fine_iterations"], FINE_ITERATIONS)
             self.assertNotIn("fine_amb3r_memory_device", payload["options"])
             self.assertNotIn("fine_amb3r_init_candidates", payload["options"])
 
@@ -475,6 +476,8 @@ class StorageResponseTests(unittest.TestCase):
             project_id = create_image_project(client, headers, "final viewer priority")
             preview_uri = storage.write_bytes("tests/preview-viewer.spz", b"preview")
             final_uri = storage.write_bytes("tests/final-viewer.spz", b"final")
+            final_ply_uri = storage.write_bytes("tests/final-viewer.ply", b"ply")
+            viewer_meta_uri = storage.write_bytes("tests/final-viewer-meta.json", b"{}")
             with SessionLocal() as db:
                 task = Task(project_id=project_id, type="fine", status="succeeded", current_stage="done")
                 db.add(task)
@@ -501,6 +504,28 @@ class StorageResponseTests(unittest.TestCase):
                         source_version=0,
                     )
                 )
+                db.add(
+                    Artifact(
+                        project_id=project_id,
+                        task_id=task.id,
+                        kind="final_ply",
+                        object_uri=final_ply_uri,
+                        file_name="final.ply",
+                        file_size=3,
+                        source_version=0,
+                    )
+                )
+                db.add(
+                    Artifact(
+                        project_id=project_id,
+                        task_id=task.id,
+                        kind="viewer_meta_json",
+                        object_uri=viewer_meta_uri,
+                        file_name="final_viewer_meta.json",
+                        file_size=2,
+                        source_version=0,
+                    )
+                )
                 db.commit()
 
             response = client.get(f"/api/projects/{project_id}/viewer-config", headers=headers)
@@ -510,6 +535,99 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(payload["status"], "ready")
             self.assertEqual(payload["source"], "final")
             self.assertEqual(payload["format"], "spz")
+            self.assertEqual(payload["file_size"], 5)
+            self.assertIn("/api/artifacts/", payload["model_url"])
+            self.assertIn("/api/artifacts/", payload["gaussian_ply_url"])
+            self.assertIn("/api/artifacts/", payload["viewer_meta_url"])
+            self.assertIn("/api/artifacts/", payload["download_spz_url"])
+            self.assertIn("/api/artifacts/", payload["download_ply_url"])
+
+    def test_project_share_returns_public_viewer_downloads_and_revokes(self) -> None:
+        with TestClient(app) as client:
+            headers = auth_headers(client)
+            project_id = create_image_project(client, headers, "shared viewer")
+            spz_uri = storage.write_bytes("tests/shared-final.spz", b"spz")
+            ply_uri = storage.write_bytes("tests/shared-final.ply", b"ply")
+            with SessionLocal() as db:
+                task = Task(project_id=project_id, type="fine", status="succeeded", current_stage="done")
+                db.add(task)
+                db.flush()
+                db.add(
+                    Artifact(
+                        project_id=project_id,
+                        task_id=task.id,
+                        kind="final_spz",
+                        object_uri=spz_uri,
+                        file_name="final_web.spz",
+                        file_size=3,
+                        source_version=0,
+                    )
+                )
+                db.add(
+                    Artifact(
+                        project_id=project_id,
+                        task_id=task.id,
+                        kind="final_ply",
+                        object_uri=ply_uri,
+                        file_name="final.ply",
+                        file_size=3,
+                        source_version=0,
+                    )
+                )
+                db.commit()
+
+            share_response = client.post(f"/api/projects/{project_id}/share", headers=headers)
+            share_response.raise_for_status()
+            share_payload = share_response.json()
+            token = share_payload["share_token"]
+            self.assertEqual(share_payload["share_url"], f"/share/{token}")
+
+            public_response = client.get(f"/api/shared-projects/{token}")
+            public_response.raise_for_status()
+            public_payload = public_response.json()
+            self.assertEqual(public_payload["id"], project_id)
+            self.assertEqual(public_payload["total_size_bytes"], 0)
+            self.assertEqual(public_payload["viewer"]["source"], "final")
+            self.assertEqual(public_payload["viewer"]["file_size"], 3)
+            self.assertIn("/api/artifacts/", public_payload["viewer"]["download_spz_url"])
+            self.assertIn("/api/artifacts/", public_payload["viewer"]["download_ply_url"])
+
+            delete_response = client.delete(f"/api/projects/{project_id}/share", headers=headers)
+            delete_response.raise_for_status()
+            self.assertEqual(client.get(f"/api/shared-projects/{token}").status_code, 404)
+
+    def test_chunked_upload_accepts_lightweight_signature_without_pre_hash(self) -> None:
+        content = b"quick first upload content"
+        with TestClient(app) as client:
+            headers = auth_headers(client)
+            project_id = create_video_project(client, headers, "lightweight upload")
+            payload = {
+                "file_name": "clip.mp4",
+                "file_size": len(content),
+                "chunk_size": 8,
+                "total_chunks": (len(content) + 7) // 8,
+                "file_signature": "clip.mp4|24|123|video/mp4",
+                "content_type": "video/mp4",
+            }
+
+            check_response = client.post(f"/api/projects/{project_id}/uploads/check", json=payload, headers=headers)
+            check_response.raise_for_status()
+            upload_id = check_response.json()["upload_id"]
+
+            for index, start in enumerate(range(0, len(content), 8)):
+                chunk_response = client.put(
+                    f"/api/uploads/{upload_id}/chunks/{index}/raw",
+                    content=content[start : start + 8],
+                    headers={**headers, "Content-Type": "application/octet-stream"},
+                )
+                chunk_response.raise_for_status()
+
+            complete_response = client.post(f"/api/uploads/{upload_id}/complete", headers=headers)
+            complete_response.raise_for_status()
+            asset = complete_response.json()["media"]
+
+            self.assertEqual(asset["file_size"], len(content))
+            self.assertEqual(client.get(f"/api/media/{asset['id']}/file", headers=headers).content, content)
 
     def test_chunked_upload_resumes_and_completes_file(self) -> None:
         content = b"0123456789abcdefghi"

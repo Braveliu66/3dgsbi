@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 import importlib.util
+from argparse import ArgumentParser
 from pathlib import Path
 
 
@@ -50,7 +51,45 @@ class FastGSDeblurSourceTests(unittest.TestCase):
         self.assertIn("can_update_topology = bool(iteration < opt.densify_until_iter and not deblur_active)", source)
         self.assertIn("render_fastgs_deblur", source)
         self.assertIn("compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, opt", source)
+        self.assertIn("fastgs_final_prune_min_opacity", source)
+        self.assertIn("fastgs_final_prune_score_thresh", source)
+        self.assertIn("score_thresh = opt.fastgs_final_prune_score_thresh", source)
+        self.assertIn("fastgs_late_prune_enabled", source)
+        self.assertIn("fastgs_late_prune_min_opacity", source)
+        self.assertIn("score_thresh = opt.fastgs_late_prune_score_thresh", source)
         self.assertIn('"deblur_final_prune_uses_sharp_score": True', source)
+
+    def test_fastgs_argparse_uses_central_defaults(self) -> None:
+        sys.path.insert(0, str(BACKEND_ROOT))
+        from app.fine.fastgs_defaults import (
+            FASTGS_DATA_DEVICE,
+            FASTGS_DENSIFICATION_INTERVAL,
+            FASTGS_FINAL_PRUNE_MIN_OPACITY,
+            FASTGS_ITERATIONS,
+            FASTGS_LATE_PRUNE_INTERVAL,
+            FASTGS_RESOLUTION,
+            FASTGS_SAMPLE_CAMERAS,
+        )
+
+        spec = importlib.util.spec_from_file_location("fastgs_arguments_test", FASTGS_ROOT / "arguments" / "__init__.py")
+        if spec is None or spec.loader is None:
+            raise ImportError("failed to load FastGS arguments")
+        arguments = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = arguments
+        spec.loader.exec_module(arguments)
+
+        parser = ArgumentParser()
+        arguments.ModelParams(parser)
+        arguments.OptimizationParams(parser)
+        parsed = parser.parse_args([])
+
+        self.assertEqual(parsed.iterations, FASTGS_ITERATIONS)
+        self.assertEqual(parsed.resolution, FASTGS_RESOLUTION)
+        self.assertEqual(parsed.data_device, FASTGS_DATA_DEVICE)
+        self.assertEqual(parsed.densification_interval, FASTGS_DENSIFICATION_INTERVAL)
+        self.assertEqual(parsed.fastgs_sample_cameras, FASTGS_SAMPLE_CAMERAS)
+        self.assertEqual(parsed.fastgs_final_prune_min_opacity, FASTGS_FINAL_PRUNE_MIN_OPACITY)
+        self.assertEqual(parsed.fastgs_late_prune_interval, FASTGS_LATE_PRUNE_INTERVAL)
 
     def test_gaussian_model_skips_gtnet_for_topology_mutations(self) -> None:
         source = (FASTGS_ROOT / "scene" / "gaussian_model.py").read_text(encoding="utf-8")

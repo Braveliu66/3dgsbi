@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -13,6 +14,19 @@ from app.preview.utils import VENDOR_ROOT, image_files, prepend_sys_path
 
 
 Progress = Callable[[str, int, str], None]
+IDLE_UNLOAD_SECONDS = 60.0
+_CPU_MODEL = None
+_CPU_MODEL_CHECKPOINT_PATH: Path | None = None
+_GPU_LOADED = False
+_MODEL_LOCK = threading.RLock()
+_IDLE_UNLOAD_TIMER: threading.Timer | None = None
+_IDLE_UNLOAD_TOKEN = 0
+_LAST_MODEL_CACHE_METRICS: dict[str, Any] = {
+    "litevggt_cpu_model_cached": False,
+    "litevggt_gpu_loaded_from_cpu": False,
+    "litevggt_model_loaded_from_disk": False,
+    "litevggt_gpu_idle_unload_seconds": IDLE_UNLOAD_SECONDS,
+}
 
 
 @dataclass(slots=True)
@@ -69,6 +83,128 @@ class LiteVGGTImageBatch:
     tensors: list[Any]
     valid_masks: np.ndarray
     preprocess_mode: str
+
+
+def get_litevggt_model_on_gpu(checkpoint_path: Path):
+    import torch
+
+    global _CPU_MODEL, _CPU_MODEL_CHECKPOINT_PATH, _GPU_LOADED, _LAST_MODEL_CACHE_METRICS
+
+    resolved_checkpoint = Path(checkpoint_path).resolve()
+    with _MODEL_LOCK:
+        cancel_litevggt_idle_unload()
+        loaded_from_disk = False
+        if _CPU_MODEL is None or _CPU_MODEL_CHECKPOINT_PATH != resolved_checkpoint:
+            if _CPU_MODEL is not None and _GPU_LOADED:
+                _CPU_MODEL.to("cpu")
+                _GPU_LOADED = False
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            with prepend_sys_path(VENDOR_ROOT / "litevggt"):
+                from vggt.models.vggt import VGGT
+
+            checkpoint = torch.load(resolved_checkpoint, map_location="cpu")
+            model = VGGT()
+            model.load_state_dict(checkpoint, strict=False)
+            model.to(torch.bfloat16)
+            model.eval()
+
+            _CPU_MODEL = model
+            _CPU_MODEL_CHECKPOINT_PATH = resolved_checkpoint
+            _GPU_LOADED = False
+            loaded_from_disk = True
+
+        moved_to_gpu = False
+        if not _GPU_LOADED:
+            _CPU_MODEL.to("cuda:0", non_blocking=True)
+            _GPU_LOADED = True
+            moved_to_gpu = True
+
+        _LAST_MODEL_CACHE_METRICS = {
+            "litevggt_cpu_model_cached": True,
+            "litevggt_gpu_loaded_from_cpu": moved_to_gpu,
+            "litevggt_model_loaded_from_disk": loaded_from_disk,
+            "litevggt_gpu_idle_unload_seconds": IDLE_UNLOAD_SECONDS,
+        }
+        return _CPU_MODEL
+
+
+def get_litevggt_model_cache_metrics() -> dict[str, Any]:
+    with _MODEL_LOCK:
+        return {
+            **_LAST_MODEL_CACHE_METRICS,
+            "litevggt_gpu_model_loaded": bool(_GPU_LOADED),
+        }
+
+
+def schedule_litevggt_gpu_idle_unload(delay_seconds: float = IDLE_UNLOAD_SECONDS) -> None:
+    global _IDLE_UNLOAD_TIMER, _IDLE_UNLOAD_TOKEN
+
+    with _MODEL_LOCK:
+        cancel_litevggt_idle_unload()
+        if _CPU_MODEL is None or not _GPU_LOADED:
+            return
+        _IDLE_UNLOAD_TOKEN += 1
+        token = _IDLE_UNLOAD_TOKEN
+        timer = threading.Timer(float(delay_seconds), unload_litevggt_model_from_gpu_if_idle, args=(token,))
+        timer.daemon = True
+        _IDLE_UNLOAD_TIMER = timer
+        timer.start()
+
+
+def cancel_litevggt_idle_unload() -> None:
+    global _IDLE_UNLOAD_TIMER, _IDLE_UNLOAD_TOKEN
+
+    timer = _IDLE_UNLOAD_TIMER
+    if timer is not None:
+        timer.cancel()
+        _IDLE_UNLOAD_TIMER = None
+        _IDLE_UNLOAD_TOKEN += 1
+
+
+def unload_litevggt_model_from_gpu_if_idle(token: int) -> None:
+    with _MODEL_LOCK:
+        if token != _IDLE_UNLOAD_TOKEN:
+            return
+        unload_litevggt_model_from_gpu()
+
+
+def unload_litevggt_model_from_gpu() -> None:
+    import torch
+
+    global _GPU_LOADED, _IDLE_UNLOAD_TIMER, _IDLE_UNLOAD_TOKEN
+
+    with _MODEL_LOCK:
+        timer = _IDLE_UNLOAD_TIMER
+        _IDLE_UNLOAD_TIMER = None
+        _IDLE_UNLOAD_TOKEN += 1
+        if timer is not None:
+            timer.cancel()
+        if _CPU_MODEL is None or not _GPU_LOADED:
+            return
+        _CPU_MODEL.to("cpu")
+        _GPU_LOADED = False
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
+def reset_litevggt_model_cache_for_tests() -> None:
+    global _CPU_MODEL, _CPU_MODEL_CHECKPOINT_PATH, _GPU_LOADED, _IDLE_UNLOAD_TOKEN, _LAST_MODEL_CACHE_METRICS
+
+    with _MODEL_LOCK:
+        cancel_litevggt_idle_unload()
+        if _CPU_MODEL is not None and _GPU_LOADED:
+            unload_litevggt_model_from_gpu()
+        _CPU_MODEL = None
+        _CPU_MODEL_CHECKPOINT_PATH = None
+        _GPU_LOADED = False
+        _IDLE_UNLOAD_TOKEN += 1
+        _LAST_MODEL_CACHE_METRICS = {
+            "litevggt_cpu_model_cached": False,
+            "litevggt_gpu_loaded_from_cpu": False,
+            "litevggt_model_loaded_from_disk": False,
+            "litevggt_gpu_idle_unload_seconds": IDLE_UNLOAD_SECONDS,
+        }
 
 
 def resolve_litevggt_quality_settings(frame_count: int, options: dict[str, Any] | None = None) -> LiteVGGTQualitySettings:
@@ -489,7 +625,6 @@ def run_litevggt_reconstruction(
     with prepend_sys_path(VENDOR_ROOT / "litevggt"):
         import transformer_engine.pytorch as te
         from transformer_engine.common.recipe import DelayedScaling, Format
-        from vggt.models.vggt import VGGT
         from vggt.utils.geometry import unproject_depth_map_to_point_map
         from vggt.utils.load_fn import load_image_file_crop
         from vggt.utils.pose_enc import pose_encoding_to_extri_intri
@@ -538,12 +673,9 @@ def run_litevggt_reconstruction(
         height = int(image_batch.shape[-2])
         width = int(image_batch.shape[-1])
 
-        progress("litevggt_loading_model", 34, f"loading LiteVGGT checkpoint: {checkpoint_path.name}")
-        model = VGGT().to(device)
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
-        model.load_state_dict(checkpoint, strict=False)
-        model.to(torch.bfloat16)
-        model.eval()
+        progress("litevggt_loading_model", 34, f"loading LiteVGGT model on GPU: {checkpoint_path.name}")
+        model = get_litevggt_model_on_gpu(checkpoint_path)
+        model_cache_metrics = get_litevggt_model_cache_metrics()
 
         aggregated_tokens_list = None
         pose_enc = None
@@ -669,6 +801,7 @@ def run_litevggt_reconstruction(
                     "point_count_after_voxel_downsample": selected_count,
                     "cuda_memory_peak_mb": float(peak_mb),
                     "official_single_path": True,
+                    **model_cache_metrics,
                 },
             )
         finally:
@@ -682,6 +815,7 @@ def run_litevggt_reconstruction(
             reset_litevggt_aggregator_cache(model)
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            schedule_litevggt_gpu_idle_unload()
 
 
 LITEVGGT_POINT_SOURCE = "litevggt_depth_unprojected"
@@ -714,6 +848,7 @@ def write_litevggt_preview_meta_json(
     point_count_raw: int,
     point_count_exported: int,
     bounds: dict[str, Any],
+    recommended_view: dict[str, Any] | None = None,
 ) -> None:
     payload = {
         "asset_type": "litevggt_preview_points",
@@ -734,8 +869,48 @@ def write_litevggt_preview_meta_json(
             "default_point_size": 2.0,
         },
     }
+    if recommended_view is not None:
+        payload["recommended_view"] = recommended_view
     output_meta_json.parent.mkdir(parents=True, exist_ok=True)
     output_meta_json.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def litevggt_camera_view(
+    w2c: np.ndarray,
+    intrinsic: np.ndarray,
+    *,
+    radius: float,
+    image_height: int,
+) -> dict[str, Any] | None:
+    try:
+        rotation = np.asarray(w2c[:3, :3], dtype=np.float32)
+        translation = np.asarray(w2c[:3, 3], dtype=np.float32)
+        camera_to_world = rotation.T
+        position = (-camera_to_world @ translation).astype(np.float32)
+        forward = normalize(camera_to_world @ np.asarray([0.0, 0.0, 1.0], dtype=np.float32))
+        up = normalize(camera_to_world @ np.asarray([0.0, -1.0, 0.0], dtype=np.float32))
+        if forward is None or up is None:
+            return None
+        target = position + forward * max(float(radius), 0.35)
+        view: dict[str, Any] = {
+            "source": "first_frame_camera",
+            "position": [float(value) for value in position],
+            "target": [float(value) for value in target],
+            "up": [float(value) for value in up],
+        }
+        focal_y = float(np.asarray(intrinsic)[1, 1])
+        if image_height > 0 and focal_y > 0:
+            view["fov_y_degrees"] = float(np.degrees(2.0 * np.arctan(float(image_height) / (2.0 * focal_y))))
+        return view
+    except Exception:
+        return None
+
+
+def normalize(vector: np.ndarray) -> np.ndarray | None:
+    norm = float(np.linalg.norm(vector))
+    if not np.isfinite(norm) or norm <= 1e-6:
+        return None
+    return (vector / norm).astype(np.float32)
 
 
 def run_litevggt_pointcloud(
@@ -777,11 +952,18 @@ def run_litevggt_pointcloud(
         max_points=max_points,
     )
     if output_meta_json is not None:
+        image_height = int(reconstruction.images.shape[1]) if reconstruction.images.ndim >= 3 else 0
         write_litevggt_preview_meta_json(
             output_meta_json,
             point_count_raw=point_count_raw,
             point_count_exported=point_count,
             bounds=bounds,
+            recommended_view=litevggt_camera_view(
+                reconstruction.w2c[0],
+                reconstruction.intrinsics[0],
+                radius=float(bounds["bbox_radius"]),
+                image_height=image_height,
+            ),
         )
     return {
         **reconstruction.metrics,

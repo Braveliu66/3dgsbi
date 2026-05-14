@@ -1,10 +1,10 @@
-import type { AlgorithmEntry, Artifact, AuthResponse, MediaAsset, Project, RuntimePreflight, Task, User, ViewerConfig } from "@/lib/types";
+import type { AlgorithmEntry, Artifact, AuthResponse, MediaAsset, Project, ProjectShareResponse, RuntimePreflight, SharedProject, Task, User, ViewerConfig } from "@/lib/types";
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
 const TOKEN_KEY = "three_dgs_token";
 const TRANSFER_API_BASE = process.env.NEXT_PUBLIC_UPLOAD_API_BASE_URL || API_BASE;
-const UPLOAD_CHUNK_SIZE = readPositiveEnvInt(process.env.NEXT_PUBLIC_UPLOAD_CHUNK_SIZE, 8 * 1024 * 1024);
-const UPLOAD_CONCURRENCY = readPositiveEnvInt(process.env.NEXT_PUBLIC_UPLOAD_CONCURRENCY, 4);
+const UPLOAD_CHUNK_SIZE = readPositiveEnvInt(process.env.NEXT_PUBLIC_UPLOAD_CHUNK_SIZE, 16 * 1024 * 1024);
+const UPLOAD_CONCURRENCY = readPositiveEnvInt(process.env.NEXT_PUBLIC_UPLOAD_CONCURRENCY, 6);
 const RANGE_DOWNLOAD_CHUNK_SIZE = readPositiveEnvInt(process.env.NEXT_PUBLIC_RANGE_DOWNLOAD_CHUNK_SIZE, 8 * 1024 * 1024);
 const RANGE_DOWNLOAD_CONCURRENCY = readPositiveEnvInt(process.env.NEXT_PUBLIC_RANGE_DOWNLOAD_CONCURRENCY, 6);
 const CHUNK_RETRIES = 3;
@@ -49,7 +49,7 @@ export function clearToken(): void {
 }
 
 export function isPublicPath(pathname: string): boolean {
-  return pathname === "/login" || pathname === "/about";
+  return pathname === "/login" || pathname === "/about" || pathname.startsWith("/share/");
 }
 
 type ApiRequestInit = RequestInit & { auth?: boolean };
@@ -102,8 +102,6 @@ interface UploadCompleteResponse {
 
 async function uploadMediaInChunks(projectId: string, file: File, onProgress?: TransferProgressCallback): Promise<MediaAsset> {
   const uploadBase = getUploadApiBase();
-  emitTransferProgress(onProgress, file.name, "hashing", 0, file.size);
-  const fileHash = await hashFile(file, (loaded, total) => emitTransferProgress(onProgress, file.name, "hashing", loaded, total));
   const totalChunks = Math.ceil(file.size / UPLOAD_CHUNK_SIZE);
   emitTransferProgress(onProgress, file.name, "checking", 0, file.size);
   const check = await request<UploadCheckResponse>(
@@ -115,7 +113,7 @@ async function uploadMediaInChunks(projectId: string, file: File, onProgress?: T
         file_size: file.size,
         chunk_size: UPLOAD_CHUNK_SIZE,
         total_chunks: totalChunks,
-        file_hash: fileHash,
+        file_signature: fileSignature(file),
         content_type: file.type || null
       })
     },
@@ -164,13 +162,12 @@ async function uploadChunk(
   const uploadBase = getUploadApiBase();
   const start = chunkIndex * UPLOAD_CHUNK_SIZE;
   const end = Math.min(file.size, start + UPLOAD_CHUNK_SIZE);
-  const body = new FormData();
-  body.append("file", file.slice(start, end), `${file.name}.part-${chunkIndex}`);
+  const body = file.slice(start, end);
   return withRetries(
     () =>
       xhrRequest<ChunkUploadResponse>(
-        `/api/uploads/${uploadId}/chunks/${chunkIndex}`,
-        { method: "PUT", body },
+        `/api/uploads/${uploadId}/chunks/${chunkIndex}/raw`,
+        { method: "PUT", body, headers: { "Content-Type": "application/octet-stream" } },
         uploadBase,
         onProgress
       ),
@@ -194,6 +191,10 @@ function readPositiveEnvInt(value: string | undefined, fallback: number): number
 function chunkByteSize(file: File, chunkIndex: number): number {
   const start = chunkIndex * UPLOAD_CHUNK_SIZE;
   return Math.max(0, Math.min(file.size, start + UPLOAD_CHUNK_SIZE) - start);
+}
+
+function fileSignature(file: File): string {
+  return [file.name, file.size, file.lastModified, file.type || "application/octet-stream"].join("|");
 }
 
 function emitTransferProgress(
@@ -225,7 +226,10 @@ function xhrRequest<T>(
     xhr.open(init.method, `${base}${path}`);
     const token = (init.auth ?? true) ? getToken() : null;
     if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
-    if (!(init.body instanceof FormData)) xhr.setRequestHeader("Content-Type", "application/json");
+    const hasContentType = Object.keys(init.headers ?? {}).some((key) => key.toLowerCase() === "content-type");
+    if (!(init.body instanceof FormData) && !(init.body instanceof Blob) && !hasContentType) {
+      xhr.setRequestHeader("Content-Type", "application/json");
+    }
     for (const [key, value] of Object.entries(init.headers ?? {})) {
       xhr.setRequestHeader(key, value);
     }
@@ -625,6 +629,9 @@ export const api = {
   artifactOriginalPlyDownloadUrl: (artifactId: string) =>
     request<{ url: string; expires_in_seconds: number }>(`/api/artifacts/${artifactId}/original-ply/download-url`),
   viewerConfig: (projectId: string) => request<ViewerConfig>(`/api/projects/${projectId}/viewer-config`),
+  createProjectShare: (projectId: string) => request<ProjectShareResponse>(`/api/projects/${projectId}/share`, { method: "POST" }),
+  deleteProjectShare: (projectId: string) => request<{ deleted: boolean }>(`/api/projects/${projectId}/share`, { method: "DELETE" }),
+  sharedProject: (shareToken: string) => request<SharedProject>(`/api/shared-projects/${shareToken}`, { auth: false }),
   feedback: (payload: { title: string; content: string; project_id?: string }) =>
     request<Record<string, unknown>>("/api/feedback", { method: "POST", body: JSON.stringify(payload) })
 };

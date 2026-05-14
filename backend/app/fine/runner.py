@@ -8,10 +8,19 @@ from pathlib import Path
 from typing import Any
 
 from app.config import get_settings
+from app.fine.fastgs_defaults import (
+    COLMAP_MATCHER,
+    COLMAP_MAX_IMAGE_SIZE,
+    COLMAP_MIN_REGISTERED_RATIO,
+    COLMAP_SIFT_MAX_NUM_FEATURES,
+    COLMAP_THREADS,
+    FASTGS_RESOLUTION,
+)
 from app.fine.option_utils import read_float, read_int
 from app.fine.official_fastgs_big_trainer import train_official_fastgs_big
 from app.fine.preprocess import build_pycolmap_scene, prepare_mobile_images
 from app.fine.types import FineContext, FineFailure, FineResult
+from app.fine.viewer_meta import read_ply_xyz_bounds, write_final_viewer_meta_json, write_scaled_viewer_ply
 from app.preview.io.spz import convert_ply_to_spz
 from app.preview.types import PreviewFailure
 from app.preview.utils import image_files
@@ -56,11 +65,17 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
 
     iterations = read_int(ctx.options.get("fine_iterations"), settings.fine_iterations, minimum=5_000, maximum=60_000)
     reject_ratio = read_float(ctx.options.get("fine_blur_reject_ratio"), 0.10, minimum=0.0, maximum=0.45)
-    colmap_features = read_int(ctx.options.get("fine_sift_max_num_features"), 8192, minimum=1024, maximum=32768)
-    colmap_max_size = read_int(ctx.options.get("fine_colmap_max_image_size"), 1600, minimum=512, maximum=3200)
-    colmap_threads = read_int(ctx.options.get("fine_colmap_threads"), 8, minimum=1, maximum=32)
-    colmap_matcher = str(ctx.options.get("fine_colmap_matcher") or "auto").strip().lower()
-    min_registered_ratio = _optional_float(ctx.options, "fine_min_registered_ratio", minimum=0.30, maximum=0.95)
+    colmap_features = read_int(ctx.options.get("fine_sift_max_num_features"), COLMAP_SIFT_MAX_NUM_FEATURES, minimum=1024, maximum=32768)
+    colmap_max_size = read_int(ctx.options.get("fine_colmap_max_image_size"), min(settings.fine_image_max_side, COLMAP_MAX_IMAGE_SIZE), minimum=512, maximum=3200)
+    colmap_threads = read_int(ctx.options.get("fine_colmap_threads"), COLMAP_THREADS, minimum=1, maximum=32)
+    colmap_matcher = str(ctx.options.get("fine_colmap_matcher") or COLMAP_MATCHER).strip().lower()
+    min_registered_ratio = _optional_float(
+        ctx.options,
+        "fine_min_registered_ratio",
+        fallback=COLMAP_MIN_REGISTERED_RATIO,
+        minimum=0.30,
+        maximum=0.95,
+    )
 
     ctx_progress(ctx, "fine_blur_analysis", 20, "analyzing image sharpness and filtering lowest quality frames")
     print(
@@ -120,6 +135,7 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         "_fine_scene_backend": scene_result.backend,
         "fine_deblur_mode": ctx.options.get("fine_deblur_mode") or blur_mode,
         "fine_deblur_blur_registry": str(blur_registry_path),
+        "fine_train_resolution": ctx.options.get("fine_train_resolution") or min(settings.fine_image_max_side, FASTGS_RESOLUTION),
     }
     print(
         "[fine-runner] gaussian training start "
@@ -153,14 +169,46 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         flush=True,
     )
 
-    ctx_progress(ctx, "final_spz_converting", 88, "converting final.ply to Spark-readable final_web.spz")
+    viewer_ply = ctx.work_dir / "final_viewer.ply"
+    bounds = read_ply_xyz_bounds(ctx.final_ply)
+    viewer_scale_multiplier = read_float(ctx.options.get("fine_viewer_scale_multiplier"), 0.45, minimum=0.05, maximum=1.0)
+    default_max_scale = max(1e-6, min(float(bounds["radius"]) * 0.009, 1.0))
+    viewer_scale_max = read_float(ctx.options.get("fine_viewer_scale_max"), default_max_scale, minimum=1e-6, maximum=10.0)
+    viewer_scale_metrics = write_scaled_viewer_ply(
+        ctx.final_ply,
+        viewer_ply,
+        scale_multiplier=viewer_scale_multiplier,
+        max_scale=viewer_scale_max,
+    )
+    print(
+        "[fine-runner] viewer ply ready "
+        f"source={ctx.final_ply} viewer_ply={viewer_ply} metrics={_format_for_log(viewer_scale_metrics)}",
+        flush=True,
+    )
+
+    viewer_meta_payload = None
+    if ctx.viewer_meta_json:
+        viewer_meta_payload = write_final_viewer_meta_json(
+            ctx.viewer_meta_json,
+            final_ply=ctx.final_ply,
+            scene_dir=scene_result.scene_dir,
+            preferred_image_names=first_clear_training_images(blur.per_frame_blur),
+        )
+        print(
+            "[fine-runner] viewer meta json written "
+            f"path={ctx.viewer_meta_json} bytes={ctx.viewer_meta_json.stat().st_size} "
+            f"recommended_view={viewer_meta_payload.get('recommended_view')}",
+            flush=True,
+        )
+
+    ctx_progress(ctx, "final_spz_converting", 88, "converting viewer-scaled final.ply to Spark-readable final_web.spz")
     try:
-        splat_count = convert_ply_to_spz(ctx.final_ply, ctx.final_spz)
+        splat_count = convert_ply_to_spz(viewer_ply, ctx.final_spz)
     except PreviewFailure as exc:
         raise FineFailure(exc.code, exc.message) from exc
     print(
         "[fine-runner] final SPZ conversion complete "
-        f"final_ply={ctx.final_ply} final_ply_bytes={ctx.final_ply.stat().st_size} "
+        f"final_ply={ctx.final_ply} viewer_ply={viewer_ply} final_ply_bytes={ctx.final_ply.stat().st_size} "
         f"final_spz={ctx.final_spz} final_spz_bytes={ctx.final_spz.stat().st_size if ctx.final_spz.exists() else None} "
         f"splat_count={splat_count}",
         flush=True,
@@ -187,9 +235,12 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         "iterations": iterations,
         "splat_count": splat_count,
         "final_ply_bytes": ctx.final_ply.stat().st_size,
+        "final_viewer_ply_bytes": viewer_ply.stat().st_size,
         "final_spz_bytes": ctx.final_spz.stat().st_size,
+        "viewer_meta_json_bytes": ctx.viewer_meta_json.stat().st_size if ctx.viewer_meta_json and ctx.viewer_meta_json.exists() else None,
         "lod_rad_bytes": lod_rad.stat().st_size if lod_rad else None,
         "warnings": warnings,
+        **viewer_scale_metrics,
         **blur.metrics(),
         **scene_result.metrics,
         **train_result.metrics,
@@ -206,6 +257,7 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         final_ply=ctx.final_ply,
         final_spz=ctx.final_spz,
         metrics_json=ctx.metrics_json,
+        viewer_meta_json=ctx.viewer_meta_json if ctx.viewer_meta_json and ctx.viewer_meta_json.exists() else None,
         lod_rad=lod_rad,
         splat_count=splat_count,
         source_commits=SOURCE_COMMITS_FINE,
@@ -308,6 +360,17 @@ def deblur_mlp_enabled_by_default(blur_mode: str, options: dict[str, Any]) -> bo
     return blur_mode in {"motion", "defocus", "mixed"}
 
 
+def first_clear_training_images(per_frame_blur: dict[str, dict[str, Any]]) -> list[str]:
+    clear: list[str] = []
+    for item in per_frame_blur.values():
+        if item.get("rejected") or item.get("blurred"):
+            continue
+        training_image = item.get("training_image")
+        if isinstance(training_image, str) and training_image:
+            clear.append(training_image)
+    return clear
+
+
 def read_bool(value: Any, fallback: bool) -> bool:
     if isinstance(value, bool):
         return value
@@ -319,10 +382,10 @@ def read_bool(value: Any, fallback: bool) -> bool:
     return fallback
 
 
-def _optional_float(options: dict[str, Any], key: str, *, minimum: float, maximum: float) -> float | None:
+def _optional_float(options: dict[str, Any], key: str, *, fallback: float | None = None, minimum: float, maximum: float) -> float | None:
     if key not in options or options.get(key) in {None, ""}:
-        return None
-    return read_float(options.get(key), minimum, minimum=minimum, maximum=maximum)
+        return fallback
+    return read_float(options.get(key), fallback if fallback is not None else minimum, minimum=minimum, maximum=maximum)
 
 
 def build_lod_rad_if_available(ctx: FineContext) -> Path | None:
