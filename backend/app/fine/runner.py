@@ -55,7 +55,7 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         raise FineFailure("INSUFFICIENT_IMAGES", "FastGS-Big fine reconstruction requires at least 8 images")
 
     iterations = read_int(ctx.options.get("fine_iterations"), settings.fine_iterations, minimum=5_000, maximum=60_000)
-    reject_ratio = read_float(ctx.options.get("fine_blur_reject_ratio"), 0.0, minimum=0.0, maximum=0.45)
+    reject_ratio = read_float(ctx.options.get("fine_blur_reject_ratio"), 0.10, minimum=0.0, maximum=0.45)
     colmap_features = read_int(ctx.options.get("fine_sift_max_num_features"), 8192, minimum=1024, maximum=32768)
     colmap_max_size = read_int(ctx.options.get("fine_colmap_max_image_size"), 1600, minimum=512, maximum=3200)
     colmap_threads = read_int(ctx.options.get("fine_colmap_threads"), 8, minimum=1, maximum=32)
@@ -109,11 +109,22 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
     )
 
     ctx_progress(ctx, "fine_gaussian_train_start", 42, f"training official FastGS-Big with {scene_result.backend} initialization")
-    train_options = {**ctx.options, "_fine_scene_backend": scene_result.backend}
+    blur_registry_path = output_dir / "blur_frame_registry.json"
+    blur_registry_path.parent.mkdir(parents=True, exist_ok=True)
+    blur_registry_path.write_text(
+        json.dumps({"frames": blur.per_frame_blur}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    train_options = {
+        **ctx.options,
+        "_fine_scene_backend": scene_result.backend,
+        "fine_deblur_mode": ctx.options.get("fine_deblur_mode") or blur_mode,
+        "fine_deblur_blur_registry": str(blur_registry_path),
+    }
     print(
         "[fine-runner] gaussian training start "
         f"scene_dir={scene_result.scene_dir} output_dir={output_dir} iterations={iterations} "
-        f"blur_mode={blur_mode} train_options={_format_for_log(train_options)}",
+        f"blur_mode={blur_mode} blur_registry={blur_registry_path} train_options={_format_for_log(train_options)}",
         flush=True,
     )
 
@@ -160,11 +171,14 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
     if ctx.lod_rad and lod_rad is None:
         warnings.append("RAD LOD builder is not configured; final_lod.rad was not generated.")
 
+    effective_algorithms = [scene_result.backend, "official_fastgs_big", "diff_gaussian_rasterization_fastgs"]
+    if deblur_mlp_enabled_by_default(blur_mode, train_options):
+        effective_algorithms.append("Deblurring-3DGS_GTnet_fastgs")
     metrics = {
         "pipeline": PIPELINE_NAME,
         "algorithm": f"{scene_result.backend}_official_fastgs_big",
         "requested_algorithms": [scene_result.backend, "FastGS-Big"],
-        "effective_algorithms": [scene_result.backend, "official_fastgs_big", "diff_gaussian_rasterization_fastgs"],
+        "effective_algorithms": effective_algorithms,
         "source_version": ctx.source_version,
         "source_commits": SOURCE_COMMITS_FINE,
         "artifact_converter": "Spark SPZ",

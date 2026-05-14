@@ -63,6 +63,47 @@ class OfficialFastGSBigTrainerTests(unittest.TestCase):
             self.assertEqual(result.ply_path, ply)
             self.assertEqual(result.metrics["training_backend"], "official_fastgs_big")
 
+    def test_train_official_fastgs_big_passes_deblur_options_and_registry(self) -> None:
+        train_official_fastgs_big = import_trainer()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            vendor = root / "vendor" / "fastgs"
+            self._write_vendor_stub(vendor)
+            scene = root / "scene"
+            output = root / "output"
+            scene.mkdir()
+            registry = root / "blur_frame_registry.json"
+            registry.write_text("{}", encoding="utf-8")
+            ply = output / "point_cloud" / "iteration_30000" / "point_cloud.ply"
+            ply.parent.mkdir(parents=True)
+            ply.write_bytes(b"ply\n")
+
+            process = SimpleNamespace(stdout=iter([]), wait=lambda: 0, returncode=0)
+            with patch.dict(os.environ, {"FASTGS_VENDOR_ROOT": str(vendor)}), patch(
+                "app.fine.official_fastgs_big_trainer.subprocess.Popen",
+                return_value=process,
+            ) as popen:
+                result = train_official_fastgs_big(
+                    scene_dir=scene,
+                    output_dir=output,
+                    iterations=30000,
+                    options={
+                        "fine_deblur_enabled": "auto",
+                        "fine_deblur_mode": "mixed",
+                        "fine_deblur_blur_registry": str(registry),
+                    },
+                    progress=lambda *_args: None,
+                )
+
+            command = popen.call_args.args[0]
+            self.assertIn("--deblur_enabled", command)
+            self.assertIn("auto", command)
+            self.assertIn("--deblur_mode", command)
+            self.assertIn("mixed", command)
+            self.assertIn("--deblur_blur_registry", command)
+            self.assertIn(str(registry), command)
+            self.assertEqual(result.metrics["deblur_enabled"], "auto")
+
     def test_train_official_fastgs_big_finds_final_ply(self) -> None:
         train_official_fastgs_big = import_trainer()
         with tempfile.TemporaryDirectory() as tmp:

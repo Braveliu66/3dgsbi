@@ -263,7 +263,42 @@ class FineRuntimeTests(unittest.TestCase):
 
             self.assertTrue((output_dir / "000000.jpg").exists())
             self.assertEqual(analysis.per_frame_blur["000000.jpg"]["source_image"], "0.jpg")
+            self.assertEqual(analysis.per_frame_blur["000000.jpg"]["training_image"], "000000.jpg")
+            self.assertFalse(analysis.per_frame_blur["000000.jpg"]["rejected"])
             self.assertTrue(analysis.per_frame_blur["000000.jpg"]["blurred"])
+
+    def test_prepare_mobile_images_records_rejected_blur_frames(self) -> None:
+        try:
+            from PIL import Image
+            from app.fine.preprocess import BlurScore, prepare_mobile_images
+        except Exception as exc:
+            raise unittest.SkipTest(f"fine preprocess dependencies unavailable: {exc}") from exc
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            for name in ("0.jpg", "1.jpg", "2.jpg", "3.jpg"):
+                Image.new("RGB", (16, 16), color=(128, 128, 128)).save(input_dir / name)
+
+            with patch(
+                "app.fine.preprocess.score_blur_images",
+                return_value=[
+                    BlurScore(input_dir / "0.jpg", 5.0, 10.0, 0.01),
+                    BlurScore(input_dir / "1.jpg", 180.0, 55.0, 0.12),
+                    BlurScore(input_dir / "2.jpg", 190.0, 55.0, 0.12),
+                    BlurScore(input_dir / "3.jpg", 200.0, 55.0, 0.12),
+                ],
+            ):
+                _, analysis = prepare_mobile_images(input_dir, output_dir, reject_ratio=0.25, min_images=3)
+
+            rejected = [entry for entry in analysis.per_frame_blur.values() if entry["rejected"]]
+            kept = [entry for entry in analysis.per_frame_blur.values() if not entry["rejected"]]
+            self.assertEqual(len(rejected), 1)
+            self.assertEqual(len(kept), 3)
+            self.assertTrue(rejected[0]["blurred"])
+            self.assertIsNone(rejected[0]["training_image"])
 
     def test_any_blurry_training_image_triggers_deblur(self) -> None:
         BlurScore, _, summarize_blur_scores, _, deblur_mlp_enabled_by_default, _ = import_fine_runtime()

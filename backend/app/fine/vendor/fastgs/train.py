@@ -11,12 +11,14 @@
 
 import torch
 import numpy as np
+import json
 import os, random, time
 from random import randint
 from lpipsPyTorch import lpips
 from utils.loss_utils import l1_loss
 from fused_ssim import fused_ssim as fast_ssim
 from gaussian_renderer import render_fastgs, network_gui_ws
+from gaussian_renderer.deblur import render_fastgs_deblur
 import sys
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state
@@ -43,6 +45,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
+    deblur_state = gaussians.create_deblur_net(opt)
+    blur_registry = load_blur_registry(getattr(opt, "deblur_blur_registry", ""))
+    if deblur_state.enabled:
+        opt.deblur_warmup_iters = min(max(0, int(opt.deblur_warmup_iters)), max(0, int(opt.iterations) - 1))
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -59,6 +65,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     total_time = 0.0
 
     ema_loss_for_log = 0.0
+    deblur_photometric_views = 0
+    deblur_clear_train_cameras = 0
+    deblur_final_pruned = False
+    last_deblur_reg = None
     log_interval = 200
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress", miniters=log_interval)
     progress_bar_last_iter = first_iter
@@ -77,7 +87,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         iter_start.record()
         
-        gaussians.update_learning_rate(iteration)
+        base_xyz_lr = gaussians.update_learning_rate(iteration)
+        deblur_active = bool(deblur_state.enabled and iteration > opt.deblur_warmup_iters)
+        if deblur_active and base_xyz_lr is not None:
+            set_xyz_learning_rate(gaussians, base_xyz_lr * float(opt.deblur_xyz_lr_scale))
 
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
@@ -95,7 +108,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if (iteration - 1) == debug_from:
             pipe.debug = True
 
-        render_pkg = render_fastgs(viewpoint_cam, gaussians, pipe, bg, opt.mult)
+        deblur_view_active = bool(deblur_active and is_deblur_view(viewpoint_cam, blur_registry, opt))
+        if deblur_view_active:
+            render_pkg = render_fastgs_deblur(viewpoint_cam, gaussians, pipe, bg, opt.mult, deblur_state)
+        else:
+            render_pkg = render_fastgs(viewpoint_cam, gaussians, pipe, bg, opt.mult)
+            if deblur_active:
+                deblur_clear_train_cameras += 1
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
         # Loss
@@ -103,6 +122,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         Ll1 = l1_loss(image, gt_image)
         ssim_value = fast_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+        if deblur_view_active:
+            deblur_reg = render_pkg.get("deblur_regularization")
+            if deblur_reg is not None and deblur_state.config is not None:
+                loss = loss + deblur_state.config.transform_reg_weight * deblur_reg
+                last_deblur_reg = float(deblur_reg.detach().item())
+            deblur_photometric_views += 1
         loss.backward()
 
         iter_end.record()
@@ -111,10 +136,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             if iteration % log_interval == 0 or iteration == opt.iterations:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Deblur": str(deblur_active)})
                 progress_bar.update(iteration - progress_bar_last_iter)
                 progress_bar_last_iter = iteration
-                print(f"[ITER {iteration}] loss={ema_loss_for_log:.7f}")
+                print(f"[ITER {iteration}] loss={ema_loss_for_log:.7f} deblur_active={deblur_active} deblur_view={deblur_view_active}")
             if iteration == opt.iterations:
                 progress_bar.close()
 
@@ -122,13 +147,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # Log and save
             # training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_time, testing_iterations, scene, render_fastgs, (pipe, background, opt.mult))
             if (iteration in saving_iterations):
+                if deblur_state.enabled and iteration == opt.iterations and not deblur_final_pruned:
+                    my_viewpoint_stack = scene.getTrainCameras().copy()
+                    camlist = sampling_cameras(my_viewpoint_stack)
+                    _, pruning_score = compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, opt)
+                    gaussians.final_prune_fastgs(min_opacity = 0.01, pruning_score = pruning_score)
+                    deblur_final_pruned = True
+                    print(f"\n[ITER {iteration}] Deblur conservative sharp final prune complete")
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
             
             optim_start.record()
             
             # Densification
-            if iteration < opt.densify_until_iter:
+            can_update_topology = bool(iteration < opt.densify_until_iter and not deblur_active)
+            if can_update_topology:
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
@@ -154,7 +187,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # The multiview consistent pruning of fastgs. We do it every 3k iterations after 15k
             # In this stage, the model converge basically. So we can prune more aggressively without degrading rendering quality.
             # You can check the rendering results of 20K iterations in arxiv version (https://arxiv.org/abs/2511.04283), the rendering quality is already very good.
-            if iteration % 3000 == 0 and iteration > 15_000 and iteration < 30_000:
+            if iteration % 3000 == 0 and iteration > 15_000 and iteration < 30_000 and not deblur_state.enabled:
                 my_viewpoint_stack = scene.getTrainCameras().copy()
                 camlist = sampling_cameras(my_viewpoint_stack)
 
@@ -179,6 +212,107 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     # scene.save(iteration)
     print(f"Gaussian number: {gaussians._xyz.shape[0]}")
     print(f"Training time: {total_time}")
+    write_deblur_metrics(
+        dataset.model_path,
+        gaussians,
+        deblur_state,
+        blur_registry,
+        deblur_photometric_views,
+        deblur_clear_train_cameras,
+        deblur_final_pruned,
+        last_deblur_reg,
+        opt,
+    )
+
+
+def load_blur_registry(path):
+    if not path:
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        print(f"[deblur] blur registry not found: {path}")
+        return {}
+    except Exception as exc:
+        print(f"[deblur] failed to read blur registry {path}: {exc}")
+        return {}
+    if isinstance(payload, dict) and "frames" in payload and isinstance(payload["frames"], dict):
+        return payload["frames"]
+    if isinstance(payload, dict):
+        return payload
+    return {}
+
+
+def is_deblur_view(viewpoint_camera, blur_registry, opt):
+    blurred_views_only = str(getattr(opt, "deblur_blurred_views_only", "true")).strip().lower() not in {"0", "false", "no", "off"}
+    if not blurred_views_only:
+        return True
+    entry = blur_registry_entry(viewpoint_camera, blur_registry)
+    if not entry:
+        return False
+    return bool(entry.get("blurred")) and not bool(entry.get("rejected"))
+
+
+def blur_registry_entry(viewpoint_camera, blur_registry):
+    image_name = str(getattr(viewpoint_camera, "image_name", ""))
+    candidates = [
+        image_name,
+        f"{image_name}.jpg",
+        f"{image_name}.jpeg",
+        f"{image_name}.png",
+    ]
+    for candidate in candidates:
+        entry = blur_registry.get(candidate)
+        if isinstance(entry, dict):
+            return entry
+    return None
+
+
+def set_xyz_learning_rate(gaussians, lr):
+    for param_group in gaussians.optimizer.param_groups:
+        if param_group.get("name") == "xyz":
+            param_group["lr"] = lr
+            return lr
+    return None
+
+
+def write_deblur_metrics(
+    model_path,
+    gaussians,
+    deblur_state,
+    blur_registry,
+    deblur_photometric_views,
+    deblur_clear_train_cameras,
+    deblur_final_pruned,
+    last_deblur_reg,
+    opt,
+):
+    if not model_path:
+        return
+    training_blur_frames = sum(1 for item in blur_registry.values() if isinstance(item, dict) and item.get("blurred") and not item.get("rejected"))
+    rejected_blur_frames = sum(1 for item in blur_registry.values() if isinstance(item, dict) and item.get("blurred") and item.get("rejected"))
+    clear_train_cameras = sum(1 for item in blur_registry.values() if isinstance(item, dict) and not item.get("blurred") and not item.get("rejected"))
+    metrics = {
+        "deblur_enabled": bool(deblur_state.enabled),
+        "deblur_mode": getattr(opt, "deblur_mode", "sharp"),
+        "deblur_warmup_iters": getattr(opt, "deblur_warmup_iters", None),
+        "deblur_xyz_lr_scale": getattr(opt, "deblur_xyz_lr_scale", None),
+        "deblur_training_blur_frames": training_blur_frames,
+        "deblur_rejected_blur_frames": rejected_blur_frames,
+        "deblur_clear_train_cameras": clear_train_cameras,
+        "deblur_runtime_clear_train_cameras": deblur_clear_train_cameras,
+        "deblur_photometric_views": deblur_photometric_views,
+        "deblur_final_prune_uses_sharp_score": True,
+        "deblur_final_pruned": deblur_final_pruned,
+        "deblur_last_transform_regularization": last_deblur_reg,
+        "final_gaussians": int(gaussians.get_xyz.shape[0]),
+        **deblur_state.metrics(),
+    }
+    path = os.path.join(model_path, "fastgs_deblur_metrics.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(metrics, handle, indent=2)
+    print(f"[deblur] metrics written: {path} {metrics}")
     
 def prepare_output_and_logger(args):    
     if not args.model_path:

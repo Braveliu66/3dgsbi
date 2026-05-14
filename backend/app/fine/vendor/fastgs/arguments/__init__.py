@@ -99,6 +99,23 @@ class OptimizationParams(ParamGroup):
         self.dense = 0.001
         self.mult = 0.5      # multiplier for the compact box to control the tile number of each splat
 
+        # Deblurring-3DGS GTnet training-time blur model, adapted to FastGS.
+        self.deblur_enabled = "auto"
+        self.deblur_mode = "sharp"
+        self.deblur_blur_registry = ""
+        self.deblur_warmup_iters = 3000
+        self.deblur_num_moments = 4
+        self.deblur_gtnet_lr = 0.001
+        self.deblur_hidden = 3
+        self.deblur_width = 64
+        self.deblur_lambda_s = 0.01
+        self.deblur_lambda_p = 0.01
+        self.deblur_max_clamp = 1.1
+        self.deblur_max_position_delta = 0.02
+        self.deblur_transform_reg_weight = 0.001
+        self.deblur_xyz_lr_scale = 0.1
+        self.deblur_blurred_views_only = "true"
+
         self.random_background = False
         self.optimizer_type = "default"
         super().__init__(parser, "Optimization Parameters")

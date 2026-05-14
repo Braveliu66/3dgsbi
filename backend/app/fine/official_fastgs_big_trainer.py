@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import json
 import subprocess
 import sys
 from collections import deque
@@ -52,6 +53,30 @@ def train_official_fastgs_big(
     highfeature_lr = _optional_float(options or {}, "fine_highfeature_lr", fallback=0.02, minimum=1e-7, maximum=1.0)
     lowfeature_lr = _optional_float(options or {}, "fine_lowfeature_lr", fallback=None, minimum=1e-7, maximum=1.0)
     resolution = _optional_int(options or {}, "fine_train_resolution", minimum=1, maximum=16_384)
+    deblur_enabled = _choice_string((options or {}).get("fine_deblur_enabled"), "auto", {"auto", "true", "false"})
+    deblur_mode = _choice_string((options or {}).get("fine_deblur_mode"), "sharp", {"sharp", "defocus", "motion", "mixed"})
+    deblur_blur_registry = str((options or {}).get("fine_deblur_blur_registry") or "").strip()
+    deblur_warmup_iters = read_int(
+        (options or {}).get("fine_deblur_warmup_iters"),
+        min(3000, max(1, iterations // 3)),
+        minimum=0,
+        maximum=max(0, iterations - 1),
+    )
+    deblur_num_moments = read_int((options or {}).get("fine_deblur_num_moments"), 4, minimum=1, maximum=8)
+    deblur_gtnet_lr = read_float((options or {}).get("fine_deblur_gtnet_lr"), 0.001, minimum=1e-6, maximum=0.1)
+    deblur_hidden = read_int((options or {}).get("fine_deblur_hidden"), 3, minimum=1, maximum=8)
+    deblur_width = read_int((options or {}).get("fine_deblur_width"), 64, minimum=16, maximum=256)
+    deblur_lambda_s = read_float((options or {}).get("fine_deblur_lambda_s"), 0.01, minimum=0.0, maximum=0.1)
+    deblur_lambda_p = read_float((options or {}).get("fine_deblur_lambda_p"), 0.01, minimum=0.0, maximum=0.1)
+    deblur_max_clamp = read_float((options or {}).get("fine_deblur_max_clamp"), 1.1, minimum=1.0, maximum=1.8)
+    deblur_max_position_delta = read_float((options or {}).get("fine_deblur_max_position_delta"), 0.02, minimum=0.0, maximum=1.0)
+    deblur_transform_reg_weight = read_float((options or {}).get("fine_deblur_transform_reg_weight"), 0.001, minimum=0.0, maximum=1.0)
+    deblur_xyz_lr_scale = read_float((options or {}).get("fine_deblur_xyz_lr_scale"), 0.1, minimum=0.0, maximum=1.0)
+    deblur_blurred_views_only = _choice_string(
+        (options or {}).get("fine_deblur_blurred_views_only"),
+        "true",
+        {"true", "false"},
+    )
 
     command = [
         sys.executable,
@@ -84,7 +109,37 @@ def train_official_fastgs_big(
         str(mult),
         "--lambda_dssim",
         str(lambda_dssim),
+        "--deblur_enabled",
+        deblur_enabled,
+        "--deblur_mode",
+        deblur_mode,
+        "--deblur_warmup_iters",
+        str(deblur_warmup_iters),
+        "--deblur_num_moments",
+        str(deblur_num_moments),
+        "--deblur_gtnet_lr",
+        str(deblur_gtnet_lr),
+        "--deblur_hidden",
+        str(deblur_hidden),
+        "--deblur_width",
+        str(deblur_width),
+        "--deblur_lambda_s",
+        str(deblur_lambda_s),
+        "--deblur_lambda_p",
+        str(deblur_lambda_p),
+        "--deblur_max_clamp",
+        str(deblur_max_clamp),
+        "--deblur_max_position_delta",
+        str(deblur_max_position_delta),
+        "--deblur_transform_reg_weight",
+        str(deblur_transform_reg_weight),
+        "--deblur_xyz_lr_scale",
+        str(deblur_xyz_lr_scale),
+        "--deblur_blurred_views_only",
+        deblur_blurred_views_only,
     ]
+    if deblur_blur_registry:
+        command.extend(["--deblur_blur_registry", deblur_blur_registry])
     if highfeature_lr is not None:
         command.extend(["--highfeature_lr", str(highfeature_lr)])
     if lowfeature_lr is not None:
@@ -139,6 +194,21 @@ def train_official_fastgs_big(
         "dense": dense,
         "mult": mult,
         "lambda_dssim": lambda_dssim,
+        "deblur_enabled": deblur_enabled,
+        "deblur_mode": deblur_mode,
+        "deblur_blur_registry": deblur_blur_registry or None,
+        "deblur_warmup_iters": deblur_warmup_iters,
+        "deblur_num_moments": deblur_num_moments,
+        "deblur_gtnet_lr": deblur_gtnet_lr,
+        "deblur_hidden": deblur_hidden,
+        "deblur_width": deblur_width,
+        "deblur_lambda_s": deblur_lambda_s,
+        "deblur_lambda_p": deblur_lambda_p,
+        "deblur_max_clamp": deblur_max_clamp,
+        "deblur_max_position_delta": deblur_max_position_delta,
+        "deblur_transform_reg_weight": deblur_transform_reg_weight,
+        "deblur_xyz_lr_scale": deblur_xyz_lr_scale,
+        "deblur_blurred_views_only": deblur_blurred_views_only,
         "final_ply_bytes": ply_path.stat().st_size,
         "fastgs_log_path": str(log_path),
     }
@@ -148,6 +218,13 @@ def train_official_fastgs_big(
         metrics["lowfeature_lr"] = lowfeature_lr
     if resolution is not None:
         metrics["resolution"] = resolution
+    deblur_metrics_path = output_dir / "fastgs_deblur_metrics.json"
+    if deblur_metrics_path.exists():
+        try:
+            metrics.update(json.loads(deblur_metrics_path.read_text(encoding="utf-8")))
+            metrics["fastgs_deblur_metrics_path"] = str(deblur_metrics_path)
+        except Exception:
+            metrics["fastgs_deblur_metrics_path"] = str(deblur_metrics_path)
     return OfficialFastGSTrainResult(ply_path=ply_path, iterations=iterations, metrics=metrics)
 
 
@@ -190,6 +267,11 @@ def _optional_int(options: dict[str, Any], key: str, *, minimum: int, maximum: i
     if key not in options or options.get(key) in {None, ""}:
         return None
     return read_int(options.get(key), minimum, minimum=minimum, maximum=maximum)
+
+
+def _choice_string(value: Any, fallback: str, allowed: set[str]) -> str:
+    normalized = str(value if value not in {None, ""} else fallback).strip().lower()
+    return normalized if normalized in allowed else fallback
 
 
 def _is_progress_line(line: str) -> bool:

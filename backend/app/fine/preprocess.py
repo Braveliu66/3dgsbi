@@ -40,9 +40,9 @@ class BlurAnalysis:
     training_blur_frames: int = 0
     rejected_blur_frames: int = 0
     deblur_trigger_reason: str = "none"
-    per_frame_blur: dict[str, dict[str, str | bool | float]] = field(default_factory=dict)
+    per_frame_blur: dict[str, dict[str, str | bool | float | None]] = field(default_factory=dict)
 
-    def metrics(self) -> dict[str, int | float | str | dict[str, dict[str, str | bool | float]]]:
+    def metrics(self) -> dict[str, int | float | str | dict[str, dict[str, str | bool | float | None]]]:
         return {
             "blur_mode": self.mode,
             "blur_mean_laplacian": round(self.mean_laplacian, 4),
@@ -106,23 +106,47 @@ def prepare_mobile_images(
     keep_count = max(min_images, len(scores) - reject_count)
     kept = sorted(sorted(scores, key=lambda item: item.quality, reverse=True)[:keep_count], key=lambda item: item.path.name)
     classifications = classify_blur_scores(scores)
-    per_frame_blur: dict[str, dict[str, str | bool | float]] = {}
+    per_frame_blur: dict[str, dict[str, str | bool | float | None]] = {}
+    kept_paths: set[Path] = set()
 
     if output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     for index, item in enumerate(kept):
         normalized_name = f"{index:06d}.jpg"
+        kept_paths.add(item.path)
         classification = classifications[item.path]
         per_frame_blur[normalized_name] = {
             "source_image": item.path.name,
+            "training_image": normalized_name,
+            "training_stem": Path(normalized_name).stem,
+            "rejected": False,
             "blurred": classification.blurred,
             "kind": classification.kind,
             "quality": round(item.quality, 6),
+            "laplacian": round(item.laplacian, 6),
+            "gradient": round(item.gradient, 6),
+            "fft_high_ratio": round(item.fft_high_ratio, 8),
         }
         with Image.open(item.path) as original:
             image = ImageOps.exif_transpose(original).convert("RGB")
             image.save(output_dir / normalized_name, format="JPEG", quality=94)
+    for item in sorted(scores, key=lambda score: score.path.name):
+        if item.path in kept_paths:
+            continue
+        classification = classifications[item.path]
+        per_frame_blur[f"rejected:{item.path.name}"] = {
+            "source_image": item.path.name,
+            "training_image": None,
+            "training_stem": None,
+            "rejected": True,
+            "blurred": classification.blurred,
+            "kind": classification.kind,
+            "quality": round(item.quality, 6),
+            "laplacian": round(item.laplacian, 6),
+            "gradient": round(item.gradient, 6),
+            "fft_high_ratio": round(item.fft_high_ratio, 8),
+        }
     kept_blur = [classifications[item.path] for item in kept if classifications[item.path].blurred]
     mode = blur_mode_from_classifications(kept_blur)
     training_blur_frames = len(kept_blur)

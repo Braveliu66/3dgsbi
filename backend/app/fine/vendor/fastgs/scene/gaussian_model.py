@@ -16,6 +16,7 @@ from torch import nn
 import os
 from utils.system_utils import mkdir_p
 from plyfile import PlyData, PlyElement
+from scene.blur_kernel import DeblurState, build_deblur_state
 from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
@@ -66,6 +67,7 @@ class GaussianModel:
         self.denom = torch.empty(0)
         self.optimizer = None
         self.shoptimizer = None
+        self.deblur_state = DeblurState()
         self.percent_dense = 0
         self.spatial_lr_scale = 0
         self.setup_functions()
@@ -214,6 +216,24 @@ class GaussianModel:
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
 
+    def create_deblur_net(self, training_args):
+        if self.optimizer is None:
+            raise RuntimeError("Gaussian optimizer must be initialized before attaching GTnet")
+        self.deblur_state = build_deblur_state(training_args, device="cuda")
+        if not self.deblur_state.enabled:
+            return self.deblur_state
+        if self.optimizer_type != "default":
+            self.deblur_state = DeblurState()
+            return self.deblur_state
+        self.optimizer.add_param_group(
+            {
+                "params": list(self.deblur_state.model.parameters()),
+                "lr": self.deblur_state.config.lr,
+                "name": "GTnet",
+            }
+        )
+        return self.deblur_state
+
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
         for param_group in self.optimizer.param_groups:
@@ -346,6 +366,8 @@ class GaussianModel:
 
         for opt in optimizers:
             for group in opt.param_groups:
+                if group.get("name") == "GTnet":
+                    continue
                 stored_state = opt.state.get(group['params'][0], None)
                 if stored_state is not None:
                     stored_state["exp_avg"] = stored_state["exp_avg"][mask]
@@ -387,6 +409,8 @@ class GaussianModel:
 
         for opt in optimizers:
             for group in opt.param_groups:
+                if group.get("name") == "GTnet":
+                    continue
                 assert len(group["params"]) == 1
                 extension_tensor = tensors_dict[group["name"]]
                 stored_state = opt.state.get(group['params'][0], None)

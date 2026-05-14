@@ -362,7 +362,7 @@ class LiteVGGTAdapterTests(unittest.TestCase):
         output_spz.write_bytes(b"spz")
         return 9
 
-    def test_adapter_uses_official_fidelity_preview_defaults_and_outputs_raw_ply(self) -> None:
+    def test_adapter_uses_scene_coverage_preview_defaults_and_outputs_raw_ply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             ctx = self._make_context(root)
@@ -378,13 +378,13 @@ class LiteVGGTAdapterTests(unittest.TestCase):
             ):
                 result = litevggt_adapter.run(ctx)
 
-        self.assertEqual(run.call_args.kwargs["keep_ratio"], 0.42)
+        self.assertEqual(run.call_args.kwargs["keep_ratio"], 0.85)
         self.assertEqual(run.call_args.kwargs["target_size"], 518)
         self.assertEqual(run.call_args.kwargs["max_input_frames"], 64)
         self.assertEqual(run.call_args.kwargs["max_points"], 15_000_000)
         self.assertIsNone(run.call_args.kwargs["depth_conf_thresh"])
-        self.assertEqual(run.call_args.kwargs["preprocess_mode"], "crop")
-        self.assertEqual(run.call_args.kwargs["selection_strategy"], "global_confidence")
+        self.assertEqual(run.call_args.kwargs["preprocess_mode"], "pad")
+        self.assertEqual(run.call_args.kwargs["selection_strategy"], "scene_coverage")
         self.assertEqual(run.call_args.kwargs["axis_trim_low_quantile"], 0.0)
         self.assertEqual(run.call_args.kwargs["axis_trim_high_quantile"], 1.0)
         self.assertEqual(run.call_args.kwargs["spatial_keep_quantile"], 1.0)
@@ -436,10 +436,10 @@ class LiteVGGTAdapterTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["target_size"], 336)
         self.assertEqual(run.call_args.kwargs["frame_stride"], 2)
         self.assertIsNone(run.call_args.kwargs["depth_conf_thresh"])
-        self.assertEqual(run.call_args.kwargs["preprocess_mode"], "crop")
+        self.assertEqual(run.call_args.kwargs["preprocess_mode"], "pad")
         self.assertEqual(run.call_args.kwargs["max_points"], 1234)
         self.assertEqual(run.call_args.kwargs["max_input_frames"], 12)
-        self.assertEqual(run.call_args.kwargs["selection_strategy"], "global_confidence")
+        self.assertEqual(run.call_args.kwargs["selection_strategy"], "scene_coverage")
         self.assertEqual(run.call_args.kwargs["axis_trim_low_quantile"], 0.0)
         self.assertEqual(run.call_args.kwargs["axis_trim_high_quantile"], 1.0)
         self.assertEqual(run.call_args.kwargs["spatial_keep_quantile"], 1.0)
