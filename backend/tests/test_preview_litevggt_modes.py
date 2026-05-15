@@ -21,6 +21,7 @@ try:
         load_litevggt_image_batch,
         load_litevggt_image_tensors,
         load_litevggt_padded_image,
+        make_litevggt_window_specs,
         point_indices_to_frame_indices,
         resolve_litevggt_frame_selection,
         resolve_litevggt_quality_settings,
@@ -153,6 +154,96 @@ class LiteVGGTOfficialPathTests(unittest.TestCase):
         self.assertEqual(selection.files[-1], files[-1])
         self.assertEqual(selection.frame_stride, 3)
         self.assertEqual(selection.frame_stride_source, "user")
+
+    def test_window_specs_cover_large_scene_without_global_frame_cap(self) -> None:
+        files = [Path(f"{index:03d}.jpg") for index in range(173)]
+        frame_indices = np.arange(173, dtype=np.int32)
+
+        windows = make_litevggt_window_specs(files, frame_indices, chunk_size=48, overlap=12)
+
+        self.assertEqual([window.start for window in windows], [0, 36, 72, 108, 125])
+        self.assertTrue(all(len(window.files) == 48 for window in windows))
+        covered = sorted({int(frame) for window in windows for frame in window.frame_indices})
+        self.assertEqual(covered[0], 0)
+        self.assertEqual(covered[-1], 172)
+        self.assertEqual(len(covered), 173)
+
+    def test_auto_pointcloud_path_uses_single_for_large_uncapped_image_sets(self) -> None:
+        from app.preview.vendor import litevggt_runtime
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            for index in range(80):
+                (input_dir / f"{index:03d}.jpg").write_bytes(b"image")
+
+            reconstruction = MagicMock()
+            reconstruction.metrics = {}
+            with (
+                patch.object(litevggt_runtime, "run_litevggt_pointcloud_windowed", return_value={"windowed": True}) as windowed,
+                patch.object(litevggt_runtime, "run_litevggt_reconstruction", return_value=reconstruction) as single,
+                patch.object(litevggt_runtime, "write_litevggt_reconstruction_pointcloud", return_value={"ok": True}) as write,
+            ):
+                result = litevggt_runtime.run_litevggt_pointcloud(
+                    input_dir=input_dir,
+                    checkpoint_path=root / "te_dict.pt",
+                    output_ply=root / "preview.ply",
+                    output_meta_json=root / "preview_meta.json",
+                    keep_ratio=0.5,
+                    max_points=100,
+                    max_input_frames=None,
+                    target_size=476,
+                    frame_stride=None,
+                    depth_conf_thresh=None,
+                    preprocess_mode="pad",
+                    progress=lambda stage, value, message: None,
+                    inference_mode="auto",
+                    chunk_size=48,
+                    overlap=12,
+                    loop_closure=True,
+                )
+
+        self.assertEqual(result, {"ok": True})
+        windowed.assert_not_called()
+        self.assertIs(single.call_args.kwargs["max_input_frames"], None)
+        self.assertEqual(write.call_args.kwargs["extra_metrics"]["litevggt_inference_mode_requested"], "auto")
+        self.assertEqual(write.call_args.kwargs["extra_metrics"]["litevggt_inference_mode_effective"], "single")
+
+    def test_explicit_windowed_pointcloud_path_uses_windowed(self) -> None:
+        from app.preview.vendor import litevggt_runtime
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            for index in range(80):
+                (input_dir / f"{index:03d}.jpg").write_bytes(b"image")
+
+            with patch.object(litevggt_runtime, "run_litevggt_pointcloud_windowed", return_value={"ok": True}) as run:
+                result = litevggt_runtime.run_litevggt_pointcloud(
+                    input_dir=input_dir,
+                    checkpoint_path=root / "te_dict.pt",
+                    output_ply=root / "preview.ply",
+                    output_meta_json=root / "preview_meta.json",
+                    keep_ratio=0.5,
+                    max_points=100,
+                    max_input_frames=None,
+                    target_size=476,
+                    frame_stride=None,
+                    depth_conf_thresh=None,
+                    preprocess_mode="pad",
+                    progress=lambda stage, value, message: None,
+                    inference_mode="windowed",
+                    chunk_size=48,
+                    overlap=12,
+                    loop_closure=True,
+                )
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(run.call_args.kwargs["max_input_frames"], None)
+        self.assertEqual(run.call_args.kwargs["chunk_size"], 48)
+        self.assertEqual(run.call_args.kwargs["overlap"], 12)
 
     def test_point_indices_map_to_original_frame_indices(self) -> None:
         selected = np.array([0, 3, 4, 7, 8, 11], dtype=np.int64)
@@ -346,6 +437,12 @@ class LiteVGGTOfficialPathTests(unittest.TestCase):
         self.assertIs(first, model)
         self.assertIs(second, model)
         self.assertEqual(model_cls.call_count, 1)
+        model_cls.assert_called_once_with(
+            enable_camera=True,
+            enable_depth=True,
+            enable_point=False,
+            enable_track=False,
+        )
         self.assertEqual(fake_torch.load.call_count, 1)
         self.assertEqual(model.load_state_dict.call_count, 1)
         self.assertIn(call("bfloat16"), model.to.call_args_list)
@@ -429,11 +526,15 @@ class LiteVGGTAdapterTests(unittest.TestCase):
                 result = litevggt_adapter.run(ctx)
 
         self.assertEqual(run.call_args.kwargs["keep_ratio"], 0.85)
-        self.assertEqual(run.call_args.kwargs["target_size"], 518)
-        self.assertEqual(run.call_args.kwargs["max_input_frames"], 64)
+        self.assertEqual(run.call_args.kwargs["target_size"], 476)
+        self.assertIsNone(run.call_args.kwargs["max_input_frames"])
         self.assertEqual(run.call_args.kwargs["max_points"], 15_000_000)
         self.assertIsNone(run.call_args.kwargs["depth_conf_thresh"])
         self.assertEqual(run.call_args.kwargs["preprocess_mode"], "pad")
+        self.assertEqual(run.call_args.kwargs["inference_mode"], "single")
+        self.assertEqual(run.call_args.kwargs["chunk_size"], 64)
+        self.assertEqual(run.call_args.kwargs["overlap"], 16)
+        self.assertEqual(run.call_args.kwargs["loop_closure"], True)
         self.assertEqual(run.call_args.kwargs["selection_strategy"], "scene_coverage")
         self.assertEqual(run.call_args.kwargs["axis_trim_low_quantile"], 0.001)
         self.assertEqual(run.call_args.kwargs["axis_trim_high_quantile"], 0.999)
@@ -456,6 +557,68 @@ class LiteVGGTAdapterTests(unittest.TestCase):
         self.assertAlmostEqual(pointcloud_to_splats.call_args.kwargs["point_radius"], 0.00066)
         self.assertAlmostEqual(pointcloud_to_splats.call_args.kwargs["opacity"], 0.55)
         self.assertEqual(splats_to_spz.call_args.args[0].name, "preview_splats.ply")
+
+    def test_adapter_applies_scene_profile_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ctx = self._make_context(root, {"preview_scene_profile": "outdoor_fast_clean"})
+
+            with (
+                patch.object(litevggt_adapter, "run_litevggt_pointcloud", side_effect=self._fake_runtime_metrics) as run,
+                patch.object(
+                    litevggt_adapter,
+                    "convert_pointcloud_ply_to_fixed_splat_ply",
+                    side_effect=self._fake_splat_ply,
+                ),
+                patch.object(litevggt_adapter, "convert_ply_to_spz", side_effect=self._fake_spz),
+            ):
+                result = litevggt_adapter.run(ctx)
+
+        self.assertEqual(run.call_args.kwargs["keep_ratio"], 0.25)
+        self.assertEqual(run.call_args.kwargs["target_size"], 476)
+        self.assertIsNone(run.call_args.kwargs["max_input_frames"])
+        self.assertEqual(run.call_args.kwargs["max_points"], 5_000_000)
+        self.assertEqual(run.call_args.kwargs["inference_mode"], "single")
+        self.assertEqual(run.call_args.kwargs["chunk_size"], 48)
+        self.assertEqual(run.call_args.kwargs["overlap"], 12)
+        self.assertEqual(run.call_args.kwargs["loop_closure"], True)
+        self.assertEqual(run.call_args.kwargs["selection_strategy"], "global_confidence")
+        self.assertEqual(run.call_args.kwargs["axis_trim_low_quantile"], 0.01)
+        self.assertEqual(run.call_args.kwargs["axis_trim_high_quantile"], 0.99)
+        self.assertEqual(run.call_args.kwargs["spatial_keep_quantile"], 0.985)
+        self.assertEqual(result.metrics["preview_scene_profile"], "outdoor_fast_clean")
+
+    def test_adapter_low_level_options_override_scene_profile_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ctx = self._make_context(
+                root,
+                {
+                    "preview_scene_profile": "outdoor_fast_clean",
+                    "litevggt_keep_ratio": 0.6,
+                    "litevggt_target_size": 336,
+                    "litevggt_max_input_frames": 16,
+                    "preview_max_points": 1000,
+                    "litevggt_point_selection_strategy": "scene_coverage",
+                },
+            )
+
+            with (
+                patch.object(litevggt_adapter, "run_litevggt_pointcloud", side_effect=self._fake_runtime_metrics) as run,
+                patch.object(
+                    litevggt_adapter,
+                    "convert_pointcloud_ply_to_fixed_splat_ply",
+                    side_effect=self._fake_splat_ply,
+                ),
+                patch.object(litevggt_adapter, "convert_ply_to_spz", side_effect=self._fake_spz),
+            ):
+                litevggt_adapter.run(ctx)
+
+        self.assertEqual(run.call_args.kwargs["keep_ratio"], 0.6)
+        self.assertEqual(run.call_args.kwargs["target_size"], 336)
+        self.assertEqual(run.call_args.kwargs["max_input_frames"], 16)
+        self.assertEqual(run.call_args.kwargs["max_points"], 1000)
+        self.assertEqual(run.call_args.kwargs["selection_strategy"], "scene_coverage")
 
     def test_adapter_passes_only_minimal_runtime_options(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -493,6 +656,10 @@ class LiteVGGTAdapterTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["max_points"], 1234)
         self.assertEqual(run.call_args.kwargs["max_input_frames"], 12)
         self.assertEqual(run.call_args.kwargs["selection_strategy"], "scene_coverage")
+        self.assertEqual(run.call_args.kwargs["inference_mode"], "ignored")
+        self.assertEqual(run.call_args.kwargs["chunk_size"], 24)
+        self.assertEqual(run.call_args.kwargs["overlap"], 16)
+        self.assertEqual(run.call_args.kwargs["loop_closure"], True)
         self.assertEqual(run.call_args.kwargs["axis_trim_low_quantile"], 0.001)
         self.assertEqual(run.call_args.kwargs["axis_trim_high_quantile"], 0.999)
         self.assertEqual(run.call_args.kwargs["spatial_keep_quantile"], 0.9975)
@@ -502,14 +669,18 @@ class LiteVGGTAdapterTests(unittest.TestCase):
                 "axis_trim_high_quantile",
                 "axis_trim_low_quantile",
                 "checkpoint_path",
+                "chunk_size",
                 "depth_conf_thresh",
                 "frame_stride",
                 "input_dir",
+                "inference_mode",
                 "keep_ratio",
+                "loop_closure",
                 "max_input_frames",
                 "max_points",
                 "output_meta_json",
                 "output_ply",
+                "overlap",
                 "preprocess_mode",
                 "progress",
                 "selection_strategy",

@@ -20,6 +20,7 @@ if str(_BACKEND_ROOT) not in sys.path:
 
 from app.fine.fastgs_defaults import (
     FASTGS_DATA_DEVICE,
+    FASTGS_DEBLUR_AUTO_SCHEDULE,
     FASTGS_DEBLUR_BLURRED_VIEWS_ONLY,
     FASTGS_DEBLUR_BLUR_REGISTRY,
     FASTGS_DEBLUR_ENABLED,
@@ -31,6 +32,7 @@ from app.fine.fastgs_defaults import (
     FASTGS_DEBLUR_MAX_POSITION_DELTA,
     FASTGS_DEBLUR_MODE,
     FASTGS_DEBLUR_NUM_MOMENTS,
+    FASTGS_DEBLUR_SCHEDULE_PROFILE,
     FASTGS_DEBLUR_TRANSFORM_REG_WEIGHT,
     FASTGS_DEBLUR_WARMUP_ITERS,
     FASTGS_DEBLUR_WIDTH,
@@ -165,6 +167,8 @@ class OptimizationParams(ParamGroup):
         self.deblur_enabled = FASTGS_DEBLUR_ENABLED
         self.deblur_mode = FASTGS_DEBLUR_MODE
         self.deblur_blur_registry = FASTGS_DEBLUR_BLUR_REGISTRY
+        self.deblur_auto_schedule = FASTGS_DEBLUR_AUTO_SCHEDULE
+        self.deblur_schedule_profile = FASTGS_DEBLUR_SCHEDULE_PROFILE
         self.deblur_warmup_iters = FASTGS_DEBLUR_WARMUP_ITERS
         self.deblur_num_moments = FASTGS_DEBLUR_NUM_MOMENTS
         self.deblur_gtnet_lr = FASTGS_DEBLUR_GTNET_LR

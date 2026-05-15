@@ -15,11 +15,19 @@ const MIN_INPUT_FRAMES = 1;
 const MIN_FINE_INPUT_FRAMES = 3;
 const MAX_INPUT_FRAMES = 800;
 const UPLOAD_FILE_CONCURRENCY = 3;
+type PreviewSceneProfile = "mixed_balanced" | "indoor_full" | "outdoor_fast_clean";
+const PREVIEW_SCENE_PROFILE_OPTIONS: Array<{ value: PreviewSceneProfile; label: string }> = [
+  { value: "mixed_balanced", label: "均衡" },
+  { value: "indoor_full", label: "室内" },
+  { value: "outdoor_fast_clean", label: "室外" }
+];
+
 export default function UploadPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const thumbsRef = useRef<Record<string, string>>({});
   const [name, setName] = useState("新建重建项目");
   const [inputType, setInputType] = useState<Project["input_type"]>("images");
+  const [previewSceneProfile, setPreviewSceneProfile] = useState<PreviewSceneProfile>("mixed_balanced");
   const [tags, setTags] = useState("preview, research");
   const [project, setProject] = useState<Project | null>(null);
   const [media, setMedia] = useState<MediaAsset[]>([]);
@@ -154,6 +162,9 @@ export default function UploadPage() {
       const options: Record<string, unknown> = {
         preview_pipeline: project.input_type === "video" ? "lingbot_map_spz" : "litevggt_spz"
       };
+      if (project.input_type === "images") {
+        options.preview_scene_profile = previewSceneProfile;
+      }
       const next = await api.startPreview(project.id, options);
       rememberTaskId(next.id);
       setTask(next);
@@ -190,7 +201,11 @@ export default function UploadPage() {
     setBusy(true);
     setError(null);
     try {
-      const next = await api.startFine(project.id);
+      const options: Record<string, unknown> = {};
+      if (project.input_type === "images") {
+        options.fine_scene_profile = previewSceneProfile;
+      }
+      const next = await api.startFine(project.id, options);
       rememberTaskId(next.id);
       setTask(next);
       setViewer(null);
@@ -251,6 +266,24 @@ export default function UploadPage() {
                 <input className="input" value="LingBot-Map 视频极速预览" disabled />
               )}
             </div>
+            {inputType === "images" ? (
+              <div className="field">
+                <label>场景策略</label>
+                <div className="segmented" style={{ gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
+                  {PREVIEW_SCENE_PROFILE_OPTIONS.map((option) => (
+                    <button
+                      className={previewSceneProfile === option.value ? "active" : ""}
+                      type="button"
+                      key={option.value}
+                      aria-pressed={previewSceneProfile === option.value}
+                      onClick={() => setPreviewSceneProfile(option.value)}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
 
             <label
               className={`dropzone ${dragging ? "dragging" : ""}`}

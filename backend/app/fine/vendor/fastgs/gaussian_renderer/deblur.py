@@ -67,7 +67,7 @@ def render_fastgs_deblur(
         return {
             "render": rendered_image,
             "viewspace_points": means2D,
-            "visibility_filter": (radii > 0).nonzero(),
+            "visibility_filter": radii > 0,
             "radii": radii,
             "accum_metric_counts": accum_metric_counts,
             "deblur_regularization": deblur_transform_regularization(scale_delta, rotation_delta, None),
@@ -122,7 +122,7 @@ def render_fastgs_deblur(
     return {
         "render": sum(renders) / len(renders),
         "viewspace_points": first_means2D,
-        "visibility_filter": (radii_accum > 0).nonzero(),
+        "visibility_filter": radii_accum > 0,
         "radii": radii_accum,
         "accum_metric_counts": metric_counts_accum,
         "deblur_regularization": deblur_transform_regularization(scale_delta, rotation_delta, position_delta),

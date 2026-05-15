@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.algorithms import license_notice_for, normalize_preview_pipeline, runtime_preflight, seed_algorithm_registry
 from app.config import get_settings
 from app.database import SessionLocal, engine, get_db, initialize_database_schema
+from app.fine.fastgs_defaults import DEFAULT_FINE_SCENE_PROFILE, FINE_SCENE_PROFILE_MAX_SIDES
 from app.models import AlgorithmRegistry, Artifact, Feedback, MediaAsset, Project, Task, TaskEvent, UploadSession, User, new_id, utc_now
 from app.resources import collect_resources
 from app.security import (
@@ -79,6 +80,11 @@ class ProjectBulkDeletePayload(BaseModel):
 
 class TaskCreatePayload(BaseModel):
     options: dict[str, Any] = {}
+
+
+DEFAULT_PREVIEW_SCENE_PROFILE = "mixed_balanced"
+PREVIEW_SCENE_PROFILES = {"mixed_balanced", "indoor_full", "outdoor_fast_clean"}
+FINE_SCENE_PROFILES = set(FINE_SCENE_PROFILE_MAX_SIDES)
 
 
 class FeedbackPayload(BaseModel):
@@ -476,6 +482,20 @@ def enqueue_preview_task(task_id: str) -> None:
 
 def enqueue_fine_task(task_id: str) -> None:
     get_redis().rpush(settings.fine_queue_name, task_id)
+
+
+def normalize_preview_scene_profile(value: Any) -> str:
+    profile = str(value or DEFAULT_PREVIEW_SCENE_PROFILE).strip().lower()
+    if profile not in PREVIEW_SCENE_PROFILES:
+        raise HTTPException(status_code=400, detail=f"Unsupported preview scene profile: {profile}")
+    return profile
+
+
+def normalize_fine_scene_profile(value: Any) -> str:
+    profile = str(value or DEFAULT_FINE_SCENE_PROFILE).strip().lower()
+    if profile not in FINE_SCENE_PROFILES:
+        raise HTTPException(status_code=400, detail=f"Unsupported fine scene profile: {profile}")
+    return profile
 
 
 def request_worker_cancel(task: Task) -> None:
@@ -972,16 +992,20 @@ def create_preview_task(
         raise HTTPException(status_code=400, detail="请先上传真实素材")
     if project.input_type == "images" and not any(item.kind == "image" for item in project.media):
         raise HTTPException(status_code=400, detail="图片预览至少需要 1 张图片")
-    pipeline = normalize_preview_pipeline(str((payload.options or {}).get("preview_pipeline") or ""), project.input_type)
+    payload_options = payload.options or {}
+    pipeline = normalize_preview_pipeline(str(payload_options.get("preview_pipeline") or ""), project.input_type)
+    options = {**payload_options, "preview_pipeline": pipeline, "source_version": project.source_version}
     if project.input_type == "images":
         if pipeline != "litevggt_spz":
             raise HTTPException(status_code=400, detail=f"Unsupported preview pipeline for image input: {pipeline}")
+        options["preview_scene_profile"] = normalize_preview_scene_profile(payload_options.get("preview_scene_profile"))
     elif project.input_type == "video":
         video_count = sum(1 for item in project.media if item.kind == "video")
         if video_count != 1 or len(project.media) != 1:
             raise HTTPException(status_code=400, detail="Video preview requires exactly one video file")
         if pipeline != "lingbot_map_spz":
             raise HTTPException(status_code=400, detail=f"Unsupported preview pipeline for video input: {pipeline}")
+        options.pop("preview_scene_profile", None)
     else:
         raise HTTPException(status_code=400, detail="Preview input type is unsupported")
     task = Task(
@@ -992,7 +1016,7 @@ def create_preview_task(
         progress=0,
         current_stage="queued",
         eta_seconds=None,
-        options={**(payload.options or {}), "preview_pipeline": pipeline, "source_version": project.source_version},
+        options=options,
     )
     project.status = "PREVIEW_RUNNING"
     project.error_message = None
@@ -1046,6 +1070,9 @@ def create_fine_task(
     options = {
         **payload_options,
         "fine_pipeline": fine_pipeline,
+        "fine_scene_profile": normalize_fine_scene_profile(
+            payload_options.get("fine_scene_profile") or payload_options.get("preview_scene_profile")
+        ),
         "source_version": project.source_version,
         "fine_iterations": int(payload_options.get("fine_iterations") or settings.fine_iterations),
     }

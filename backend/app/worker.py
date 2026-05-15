@@ -806,6 +806,7 @@ def preview_artifact_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "lingbot_points_after_downsample",
         "lingbot_points_removed_by_limit",
         "lingbot_point_frame_count",
+        "preview_scene_profile",
         "point_source",
         "point_count_raw",
         "point_count_exported",

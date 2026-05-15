@@ -243,10 +243,32 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(payload["type"], "fine")
             self.assertEqual(payload["status"], "queued")
             self.assertEqual(payload["options"]["fine_pipeline"], "official_fastgs_big")
+            self.assertEqual(payload["options"]["fine_scene_profile"], "mixed_balanced")
             self.assertEqual(payload["options"]["source_version"], 8)
             self.assertEqual(payload["options"]["fine_iterations"], FINE_ITERATIONS)
             self.assertNotIn("fine_amb3r_memory_device", payload["options"])
             self.assertNotIn("fine_amb3r_init_candidates", payload["options"])
+
+    def test_fine_task_accepts_scene_profile(self) -> None:
+        with TestClient(app) as client, patch("app.main.enqueue_fine_task", return_value=None):
+            headers = auth_headers(client)
+            project_id = create_image_project(client, headers, "indoor fine start")
+            for index in range(8):
+                upload_response = client.post(
+                    f"/api/projects/{project_id}/media",
+                    files={"file": (f"{index}.png", PNG_BYTES, "image/png")},
+                    headers=headers,
+                )
+                upload_response.raise_for_status()
+
+            response = client.post(
+                f"/api/projects/{project_id}/tasks/fine",
+                json={"options": {"fine_scene_profile": "indoor_full"}},
+                headers=headers,
+            )
+            response.raise_for_status()
+
+            self.assertEqual(response.json()["options"]["fine_scene_profile"], "indoor_full")
 
     def test_fine_task_preserves_explicit_pycolmap_options(self) -> None:
         with TestClient(app) as client, patch("app.main.enqueue_fine_task", return_value=None):
@@ -328,6 +350,50 @@ class StorageResponseTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.json()["options"]["preview_pipeline"], "litevggt_spz")
+            self.assertEqual(response.json()["options"]["preview_scene_profile"], "mixed_balanced")
+
+    def test_image_preview_accepts_scene_profiles(self) -> None:
+        for profile in ("indoor_full", "outdoor_fast_clean"):
+            with self.subTest(profile=profile):
+                fake_redis = FakeRedis()
+                with TestClient(app) as client, patch("app.main.get_redis", return_value=fake_redis):
+                    headers = auth_headers(client)
+                    project_id = create_image_project(client, headers, f"{profile} preview")
+                    upload_response = client.post(
+                        f"/api/projects/{project_id}/media",
+                        files={"file": ("image.png", PNG_BYTES, "image/png")},
+                        headers=headers,
+                    )
+                    upload_response.raise_for_status()
+
+                    response = client.post(
+                        f"/api/projects/{project_id}/tasks/preview",
+                        json={"options": {"preview_scene_profile": profile}},
+                        headers=headers,
+                    )
+
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(response.json()["options"]["preview_scene_profile"], profile)
+
+    def test_image_preview_rejects_invalid_scene_profile(self) -> None:
+        with TestClient(app) as client:
+            headers = auth_headers(client)
+            project_id = create_image_project(client, headers, "invalid profile preview")
+            upload_response = client.post(
+                f"/api/projects/{project_id}/media",
+                files={"file": ("image.png", PNG_BYTES, "image/png")},
+                headers=headers,
+            )
+            upload_response.raise_for_status()
+
+            response = client.post(
+                f"/api/projects/{project_id}/tasks/preview",
+                json={"options": {"preview_scene_profile": "auto"}},
+                headers=headers,
+            )
+
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("Unsupported preview scene profile", response.text)
 
     def test_video_fine_task_is_disabled(self) -> None:
         with TestClient(app) as client, patch("app.main.enqueue_fine_task", return_value=None):

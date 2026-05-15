@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     preview_queue_name: str = "preview_tasks"
     preview_expected_seconds_litevggt_spz: int = 180
     preview_expected_seconds_lingbot_map_spz: int = 300
-    preview_image_max_side: int = 1600
+    preview_image_max_side: int = 480
     preview_image_jpeg_quality: int = 90
 
     fine_queue_name: str = "fine_tasks"

@@ -61,6 +61,24 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     blur_registry = load_blur_registry(getattr(opt, "deblur_blur_registry", ""))
     if deblur_state.enabled:
         opt.deblur_warmup_iters = min(max(0, int(opt.deblur_warmup_iters)), max(0, int(opt.iterations) - 1))
+        blurred_views_only = str(getattr(opt, "deblur_blurred_views_only", "true")).strip().lower() not in {"0", "false", "no", "off"}
+        if blurred_views_only and not blur_registry:
+            print(
+                "[Deblur][WARN] deblur is enabled but no blur registry was loaded. "
+                "Forcing deblur_blurred_views_only=false so all training views use deblur."
+            )
+            opt.deblur_blurred_views_only = "false"
+    deblur_schedule = build_deblur_topology_schedule(opt, deblur_state)
+    print(
+        "[DeblurSchedule] "
+        f"enabled={deblur_schedule.get('enabled')} "
+        f"profile={deblur_schedule.get('profile', 'manual')} "
+        f"deblur=({deblur_schedule['deblur_start']},{deblur_schedule['deblur_end']}) "
+        f"densifyA=({deblur_schedule['densify_a_from']},{deblur_schedule['densify_a_until']}) "
+        f"densifyB=({deblur_schedule['densify_b_from']},{deblur_schedule['densify_b_until']}) "
+        f"late_prune=({deblur_schedule['late_prune_from']},{deblur_schedule['late_prune_until']}) "
+        f"final_prune_from={deblur_schedule['final_prune_from']}"
+    )
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -100,7 +118,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         iter_start.record()
         
         base_xyz_lr = gaussians.update_learning_rate(iteration)
-        deblur_active = bool(deblur_state.enabled and iteration > opt.deblur_warmup_iters)
+        deblur_active = schedule_deblur_active(iteration, deblur_schedule, deblur_state)
         if deblur_active and base_xyz_lr is not None:
             set_xyz_learning_rate(gaussians, base_xyz_lr * float(opt.deblur_xyz_lr_scale))
 
@@ -159,7 +177,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # Log and save
             # training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_time, testing_iterations, scene, render_fastgs, (pipe, background, opt.mult))
             if (iteration in saving_iterations):
-                if iteration == opt.iterations and not deblur_final_pruned:
+                if (
+                    iteration == opt.iterations
+                    and not deblur_final_pruned
+                    and schedule_final_prune_active(iteration, deblur_schedule)
+                ):
                     my_viewpoint_stack = scene.getTrainCameras().copy()
                     camlist = sampling_cameras(my_viewpoint_stack, opt.fastgs_sample_cameras)
                     _, pruning_score = compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, opt)
@@ -176,7 +198,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             optim_start.record()
             
             # Densification
-            can_update_topology = bool(iteration < opt.densify_until_iter)
+            can_update_topology = schedule_topology_active(iteration, deblur_schedule)
             if can_update_topology:
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
@@ -209,6 +231,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             late_prune_until_iter = int(getattr(opt, "fastgs_late_prune_until_iter", FASTGS_LATE_PRUNE_UNTIL_ITER))
             if (
                 late_prune_enabled
+                and schedule_late_prune_active(iteration, deblur_schedule)
                 and iteration % late_prune_interval == 0
                 and iteration > late_prune_from_iter
                 and iteration < late_prune_until_iter
@@ -241,6 +264,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     # scene.save(iteration)
     print(f"Gaussian number: {gaussians._xyz.shape[0]}")
     print(f"Training time: {total_time}")
+    if deblur_state.enabled and deblur_photometric_views == 0:
+        raise RuntimeError(
+            "Deblur was enabled, but no training view used deblur render. "
+            "Check deblur_blurred_views_only, blur_registry, and image_name matching."
+        )
     write_deblur_metrics(
         dataset.model_path,
         gaussians,
@@ -251,6 +279,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         deblur_final_pruned,
         last_deblur_reg,
         opt,
+        deblur_schedule,
     )
 
 
@@ -315,6 +344,107 @@ def option_bool(value, fallback):
     return bool(fallback)
 
 
+def clamp_int(value, minimum, maximum):
+    minimum = int(minimum)
+    maximum = int(maximum)
+    if maximum < minimum:
+        return maximum
+    return max(minimum, min(int(value), maximum))
+
+
+def build_deblur_topology_schedule(opt, deblur_state):
+    total = max(1, int(opt.iterations))
+    enabled = bool(deblur_state.enabled)
+    auto = option_bool(getattr(opt, "deblur_auto_schedule", "true"), True)
+
+    if not enabled or not auto:
+        return {
+            "enabled": False,
+            "deblur_start": int(getattr(opt, "deblur_warmup_iters", 0)),
+            "deblur_end": total,
+            "densify_a_from": int(getattr(opt, "densify_from_iter", 0)),
+            "densify_a_until": int(getattr(opt, "densify_until_iter", total)),
+            "densify_b_from": -1,
+            "densify_b_until": -1,
+            "late_prune_from": int(getattr(opt, "fastgs_late_prune_from_iter", total + 1)),
+            "late_prune_until": int(getattr(opt, "fastgs_late_prune_until_iter", total + 1)),
+            "final_prune_from": total,
+        }
+
+    profile = str(getattr(opt, "deblur_schedule_profile", "quality")).strip().lower()
+    if profile == "fast":
+        deblur_start_ratio = 0.06
+        deblur_end_ratio = 0.55
+        densify_b_end_ratio = 0.78
+        final_prune_ratio = 0.96
+    elif profile == "balanced":
+        deblur_start_ratio = 0.08
+        deblur_end_ratio = 0.60
+        densify_b_end_ratio = 0.82
+        final_prune_ratio = 0.96
+    else:
+        profile = "quality"
+        deblur_start_ratio = 0.08
+        deblur_end_ratio = 0.65
+        densify_b_end_ratio = 0.85
+        final_prune_ratio = 0.97
+
+    deblur_start = clamp_int(round(total * deblur_start_ratio), 200, max(0, total - 1))
+    deblur_end = clamp_int(round(total * deblur_end_ratio), deblur_start + 1, total)
+    densify_b_from = deblur_end + 1
+    densify_b_until = clamp_int(round(total * densify_b_end_ratio), densify_b_from, total)
+    final_prune_from = clamp_int(round(total * final_prune_ratio), densify_b_until, total)
+
+    opt.deblur_warmup_iters = deblur_start
+    opt.densify_from_iter = int(getattr(opt, "densify_from_iter", 250))
+    opt.densify_until_iter = densify_b_until
+    opt.fastgs_late_prune_from_iter = final_prune_from
+    opt.fastgs_late_prune_until_iter = total
+
+    return {
+        "enabled": True,
+        "profile": profile,
+        "deblur_start": deblur_start,
+        "deblur_end": deblur_end,
+        "densify_a_from": int(getattr(opt, "densify_from_iter", 250)),
+        "densify_a_until": deblur_start,
+        "densify_b_from": densify_b_from,
+        "densify_b_until": densify_b_until,
+        "late_prune_from": final_prune_from,
+        "late_prune_until": total,
+        "final_prune_from": final_prune_from,
+    }
+
+
+def schedule_deblur_active(iteration, schedule, deblur_state):
+    if not deblur_state.enabled:
+        return False
+    if not schedule.get("enabled"):
+        return iteration > int(schedule["deblur_start"])
+    return int(schedule["deblur_start"]) < iteration <= int(schedule["deblur_end"])
+
+
+def schedule_topology_active(iteration, schedule):
+    if not schedule.get("enabled"):
+        return iteration < int(schedule["densify_a_until"])
+
+    in_first_densify = int(schedule["densify_a_from"]) < iteration < int(schedule["densify_a_until"])
+    in_second_densify = int(schedule["densify_b_from"]) <= iteration < int(schedule["densify_b_until"])
+    return bool(in_first_densify or in_second_densify)
+
+
+def schedule_late_prune_active(iteration, schedule):
+    if not schedule.get("enabled"):
+        return True
+    return int(schedule["late_prune_from"]) <= iteration < int(schedule["late_prune_until"])
+
+
+def schedule_final_prune_active(iteration, schedule):
+    if not schedule.get("enabled"):
+        return True
+    return iteration >= int(schedule["final_prune_from"])
+
+
 def write_deblur_metrics(
     model_path,
     gaussians,
@@ -325,6 +455,7 @@ def write_deblur_metrics(
     deblur_final_pruned,
     last_deblur_reg,
     opt,
+    deblur_schedule=None,
 ):
     if not model_path:
         return
@@ -344,6 +475,7 @@ def write_deblur_metrics(
         "deblur_final_prune_uses_sharp_score": True,
         "deblur_final_pruned": deblur_final_pruned,
         "deblur_last_transform_regularization": last_deblur_reg,
+        "deblur_schedule": deblur_schedule or {},
         "final_gaussians": int(gaussians.get_xyz.shape[0]),
         **deblur_state.metrics(),
     }

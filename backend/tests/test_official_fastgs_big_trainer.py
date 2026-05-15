@@ -19,6 +19,13 @@ from app.fine.fastgs_defaults import (  # noqa: E402
     FASTGS_LATE_PRUNE_ENABLED,
     FASTGS_LATE_PRUNE_INTERVAL,
     FASTGS_LATE_PRUNE_MIN_OPACITY,
+    FASTGS_DEBLUR_AUTO_SCHEDULE,
+    FASTGS_DEBLUR_BLURRED_VIEWS_ONLY,
+    FASTGS_DEBLUR_MODE,
+    FASTGS_DEBLUR_NUM_MOMENTS,
+    FASTGS_DEBLUR_SCHEDULE_PROFILE,
+    FASTGS_DEBLUR_TRANSFORM_REG_WEIGHT,
+    FASTGS_DEBLUR_XYZ_LR_SCALE,
     FASTGS_MULT,
     FASTGS_SAMPLE_CAMERAS,
 )
@@ -72,7 +79,7 @@ class OfficialFastGSBigTrainerTests(unittest.TestCase):
             self.assertIn("--densification_interval", command)
             self.assertEqual(command[command.index("--densification_interval") + 1], str(FASTGS_DENSIFICATION_INTERVAL))
             self.assertIn("-r", command)
-            self.assertEqual(command[command.index("-r") + 1], "2400")
+            self.assertEqual(command[command.index("-r") + 1], "1500")
             self.assertEqual(command[command.index("--position_lr_max_steps") + 1], "30000")
             self.assertEqual(command[command.index("--densify_from_iter") + 1], "501")
             self.assertEqual(command[command.index("--densify_until_iter") + 1], "15000")
@@ -90,7 +97,14 @@ class OfficialFastGSBigTrainerTests(unittest.TestCase):
             self.assertEqual(command[command.index("--fastgs_late_prune_from_iter") + 1], "15000")
             self.assertEqual(command[command.index("--fastgs_late_prune_until_iter") + 1], "30000")
             self.assertEqual(command[command.index("--fastgs_late_prune_min_opacity") + 1], str(FASTGS_LATE_PRUNE_MIN_OPACITY))
-            self.assertEqual(command[command.index("--deblur_warmup_iters") + 1], "6000")
+            self.assertEqual(command[command.index("--deblur_mode") + 1], FASTGS_DEBLUR_MODE)
+            self.assertEqual(command[command.index("--deblur_auto_schedule") + 1], FASTGS_DEBLUR_AUTO_SCHEDULE)
+            self.assertEqual(command[command.index("--deblur_schedule_profile") + 1], FASTGS_DEBLUR_SCHEDULE_PROFILE)
+            self.assertEqual(command[command.index("--deblur_warmup_iters") + 1], "500")
+            self.assertEqual(command[command.index("--deblur_num_moments") + 1], str(FASTGS_DEBLUR_NUM_MOMENTS))
+            self.assertEqual(command[command.index("--deblur_transform_reg_weight") + 1], str(FASTGS_DEBLUR_TRANSFORM_REG_WEIGHT))
+            self.assertEqual(command[command.index("--deblur_xyz_lr_scale") + 1], str(FASTGS_DEBLUR_XYZ_LR_SCALE))
+            self.assertEqual(command[command.index("--deblur_blurred_views_only") + 1], FASTGS_DEBLUR_BLURRED_VIEWS_ONLY)
             self.assertNotIn("--eval", command)
             self.assertNotIn("git", command)
             self.assertNotIn("github.com/fastgs/FastGS", " ".join(command))
@@ -132,7 +146,7 @@ class OfficialFastGSBigTrainerTests(unittest.TestCase):
             self.assertEqual(command[command.index("--fastgs_late_prune_interval") + 1], "3500")
             self.assertEqual(command[command.index("--fastgs_late_prune_from_iter") + 1], "17500")
             self.assertEqual(command[command.index("--fastgs_late_prune_until_iter") + 1], "35000")
-            self.assertEqual(command[command.index("--deblur_warmup_iters") + 1], "7000")
+            self.assertEqual(command[command.index("--deblur_warmup_iters") + 1], "500")
             self.assertEqual(result.metrics["densify_until_iter"], 17500)
 
     def test_train_official_fastgs_big_passes_deblur_options_and_registry(self) -> None:
@@ -162,6 +176,8 @@ class OfficialFastGSBigTrainerTests(unittest.TestCase):
                     options={
                         "fine_deblur_enabled": "auto",
                         "fine_deblur_mode": "mixed",
+                        "fine_deblur_auto_schedule": "false",
+                        "fine_deblur_schedule_profile": "balanced",
                         "fine_deblur_blur_registry": str(registry),
                     },
                     progress=lambda *_args: None,
@@ -172,9 +188,13 @@ class OfficialFastGSBigTrainerTests(unittest.TestCase):
             self.assertIn("auto", command)
             self.assertIn("--deblur_mode", command)
             self.assertIn("mixed", command)
+            self.assertEqual(command[command.index("--deblur_auto_schedule") + 1], "false")
+            self.assertEqual(command[command.index("--deblur_schedule_profile") + 1], "balanced")
             self.assertIn("--deblur_blur_registry", command)
             self.assertIn(str(registry), command)
             self.assertEqual(result.metrics["deblur_enabled"], "auto")
+            self.assertEqual(result.metrics["deblur_auto_schedule"], "false")
+            self.assertEqual(result.metrics["deblur_schedule_profile"], "balanced")
 
     def test_train_official_fastgs_big_allows_late_prune_overrides(self) -> None:
         train_official_fastgs_big = import_trainer()

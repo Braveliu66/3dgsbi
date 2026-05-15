@@ -13,6 +13,7 @@ from typing import Any, Callable
 from app.config import get_settings
 from app.fine.fastgs_defaults import (
     FASTGS_DATA_DEVICE,
+    FASTGS_DEBLUR_AUTO_SCHEDULE,
     FASTGS_DEBLUR_BLURRED_VIEWS_ONLY,
     FASTGS_DEBLUR_ENABLED,
     FASTGS_DEBLUR_GTNET_LR,
@@ -23,6 +24,7 @@ from app.fine.fastgs_defaults import (
     FASTGS_DEBLUR_MAX_POSITION_DELTA,
     FASTGS_DEBLUR_MODE,
     FASTGS_DEBLUR_NUM_MOMENTS,
+    FASTGS_DEBLUR_SCHEDULE_PROFILE,
     FASTGS_DEBLUR_TRANSFORM_REG_WEIGHT,
     FASTGS_DEBLUR_WARMUP_ITERS,
     FASTGS_DEBLUR_WIDTH,
@@ -124,6 +126,12 @@ def train_official_fastgs_big(
     deblur_enabled = _choice_string(options.get("fine_deblur_enabled"), FASTGS_DEBLUR_ENABLED, {"auto", "true", "false"})
     deblur_mode = _choice_string(options.get("fine_deblur_mode"), FASTGS_DEBLUR_MODE, {"sharp", "defocus", "motion", "mixed"})
     deblur_blur_registry = str(options.get("fine_deblur_blur_registry") or "").strip()
+    deblur_auto_schedule = _choice_string(options.get("fine_deblur_auto_schedule"), FASTGS_DEBLUR_AUTO_SCHEDULE, {"true", "false"})
+    deblur_schedule_profile = _choice_string(
+        options.get("fine_deblur_schedule_profile"),
+        FASTGS_DEBLUR_SCHEDULE_PROFILE,
+        {"quality", "balanced", "fast"},
+    )
     deblur_warmup_iters = read_int(options.get("fine_deblur_warmup_iters"), schedule["deblur_warmup_iters"], minimum=0, maximum=max(0, iterations - 1))
     deblur_num_moments = read_int(options.get("fine_deblur_num_moments"), FASTGS_DEBLUR_NUM_MOMENTS, minimum=1, maximum=8)
     deblur_gtnet_lr = read_float(options.get("fine_deblur_gtnet_lr"), FASTGS_DEBLUR_GTNET_LR, minimum=1e-6, maximum=0.1)
@@ -206,6 +214,10 @@ def train_official_fastgs_big(
         deblur_enabled,
         "--deblur_mode",
         deblur_mode,
+        "--deblur_auto_schedule",
+        deblur_auto_schedule,
+        "--deblur_schedule_profile",
+        deblur_schedule_profile,
         "--deblur_warmup_iters",
         str(deblur_warmup_iters),
         "--deblur_num_moments",
@@ -332,6 +344,8 @@ def train_official_fastgs_big(
         "deblur_enabled": deblur_enabled,
         "deblur_mode": deblur_mode,
         "deblur_blur_registry": deblur_blur_registry or None,
+        "deblur_auto_schedule": deblur_auto_schedule,
+        "deblur_schedule_profile": deblur_schedule_profile,
         "deblur_warmup_iters": deblur_warmup_iters,
         "deblur_num_moments": deblur_num_moments,
         "deblur_gtnet_lr": deblur_gtnet_lr,
@@ -383,7 +397,7 @@ def resolve_fastgs_schedule(iterations: int) -> dict[str, int]:
         "late_prune_interval": opacity_reset_interval,
         "late_prune_from_iter": densify_until_iter,
         "late_prune_until_iter": iterations,
-        "deblur_warmup_iters": min(densify_until_iter, max(FASTGS_DEBLUR_WARMUP_ITERS, round(iterations * 0.20))),
+        "deblur_warmup_iters": min(max(0, FASTGS_DEBLUR_WARMUP_ITERS), max(0, iterations - 1)),
         "position_lr_max_steps": iterations,
     }
 
