@@ -18,7 +18,7 @@ from app.fine.fastgs_defaults import (
 )
 from app.fine.option_utils import read_float, read_int
 from app.fine.official_fastgs_big_trainer import train_official_fastgs_big
-from app.fine.preprocess import build_pycolmap_scene, prepare_mobile_images
+from app.fine.preprocess import build_pycolmap_scene, prepare_fine_images
 from app.fine.types import FineContext, FineFailure, FineResult
 from app.fine.viewer_meta import read_ply_xyz_bounds, write_final_viewer_meta_json, write_scaled_viewer_ply
 from app.preview.io.spz import convert_ply_to_spz
@@ -27,8 +27,6 @@ from app.preview.utils import image_files
 
 
 PIPELINE_NAME = "official_fastgs_big"
-LEGACY_PIPELINE_NAME = "mobilegs_lmrs"
-VIDEO_PIPELINE_NAME = "video_artdeco_speed3r"
 
 SOURCE_COMMITS_FINE = {
     "FastGS": "44e02a5c1d5e9ed64d2ecd4af1cbba14ac92150f",
@@ -83,7 +81,7 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         f"reject_ratio={reject_ratio} min_images=3 input_dir={ctx.input_dir}",
         flush=True,
     )
-    train_input_dir, blur = prepare_mobile_images(
+    train_input_dir, blur = prepare_fine_images(
         ctx.input_dir,
         ctx.work_dir / "fine_input",
         reject_ratio=reject_ratio,
@@ -304,22 +302,9 @@ def build_scene(
 def normalize_fine_pipeline(value: str | None) -> str:
     normalized = (value or PIPELINE_NAME).strip().lower()
     aliases = {
-        "fine_fused_quality": PIPELINE_NAME,
-        "fused_quality": PIPELINE_NAME,
-        "fused_quality_3dgs": PIPELINE_NAME,
-        "mobilegs": PIPELINE_NAME,
-        LEGACY_PIPELINE_NAME: PIPELINE_NAME,
-        "litevggt_fastgs": PIPELINE_NAME,
-        "litevggt_fastgs_deblur": PIPELINE_NAME,
-        "litevggt_fastgs_deblur_gsplat": PIPELINE_NAME,
-        "video_artdeco_litevggt": VIDEO_PIPELINE_NAME,
-        "video_litevggt": VIDEO_PIPELINE_NAME,
-        "artdeco_litevggt": VIDEO_PIPELINE_NAME,
-        "video_artdeco_speed3r": VIDEO_PIPELINE_NAME,
         PIPELINE_NAME: PIPELINE_NAME,
-        VIDEO_PIPELINE_NAME: VIDEO_PIPELINE_NAME,
     }
-    return aliases.get(normalized, PIPELINE_NAME)
+    return aliases.get(normalized, normalized)
 
 
 def assert_runtime_ready() -> None:

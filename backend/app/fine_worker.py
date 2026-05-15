@@ -14,7 +14,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.database import SessionLocal, initialize_database_schema
-from app.fine.runner import PIPELINE_NAME, VIDEO_PIPELINE_NAME, normalize_fine_pipeline, run_fine_pipeline
+from app.fine.runner import PIPELINE_NAME, normalize_fine_pipeline, run_fine_pipeline
 from app.fine.types import FineContext, FineFailure
 from app.models import Artifact, Project, Task, utc_now
 from app.preview.image_preprocess import normalize_image_directory
@@ -431,8 +431,7 @@ def estimate_fine_eta(task: Task, started: float) -> int | None:
     if progress >= 100:
         return 0
     elapsed = max(1.0, time.monotonic() - started)
-    pipeline = normalize_fine_pipeline(str((task.options or {}).get("fine_pipeline") or PIPELINE_NAME))
-    fallback_expected = settings.fine_expected_seconds_video if pipeline == VIDEO_PIPELINE_NAME else settings.fine_expected_seconds_images
+    fallback_expected = settings.fine_expected_seconds_images
     expected = int((task.options or {}).get("fine_expected_seconds") or fallback_expected)
     by_progress = elapsed * (100 - progress) / progress
     by_expected = max(0, expected - elapsed)

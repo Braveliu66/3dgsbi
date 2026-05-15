@@ -312,7 +312,7 @@ def bundled_module_status(name: str) -> dict[str, Any]:
         "LiteVGGT": "app.preview.vendor.litevggt_runtime",
         "LingBot-Map Video Preview": "app.preview.adapters.lingbot",
         "Image Fine (Official FastGS-Big)": "app.fine.runner",
-        "Deblurring-3DGS GTnet": "app.fine.deblur_mlp",
+        "Deblurring-3DGS GTnet": "app.fine.official_fastgs_big_trainer",
         "Spark SPZ": "app.preview.io.spz",
     }
     module = modules.get(name)

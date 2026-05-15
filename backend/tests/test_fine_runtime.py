@@ -45,44 +45,23 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertNotIn('"gsplat"', fine_status_block)
         self.assertNotIn("amb3r", fine_status_block)
 
-    def test_trainer_uses_local_runtime_not_lmrs_repo_training(self) -> None:
-        trainer_source = (BACKEND_ROOT / "app" / "fine" / "mobilegs_trainer.py").read_text(encoding="utf-8")
-        render_source = (BACKEND_ROOT / "app" / "fine" / "local_3dgs" / "render.py").read_text(encoding="utf-8")
+    def test_removed_mobilegs_lmrs_code_is_not_present(self) -> None:
+        fine_root = BACKEND_ROOT / "app" / "fine"
 
-        self.assertIn("local_3dgs_runtime", trainer_source)
-        self.assertIn("FastGS_local_multiview_score", trainer_source)
-        self.assertIn("diff_gaussian_rasterization_fastgs", render_source)
-        self.assertIn("pc.get_features_dc", render_source)
-        self.assertIn("pc.get_features_rest", render_source)
-        self.assertIn("accum_metric_counts", render_source)
-        self.assertIn("metric_render_fn=topology_render", trainer_source)
-        self.assertIn("def photometric_render", trainer_source)
-        self.assertIn("def topology_render", trainer_source)
-        self.assertIn("LM-RS_local_matrix_free", trainer_source)
-        self.assertIn("lmrs_phase_iterations", trainer_source)
-        self.assertIn("policy.cuda_metric_calls > 0", trainer_source)
-        self.assertIn("fine_lmrs_enabled", trainer_source)
-        self.assertIn("LM-RS temporarily isolated due to unstable local backend", trainer_source)
-        self.assertIn("fine_lmrs_lambda_dssim", trainer_source)
-        self.assertIn("Scene(dataset, gaussians, shuffle=True)", trainer_source)
-        self.assertNotIn("Scene(dataset, gaussians, opt", trainer_source)
-        self.assertNotIn("resolve_lmrs_root", trainer_source)
-        self.assertNotIn("prepend_sys_path", trainer_source)
-        self.assertNotIn("/opt/lm-rs", trainer_source)
-        self.assertNotIn("gauss_newton_step", trainer_source)
+        self.assertFalse((fine_root / "mobilegs_trainer.py").exists())
+        self.assertFalse((fine_root / "local_3dgs").exists())
+        self.assertFalse((fine_root / "lmrs_runtime.py").exists())
+        self.assertFalse((fine_root / "fastgs_policy.py").exists())
+        self.assertFalse((fine_root / "litevggt_scene.py").exists())
 
     def test_image_fine_runner_uses_official_fastgs_big_not_lmrs(self) -> None:
         runner_source = (BACKEND_ROOT / "app" / "fine" / "runner.py").read_text(encoding="utf-8")
-        trainer_source = (BACKEND_ROOT / "app" / "fine" / "mobilegs_trainer.py").read_text(encoding="utf-8")
 
         self.assertIn("train_official_fastgs_big", runner_source)
         self.assertNotIn("train_mobile_3dgs", runner_source)
         self.assertNotIn("fine_lm_start_iter", runner_source)
         self.assertNotIn("lm_default = iterations", runner_source)
         self.assertNotIn("min(15_000, iterations)", runner_source)
-        self.assertIn('read_bool((options or {}).get("fine_lmrs_enabled"), False)', trainer_source)
-        self.assertIn('"active": False', trainer_source)
-        self.assertIn("LM-RS temporarily isolated due to unstable local backend", trainer_source)
 
     def test_worker_builds_vendored_3dgs_extensions_without_runtime_fastgs_clone(self) -> None:
         dockerfile = (BACKEND_ROOT.parent / "worker" / "Dockerfile").read_text(encoding="utf-8")
@@ -129,20 +108,17 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertNotIn("artdeco_video_runtime_status", algorithms_source)
         self.assertNotIn("run_video_artdeco_speed3r_pipeline", runner_source)
 
-    def test_fine_code_is_split_by_integration_boundary(self) -> None:
+    def test_fine_code_keeps_only_current_integration_boundary(self) -> None:
         fine_root = BACKEND_ROOT / "app" / "fine"
 
-        self.assertTrue((fine_root / "fastgs_policy.py").exists())
-        self.assertTrue((fine_root / "local_3dgs" / "runtime.py").exists())
-        self.assertTrue((fine_root / "local_3dgs" / "scene_quality.py").exists())
-        self.assertTrue((fine_root / "local_3dgs" / "sparse_compensation.py").exists())
-        self.assertTrue((fine_root / "local_3dgs" / "cg_state.py").exists())
-        self.assertTrue((fine_root / "local_3dgs" / "cg_solver.py").exists())
-        self.assertTrue((fine_root / "local_3dgs" / "cg_optimizer.py").exists())
-        self.assertTrue((fine_root / "local_3dgs" / "lmrs_step.py").exists())
-        self.assertTrue((fine_root / "local_3dgs" / "render.py").exists())
-        self.assertTrue((fine_root / "lmrs_runtime.py").exists())
+        self.assertTrue((fine_root / "official_fastgs_big_trainer.py").exists())
+        self.assertTrue((fine_root / "vendor" / "fastgs" / "train.py").exists())
+        self.assertTrue((fine_root / "vendor" / "fastgs" / "scene" / "blur_kernel.py").exists())
         self.assertTrue((fine_root / "option_utils.py").exists())
+        self.assertFalse((fine_root / "mobilegs_trainer.py").exists())
+        self.assertFalse((fine_root / "local_3dgs").exists())
+        self.assertFalse((fine_root / "lmrs_runtime.py").exists())
+        self.assertFalse((fine_root / "video").exists())
         self.assertFalse((fine_root / "amb3r_sfm.py").exists())
         self.assertFalse((fine_root / "amb3r_runtime").exists())
         self.assertFalse((fine_root / "edgs_init.py").exists())
@@ -156,29 +132,13 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertNotIn("target: worker-preview", compose_source)
         self.assertNotIn("target: worker-fine", compose_source)
 
-    def test_normalize_fine_pipeline_maps_legacy_to_official_fastgs_big(self) -> None:
+    def test_normalize_fine_pipeline_only_accepts_current_name(self) -> None:
         *_, normalize_fine_pipeline = import_fine_runtime()
 
-        aliases = [
-            "fused_quality_3dgs",
-            "fine_fused_quality",
-            "fused_quality",
-            "mobilegs_lmrs",
-            "litevggt_fastgs",
-            "litevggt_fastgs_deblur",
-            "litevggt_fastgs_deblur_gsplat",
-            None,
-        ]
-        for alias in aliases:
-            self.assertEqual(normalize_fine_pipeline(alias), "official_fastgs_big")
-
-    def test_video_fine_pipeline_aliases_to_artdeco_speed3r(self) -> None:
-        *_, normalize_fine_pipeline = import_fine_runtime()
-
+        self.assertEqual(normalize_fine_pipeline(None), "official_fastgs_big")
+        self.assertEqual(normalize_fine_pipeline("official_fastgs_big"), "official_fastgs_big")
+        self.assertEqual(normalize_fine_pipeline("mobilegs_lmrs"), "mobilegs_lmrs")
         self.assertEqual(normalize_fine_pipeline("video_artdeco_speed3r"), "video_artdeco_speed3r")
-        self.assertEqual(normalize_fine_pipeline("video_artdeco_litevggt"), "video_artdeco_speed3r")
-        self.assertEqual(normalize_fine_pipeline("video_litevggt"), "video_artdeco_speed3r")
-        self.assertEqual(normalize_fine_pipeline("artdeco_litevggt"), "video_artdeco_speed3r")
 
     def test_video_fine_does_not_route_to_runtime(self) -> None:
         runner_source = (BACKEND_ROOT / "app" / "fine" / "runner.py").read_text(encoding="utf-8")
@@ -265,19 +225,64 @@ class FineRuntimeTests(unittest.TestCase):
         BlurScore, _, summarize_blur_scores, *_ = import_fine_runtime()
         scores = [
             BlurScore(path=Path(f"{index}.jpg"), laplacian=140.0, gradient=50.0, fft_high_ratio=0.1)
-            for index in range(10)
+            for index in range(9)
         ]
+        scores.append(BlurScore(path=Path("extreme.jpg"), laplacian=5.0, gradient=10.0, fft_high_ratio=0.01))
 
         summary = summarize_blur_scores(scores, reject_ratio=0.2)
 
-        self.assertEqual(summary.rejected_images, 2)
-        self.assertEqual(summary.kept_images, 8)
+        self.assertEqual(summary.rejected_images, 1)
+        self.assertEqual(summary.kept_images, 9)
         self.assertIn("0.jpg", summary.per_frame_blur)
 
-    def test_prepare_mobile_images_writes_normalized_blur_registry(self) -> None:
+    def test_medium_blurry_images_are_kept_under_reject_ratio(self) -> None:
+        BlurScore, _, summarize_blur_scores, _, deblur_mlp_enabled_by_default, _ = import_fine_runtime()
+        scores = [
+            BlurScore(path=Path(f"sharp_{index}.jpg"), laplacian=180.0, gradient=55.0, fft_high_ratio=0.12)
+            for index in range(9)
+        ]
+        scores.append(BlurScore(path=Path("medium_blur.jpg"), laplacian=50.0, gradient=45.0, fft_high_ratio=0.04))
+
+        summary = summarize_blur_scores(scores, reject_ratio=0.1)
+
+        self.assertEqual(summary.rejected_images, 0)
+        self.assertEqual(summary.training_blur_frames, 1)
+        self.assertTrue(deblur_mlp_enabled_by_default(summary.mode, {}))
+
+    def test_relative_moderate_defocus_triggers_deblur(self) -> None:
+        BlurScore, _, summarize_blur_scores, _, deblur_mlp_enabled_by_default, _ = import_fine_runtime()
+        scores = [
+            BlurScore(path=Path("000000.jpg"), laplacian=224.025827, gradient=851.799255, fft_high_ratio=0.36855204),
+            BlurScore(path=Path("000001.jpg"), laplacian=263.694757, gradient=766.077026, fft_high_ratio=0.39951025),
+            BlurScore(path=Path("000002.jpg"), laplacian=1179.796933, gradient=926.120972, fft_high_ratio=0.4989555),
+            BlurScore(path=Path("000003.jpg"), laplacian=312.785666, gradient=836.301392, fft_high_ratio=0.42024099),
+            BlurScore(path=Path("000004.jpg"), laplacian=339.566689, gradient=891.687195, fft_high_ratio=0.42951662),
+            BlurScore(path=Path("000005.jpg"), laplacian=367.996115, gradient=807.933167, fft_high_ratio=0.41953409),
+            BlurScore(path=Path("000006.jpg"), laplacian=269.82217, gradient=831.107666, fft_high_ratio=0.39806543),
+            BlurScore(path=Path("000007.jpg"), laplacian=265.300783, gradient=838.973206, fft_high_ratio=0.38816451),
+            BlurScore(path=Path("000008.jpg"), laplacian=1072.115027, gradient=903.514221, fft_high_ratio=0.49394342),
+            BlurScore(path=Path("000009.jpg"), laplacian=130.345808, gradient=776.81012, fft_high_ratio=0.34764597),
+            BlurScore(path=Path("000010.jpg"), laplacian=269.512496, gradient=732.538025, fft_high_ratio=0.391968),
+            BlurScore(path=Path("000011.jpg"), laplacian=174.387577, gradient=789.878479, fft_high_ratio=0.36938038),
+            BlurScore(path=Path("000012.jpg"), laplacian=457.84512, gradient=900.005554, fft_high_ratio=0.44153096),
+            BlurScore(path=Path("000013.jpg"), laplacian=1200.670854, gradient=896.39386, fft_high_ratio=0.50059039),
+            BlurScore(path=Path("000014.jpg"), laplacian=640.144877, gradient=898.354065, fft_high_ratio=0.47315539),
+            BlurScore(path=Path("000015.jpg"), laplacian=144.078116, gradient=833.57666, fft_high_ratio=0.32637557),
+            BlurScore(path=Path("000016.jpg"), laplacian=475.532711, gradient=869.833313, fft_high_ratio=0.4458538),
+            BlurScore(path=Path("000017.jpg"), laplacian=222.696251, gradient=790.070862, fft_high_ratio=0.38397671),
+        ]
+
+        summary = summarize_blur_scores(scores, reject_ratio=0.0)
+
+        self.assertGreater(summary.training_blur_frames, 0)
+        self.assertEqual(summary.mode, "defocus")
+        self.assertEqual(summary.deblur_trigger_reason, "blur_detected:defocus")
+        self.assertTrue(deblur_mlp_enabled_by_default(summary.mode, {}))
+
+    def test_prepare_fine_images_writes_normalized_blur_registry(self) -> None:
         try:
             from PIL import Image
-            from app.fine.preprocess import BlurScore, prepare_mobile_images
+            from app.fine.preprocess import BlurScore, prepare_fine_images
         except Exception as exc:
             raise unittest.SkipTest(f"fine preprocess dependencies unavailable: {exc}") from exc
 
@@ -297,7 +302,7 @@ class FineRuntimeTests(unittest.TestCase):
                     BlurScore(input_dir / "2.jpg", 190.0, 55.0, 0.12),
                 ],
             ):
-                _, analysis = prepare_mobile_images(input_dir, output_dir, reject_ratio=0.0, min_images=3)
+                _, analysis = prepare_fine_images(input_dir, output_dir, reject_ratio=0.0, min_images=3)
 
             self.assertTrue((output_dir / "000000.jpg").exists())
             self.assertEqual(analysis.per_frame_blur["000000.jpg"]["source_image"], "0.jpg")
@@ -305,10 +310,10 @@ class FineRuntimeTests(unittest.TestCase):
             self.assertFalse(analysis.per_frame_blur["000000.jpg"]["rejected"])
             self.assertTrue(analysis.per_frame_blur["000000.jpg"]["blurred"])
 
-    def test_prepare_mobile_images_records_rejected_blur_frames(self) -> None:
+    def test_prepare_fine_images_records_rejected_blur_frames(self) -> None:
         try:
             from PIL import Image
-            from app.fine.preprocess import BlurScore, prepare_mobile_images
+            from app.fine.preprocess import BlurScore, prepare_fine_images
         except Exception as exc:
             raise unittest.SkipTest(f"fine preprocess dependencies unavailable: {exc}") from exc
 
@@ -329,7 +334,7 @@ class FineRuntimeTests(unittest.TestCase):
                     BlurScore(input_dir / "3.jpg", 200.0, 55.0, 0.12),
                 ],
             ):
-                _, analysis = prepare_mobile_images(input_dir, output_dir, reject_ratio=0.25, min_images=3)
+                _, analysis = prepare_fine_images(input_dir, output_dir, reject_ratio=0.25, min_images=3)
 
             rejected = [entry for entry in analysis.per_frame_blur.values() if entry["rejected"]]
             kept = [entry for entry in analysis.per_frame_blur.values() if not entry["rejected"]]
@@ -351,9 +356,9 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertEqual(summary.training_blur_frames, 1)
         self.assertEqual(summary.mode, "mixed")
         self.assertTrue(deblur_mlp_enabled_by_default(summary.mode, {}))
-        self.assertEqual(summary.deblur_trigger_reason, "training_blur:mixed")
+        self.assertEqual(summary.deblur_trigger_reason, "blur_detected:mixed")
 
-    def test_rejected_blurry_image_does_not_trigger_deblur(self) -> None:
+    def test_rejected_blurry_image_still_triggers_deblur(self) -> None:
         BlurScore, _, summarize_blur_scores, _, deblur_mlp_enabled_by_default, _ = import_fine_runtime()
         scores = [
             BlurScore(path=Path(f"sharp_{index}.jpg"), laplacian=180.0, gradient=55.0, fft_high_ratio=0.12)
@@ -365,8 +370,9 @@ class FineRuntimeTests(unittest.TestCase):
 
         self.assertEqual(summary.training_blur_frames, 0)
         self.assertEqual(summary.rejected_blur_frames, 1)
-        self.assertEqual(summary.mode, "sharp")
-        self.assertFalse(deblur_mlp_enabled_by_default(summary.mode, {}))
+        self.assertEqual(summary.mode, "defocus")
+        self.assertEqual(summary.deblur_trigger_reason, "blur_detected:defocus")
+        self.assertTrue(deblur_mlp_enabled_by_default(summary.mode, {}))
 
     def test_sfm_defaults_to_pycolmap(self) -> None:
         _, SceneBuildResult, _, build_scene, *_ = import_fine_runtime()
@@ -440,77 +446,24 @@ class FineRuntimeTests(unittest.TestCase):
 
         self.assertNotIn("vggt", sys.modules)
 
-    def test_deblur_mlp_replaces_scaling_heuristic(self) -> None:
-        trainer_source = (BACKEND_ROOT / "app" / "fine" / "mobilegs_trainer.py").read_text(encoding="utf-8")
-        deblur_source = (BACKEND_ROOT / "app" / "fine" / "deblur_mlp.py").read_text(encoding="utf-8")
+    def test_deblur_gtnet_lives_in_current_fastgs_vendor_path(self) -> None:
+        deblur_source = (BACKEND_ROOT / "app" / "fine" / "vendor" / "fastgs" / "scene" / "blur_kernel.py").read_text(encoding="utf-8")
+        trainer_source = (BACKEND_ROOT / "app" / "fine" / "vendor" / "fastgs" / "train.py").read_text(encoding="utf-8")
 
-        self.assertNotIn("deblur_scaling_modifier", trainer_source)
-        self.assertNotIn("fine_deblur_scaling_modifier", trainer_source)
+        self.assertFalse((BACKEND_ROOT / "app" / "fine" / "deblur_mlp.py").exists())
         self.assertIn("GTnet", deblur_source)
         self.assertIn("FourierEmbedding", deblur_source)
         self.assertIn("position_delta", deblur_source)
-        self.assertIn("render_with_deblur_mlp", trainer_source)
-        self.assertIn("fine_deblur_min_clamp", deblur_source)
-        self.assertIn("fine_deblur_warmup_iters", trainer_source)
-        self.assertIn("set_xyz_learning_rate", trainer_source)
-        self.assertIn("deblur_regularization", deblur_source)
-
-    def test_deblur_registry_controls_view_activation(self) -> None:
-        try:
-            from app.fine.mobilegs_trainer import is_blurred_view
-        except Exception as exc:
-            raise unittest.SkipTest(f"mobile trainer dependencies unavailable: {exc}") from exc
-
-        registry = {
-            "000000.jpg": {"blurred": True, "kind": "motion"},
-            "000001.jpg": {"blurred": False, "kind": "sharp"},
-        }
-
-        self.assertTrue(is_blurred_view(SimpleNamespace(image_name="000000.jpg"), registry))
-        self.assertFalse(is_blurred_view(SimpleNamespace(image_name="000001.jpg"), registry))
-        self.assertFalse(is_blurred_view(SimpleNamespace(image_name="000002.jpg"), registry))
-
-    def test_deblur_warmup_is_adaptive_and_less_than_iterations(self) -> None:
-        try:
-            from app.fine.mobilegs_trainer import resolve_deblur_warmup
-        except Exception as exc:
-            raise unittest.SkipTest(f"mobile trainer dependencies unavailable: {exc}") from exc
-
-        self.assertEqual(resolve_deblur_warmup(500, {}, True), 166)
-        self.assertEqual(resolve_deblur_warmup(500, {"fine_deblur_warmup_iters": 500}, True), 499)
-        self.assertEqual(resolve_deblur_warmup(500, {}, False), 500)
-
-    def test_deblur_densify_is_disabled_after_activation_but_prune_remains(self) -> None:
-        trainer_source = (BACKEND_ROOT / "app" / "fine" / "mobilegs_trainer.py").read_text(encoding="utf-8")
-
-        self.assertIn("can_densify = bool(iteration < opt.densify_until_iter and not deblur_active)", trainer_source)
-        self.assertIn("deblur_densify_disabled_after_activation", trainer_source)
-        self.assertIn("policy.apply_final_prune(gaussians, min_opacity=policy.final_prune_min_opacity)", trainer_source)
-
-    def test_xyz_lr_setter_is_not_cumulative(self) -> None:
-        try:
-            from app.fine.mobilegs_trainer import optimizer_lr_value, set_xyz_learning_rate
-        except Exception as exc:
-            raise unittest.SkipTest(f"mobile trainer dependencies unavailable: {exc}") from exc
-
-        dummy = SimpleNamespace(optimizer=SimpleNamespace(param_groups=[{"name": "xyz", "lr": 0.01}]))
-
-        set_xyz_learning_rate(dummy, optimizer_lr_value(dummy, "xyz") * 0.1)
-        set_xyz_learning_rate(dummy, 0.01 * 0.1)
-
-        self.assertAlmostEqual(dummy.optimizer.param_groups[0]["lr"], 0.001)
+        self.assertIn("deblur_warmup_iters", trainer_source)
+        self.assertIn("deblur_transform_regularization", deblur_source)
 
     def test_edgs_option_is_rejected_before_training(self) -> None:
-        trainer_source = (BACKEND_ROOT / "app" / "fine" / "mobilegs_trainer.py").read_text(encoding="utf-8")
         runner_source = (BACKEND_ROOT / "app" / "fine" / "runner.py").read_text(encoding="utf-8")
 
         self.assertIn("fine_edgs_enabled", runner_source)
         self.assertIn("EDGS/RoMA dense initialization has been removed", runner_source)
-        self.assertNotIn("initialize_edgs_if_enabled", trainer_source)
-        self.assertNotIn("matches_per_ref=read_int", trainer_source)
-        self.assertNotIn("opt.densify_until_iter = 0", trainer_source)
 
-    def test_deblur_auto_controls_lmrs_default(self) -> None:
+    def test_deblur_auto_controls_gtnet_default(self) -> None:
         *_, deblur_mlp_enabled_by_default, _ = import_fine_runtime()
 
         self.assertTrue(deblur_mlp_enabled_by_default("motion", {}))

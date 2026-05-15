@@ -54,23 +54,3 @@ admin / admin123
 ```
 
 部署时必须替换 `SECRET_KEY` 和管理员密码。
-## 2026-05-10 Video Fine Runtime
-
-The unified worker image builds the video fine runtime in the same PyTorch/CUDA/cuDNN environment as image fine. It clones ARTDECO at `bb654395826e50ac9e4671682d901377115a24ce`, clones Speed3R at `5460f7309c87e5daac36385ff6611627de7d7267`, compiles ARTDECO `mast3r_slam_backends`, and keeps runtime source under:
-
-```text
-/opt/artdeco-runtime
-/opt/speed3r-runtime
-```
-
-Video fine model cache paths:
-
-```text
-model-cache/speed3r_pi3/config.json
-model-cache/speed3r_pi3/model.safetensors
-model-cache/mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth
-model-cache/mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth
-model-cache/mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl
-```
-
-Do not install a second torch/CUDA stack for ARTDECO or Speed3R. The worker intentionally excludes Open3D, xFormers, Gradio, pyrealsense2, GeoCalib, and full Depth-Anything dependencies.

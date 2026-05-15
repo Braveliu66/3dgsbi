@@ -145,16 +145,13 @@ viewer          Spark 2.0
 
 - Fine reconstruction accepts ordinary JPG/PNG uploads. EXIF camera parameters are not required; EXIF is used only for orientation correction.
 - Preview LiteVGGT remains isolated under the preview vendor path. Fine SfM metrics include `sfm_backend=pycolmap`, registered image count, and sparse point count.
-- DeblurMLP uses the Deblurring-3DGS GTnet method at commit `e63366b8581c0fde2fda0ab1aea99518da2e2f10`. It models blurred observations during training and still exports a standard sharp Gaussian PLY.
-- The worker image keeps one CUDA/PyTorch baseline, one patched LM-RS rasterizer, one `simple_knn`, and one `fused_ssim`.
+- The vendored FastGS-Big trainer includes the Deblurring-3DGS GTnet method. It models blurred observations during training and still exports a standard sharp Gaussian PLY.
+- The worker image keeps one CUDA/PyTorch baseline, one FastGS rasterizer, one `simple_knn`, and one `fused_ssim`.
 
 
-- DeblurMLP uses a default 3000-iteration warmup. GTnet activates after warmup and xyz learning rate is scaled by `0.1` while DeblurMLP is active.
+- GTnet uses a default 3000-iteration warmup and activates inside the official FastGS-Big training path.
 
-## 2026-05-10 Video Fine Pipeline Update
+## 2026-05-16 Fine Pipeline Cleanup
 
-- Video fine reconstruction uses canonical pipeline `video_artdeco_speed3r`. Legacy names `video_artdeco_litevggt`, `video_litevggt`, and `artdeco_litevggt` are aliases only.
-- Video fine accepts exactly one uploaded video. The worker extracts frames, writes ARTDECO `selfCaptured` calibration, runs ARTDECO VSLAM plus Reconstruct h3dgsv3 mapper/training, validates `point_clouds/gs.ply`, copies it to `final.ply`, and converts `final_web.spz`.
-- Speed3R-Pi3 is only the replacement for ARTDECO Pi3 inference in loop-closure matching. The video path does not call MobileGS, LM-RS, DeblurMLP, or LiteVGGT image preview.
-- Missing video intrinsics use a pinhole default: centered principal point, focal `0.9 * max(width,height)`, and ARTDECO focal optimization enabled. Explicit user intrinsics override this.
-- ARTDECO `bb654395826e50ac9e4671682d901377115a24ce` and Speed3R `5460f7309c87e5daac36385ff6611627de7d7267` are integrated as runtime source boundaries, not copied wholesale into backend app code.
+- The active fine pipeline is `official_fastgs_big`.
+- Removed inactive MobileGS/LM-RS, LiteVGGT-fine, and video-fine code paths from the backend.

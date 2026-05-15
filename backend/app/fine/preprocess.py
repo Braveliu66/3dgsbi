@@ -91,7 +91,7 @@ def analyze_blur(input_dir: Path, *, reject_ratio: float = 0.15) -> BlurAnalysis
     return summarize_blur_scores(scores, reject_ratio=reject_ratio)
 
 
-def prepare_mobile_images(
+def prepare_fine_images(
     input_dir: Path,
     output_dir: Path,
     *,
@@ -102,10 +102,16 @@ def prepare_mobile_images(
         raise FineFailure("IMAGE_ANALYSIS_UNAVAILABLE", "Pillow is required for fine image normalization")
     scores = score_blur_images(input_dir)
     analysis = summarize_blur_scores(scores, reject_ratio=reject_ratio, min_images=min_images)
-    reject_count = min(analysis.rejected_images, max(0, len(scores) - min_images))
-    keep_count = max(min_images, len(scores) - reject_count)
-    kept = sorted(sorted(scores, key=lambda item: item.quality, reverse=True)[:keep_count], key=lambda item: item.path.name)
     classifications = classify_blur_scores(scores)
+    median_quality = _median([item.quality for item in scores])
+    reject_count = min(analysis.rejected_images, max(0, len(scores) - min_images))
+    reject_candidates = [
+        item
+        for item in sorted(scores, key=lambda score: score.quality)
+        if should_reject_for_training(item, classifications[item.path], median_quality=median_quality)
+    ]
+    rejected_paths = {item.path for item in reject_candidates[:reject_count]}
+    kept = sorted([item for item in scores if item.path not in rejected_paths], key=lambda item: item.path.name)
     per_frame_blur: dict[str, dict[str, str | bool | float | None]] = {}
     kept_paths: set[Path] = set()
 
@@ -148,7 +154,8 @@ def prepare_mobile_images(
             "fft_high_ratio": round(item.fft_high_ratio, 8),
         }
     kept_blur = [classifications[item.path] for item in kept if classifications[item.path].blurred]
-    mode = blur_mode_from_classifications(kept_blur)
+    all_blur = [classification for classification in classifications.values() if classification.blurred]
+    mode = blur_mode_from_classifications(all_blur)
     training_blur_frames = len(kept_blur)
     return output_dir, BlurAnalysis(
         mode=mode,
@@ -160,7 +167,7 @@ def prepare_mobile_images(
         blurred_images=analysis.blurred_images,
         training_blur_frames=training_blur_frames,
         rejected_blur_frames=analysis.rejected_blur_frames,
-        deblur_trigger_reason="none" if training_blur_frames == 0 else f"training_blur:{mode}",
+        deblur_trigger_reason="none" if not all_blur else f"blur_detected:{mode}",
         per_frame_blur=per_frame_blur,
     )
 
@@ -188,24 +195,31 @@ def summarize_blur_scores(scores: list[BlurScore], *, reject_ratio: float, min_i
     laps = [item.laplacian for item in scores]
     gradients = [item.gradient for item in scores]
     fft_ratios = [item.fft_high_ratio for item in scores]
-    rejected = int(math.floor(len(scores) * max(0.0, min(0.45, reject_ratio))))
-    rejected = min(rejected, max(0, len(scores) - max(0, min_images)))
-    keep_count = max(0, len(scores) - rejected)
-    ranked = sorted(scores, key=lambda item: item.quality, reverse=True)
-    kept_scores = ranked[:keep_count]
-    rejected_scores = ranked[keep_count:]
-
     mean_lap = sum(laps) / len(laps)
     mean_gradient = sum(gradients) / len(gradients)
     mean_fft = sum(fft_ratios) / len(fft_ratios)
     median_lap = _median(laps)
     median_fft = _median(fft_ratios)
     classifications = classify_blur_scores(scores, median_laplacian=median_lap, median_fft_high_ratio=median_fft)
+    max_rejected = int(math.floor(len(scores) * max(0.0, min(0.45, reject_ratio))))
+    max_rejected = min(max_rejected, max(0, len(scores) - max(0, min_images)))
+    median_quality = _median([item.quality for item in scores])
+    reject_candidates = [
+        item
+        for item in sorted(scores, key=lambda score: score.quality)
+        if should_reject_for_training(item, classifications[item.path], median_quality=median_quality)
+    ]
+    rejected_scores = reject_candidates[:max_rejected]
+    rejected_paths = {item.path for item in rejected_scores}
+    kept_scores = [item for item in scores if item.path not in rejected_paths]
+    rejected = len(rejected_scores)
+    keep_count = len(kept_scores)
     kept_blur = [classifications[item.path] for item in kept_scores if classifications[item.path].blurred]
     rejected_blur = [classifications[item.path] for item in rejected_scores if classifications[item.path].blurred]
-    mode = blur_mode_from_classifications(kept_blur)
+    all_blur = [classification for classification in classifications.values() if classification.blurred]
+    mode = blur_mode_from_classifications(all_blur)
     training_blur_frames = len(kept_blur)
-    trigger_reason = "none" if training_blur_frames == 0 else f"training_blur:{mode}"
+    trigger_reason = "none" if not all_blur else f"blur_detected:{mode}"
     return BlurAnalysis(
         mode=mode,
         mean_laplacian=mean_lap,
@@ -254,16 +268,30 @@ def classify_blur_score(score: BlurScore, *, median_laplacian: float, median_fft
     motion = score.gradient >= 40.0 and score.fft_high_ratio < 0.08
     relative_lap_blur = median_laplacian > 1e-6 and score.laplacian < median_laplacian * 0.55
     relative_fft_blur = median_fft_high_ratio > 1e-6 and score.fft_high_ratio < median_fft_high_ratio * 0.75
+    moderate_defocus = (
+        median_laplacian > 1e-6
+        and median_fft_high_ratio > 1e-6
+        and score.laplacian < max(180.0, median_laplacian * 0.65)
+        and score.fft_high_ratio < median_fft_high_ratio * 0.90
+    )
     relative = relative_lap_blur and relative_fft_blur and score.gradient >= 20.0
     if motion and defocus:
         return BlurClassification(True, "mixed")
     if motion:
         return BlurClassification(True, "motion")
-    if defocus:
+    if defocus or moderate_defocus:
         return BlurClassification(True, "defocus")
     if relative:
         return BlurClassification(True, "mixed")
     return BlurClassification(False, "sharp")
+
+
+def should_reject_for_training(score: BlurScore, classification: BlurClassification, *, median_quality: float) -> bool:
+    if not classification.blurred:
+        return False
+    absolute_extreme = score.laplacian < 20.0 and score.gradient < 25.0 and score.fft_high_ratio < 0.03
+    relative_extreme = median_quality > 1e-6 and score.quality < median_quality * 0.30
+    return absolute_extreme or relative_extreme
 
 
 def blur_mode_from_classifications(classifications: list[BlurClassification]) -> str:

@@ -79,8 +79,7 @@ flowchart TD
     Blur -- 是 --> Deblur["启用 Deblurring 钩子"]
     Blur -- no --> Train["official_fastgs_big training"]
     Deblur --> Train
-    Train --> LM["LM-RS matrix-free Phase 2 / 缺失则失败"]
-    LM --> LOD
+    Train --> LOD
     LOD --> Save["保存 final 产物和 metrics.json"]
 ```
 

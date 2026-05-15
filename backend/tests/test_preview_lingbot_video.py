@@ -63,20 +63,21 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             def fake_runtime(**kwargs):
                 self.assertEqual(kwargs["fps"], 3)
                 self.assertEqual(kwargs["max_frames"], 0)
-                self.assertEqual(kwargs["image_size"], 1024)
-                self.assertEqual(kwargs["target_width"], 2048)
-                self.assertEqual(kwargs["target_height"], 2048)
-                self.assertEqual(kwargs["mode"], "windowed")
+                self.assertEqual(kwargs["image_size"], 518)
+                self.assertEqual(kwargs["target_width"], 518)
+                self.assertEqual(kwargs["target_height"], 378)
+                self.assertEqual(kwargs["mode"], "streaming")
                 self.assertEqual(kwargs["preprocess_mode"], "crop")
-                self.assertEqual(kwargs["camera_iterations"], 1)
-                self.assertEqual(kwargs["keyframe_interval"], 4)
+                self.assertEqual(kwargs["camera_iterations"], 4)
+                self.assertEqual(kwargs["keyframe_interval"], 6)
                 self.assertEqual(kwargs["window_size"], 64)
+                self.assertEqual(kwargs["overlap_size"], 16)
                 self.assertEqual(kwargs["overlap_keyframes"], 8)
                 self.assertEqual(kwargs["num_scale_frames"], 4)
                 self.assertEqual(kwargs["max_points"], 2_000_000)
                 self.assertEqual(kwargs["frame_stride"], 1)
                 self.assertEqual(kwargs["pixel_stride"], 1)
-                self.assertEqual(kwargs["conf_percentile"], 20.0)
+                self.assertEqual(kwargs["conf_percentile"], 50.0)
                 self.assertEqual(kwargs["min_conf"], 1e-5)
                 self.assertFalse(kwargs["compile_model"])
                 self.assertTrue(kwargs["save_predictions"])
@@ -128,8 +129,8 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             self.assertEqual(result.metrics["point_source"], "world_points")
             self.assertEqual(result.metrics["fixed_splat_ply_count"], 1)
             self.assertEqual(result.metrics["fixed_splat_base_point_radius"], 0.001)
-            self.assertAlmostEqual(result.metrics["fixed_splat_point_radius"], 0.00022)
-            self.assertEqual(result.metrics["fixed_splat_point_radius_scale"], 0.22)
+            self.assertAlmostEqual(result.metrics["fixed_splat_point_radius"], 0.00011)
+            self.assertEqual(result.metrics["fixed_splat_point_radius_scale"], 0.11)
             self.assertEqual(result.metrics["fixed_splat_opacity"], 0.55)
             self.assertEqual(result.metrics["lingbot_sampled_frames"], 8)
             self.assertEqual(result.metrics["lingbot_inference_fps"], 3.25)
@@ -189,6 +190,53 @@ class LingBotVideoPreviewTests(unittest.TestCase):
         self.assertEqual(resolve_preprocess_mode("auto", 1280, 720), "crop")
         self.assertEqual(resolve_preprocess_mode("crop", 720, 1280), "crop")
         self.assertEqual(resolve_preprocess_mode("pad", 1280, 720), "pad")
+
+    def test_lingbot_crop_preprocess_uses_official_loader(self) -> None:
+        source = (BACKEND_ROOT / "app" / "preview" / "vendor" / "lingbot_runtime.py").read_text(encoding="utf-8")
+
+        self.assertIn("images = load_and_preprocess_images(", source)
+        self.assertNotIn("images = load_and_preprocess_images_to_target_box(", source)
+        self.assertNotIn("enable_point=True", source)
+        self.assertNotIn("enable_depth=True", source)
+
+    def test_lingbot_windowed_inference_passes_overlap_size(self) -> None:
+        from app.preview.vendor.lingbot_runtime import run_lingbot_inference
+
+        class FakeCompiler:
+            def cudagraph_mark_step_begin(self) -> None:
+                return None
+
+        class FakeTorch:
+            compiler = FakeCompiler()
+
+        class FakeModel:
+            def __init__(self) -> None:
+                self.kwargs = None
+
+            def inference_windowed(self, images, **kwargs):
+                self.kwargs = kwargs
+                return {"ok": True}
+
+            def inference_streaming(self, images, **kwargs):
+                raise AssertionError("unexpected streaming inference")
+
+        model = FakeModel()
+        result = run_lingbot_inference(
+            model,
+            images=object(),
+            resolved_mode="windowed",
+            window_size=64,
+            overlap_size=16,
+            overlap_keyframes=8,
+            num_scale_frames=4,
+            keyframe_interval=6,
+            output_device="cpu",
+            torch_module=FakeTorch(),
+        )
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(model.kwargs["overlap_size"], 16)
+        self.assertEqual(model.kwargs["overlap_keyframes"], 8)
 
     def test_lingbot_target_resolution_crops_portrait_before_resize(self) -> None:
         from app.preview.vendor.lingbot_runtime import resolve_lingbot_target_dimensions
@@ -358,9 +406,9 @@ class LingBotVideoPreviewTests(unittest.TestCase):
         from app.preview.vendor.lingbot_runtime import attach_depth_world_points
 
         predictions = {
-            "depth": np.ones((2, 2, 2, 1), dtype=np.float32),
-            "extrinsic": np.zeros((2, 3, 4), dtype=np.float32),
-            "intrinsic": np.tile(np.eye(3, dtype=np.float32), (2, 1, 1)),
+            "depth": np.ones((1, 2, 2, 1), dtype=np.float32),
+            "extrinsic_w2c": np.eye(4, dtype=np.float32)[None, :3, :4],
+            "intrinsic": np.eye(3, dtype=np.float32)[None],
         }
 
         attach_depth_world_points(
@@ -368,9 +416,150 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             unproject_depth_map_to_point_map=lambda depth, _extrinsic, _intrinsic: np.zeros((*depth.shape[:-1], 3), dtype=np.float32),
         )
 
-        self.assertEqual(predictions["world_points_from_depth"].shape, (2, 2, 2, 3))
-        self.assertEqual(predictions["depth_conf"].shape, (2, 2, 2))
+        self.assertEqual(predictions["world_points_from_depth"].shape, (1, 2, 2, 3))
+        self.assertEqual(predictions["depth_conf"].shape, (1, 2, 2))
         np.testing.assert_allclose(predictions["depth_conf"], 1.0)
+
+    def test_lingbot_depth_reprojection_passes_w2c_extrinsic_to_official_unproject(self) -> None:
+        from app.preview.vendor.lingbot_runtime import attach_depth_world_points
+
+        extrinsic_w2c = np.eye(4, dtype=np.float32)
+        extrinsic_w2c[:3, 3] = np.array([10.0, 20.0, 30.0], dtype=np.float32)
+        predictions = {
+            "depth": np.ones((1, 1, 1, 1), dtype=np.float32),
+            "extrinsic": np.zeros((1, 3, 4), dtype=np.float32),
+            "extrinsic_w2c": extrinsic_w2c[None, :3, :4],
+            "intrinsic": np.eye(3, dtype=np.float32)[None],
+        }
+
+        captured = {}
+
+        def fake_unproject(depth, extrinsic, intrinsic):
+            captured["depth"] = depth
+            captured["extrinsic"] = extrinsic
+            captured["intrinsic"] = intrinsic
+            return np.full((1, 1, 1, 3), 7.0, dtype=np.float32)
+
+        attach_depth_world_points(
+            predictions,
+            unproject_depth_map_to_point_map=fake_unproject,
+        )
+
+        np.testing.assert_allclose(captured["extrinsic"], predictions["extrinsic_w2c"])
+        np.testing.assert_allclose(predictions["world_points_from_depth"], 7.0)
+
+    def test_lingbot_depth_reprojection_skips_when_world_points_exist(self) -> None:
+        from app.preview.vendor.lingbot_runtime import attach_depth_world_points
+
+        predictions = {
+            "world_points": np.zeros((1, 1, 1, 3), dtype=np.float32),
+            "depth": np.ones((1, 1, 1, 1), dtype=np.float32),
+            "intrinsic": np.eye(3, dtype=np.float32)[None],
+        }
+
+        attach_depth_world_points(
+            predictions,
+            unproject_depth_map_to_point_map=lambda *_: (_ for _ in ()).throw(AssertionError("unexpected depth fallback")),
+        )
+
+        self.assertNotIn("world_points_from_depth", predictions)
+
+    def test_lingbot_depth_reprojection_requires_w2c_extrinsic(self) -> None:
+        from app.preview.types import PreviewFailure
+        from app.preview.vendor.lingbot_runtime import attach_depth_world_points
+
+        predictions = {
+            "depth": np.ones((1, 1, 1, 1), dtype=np.float32),
+            "extrinsic": np.eye(4, dtype=np.float32)[None, :3, :4],
+            "intrinsic": np.eye(3, dtype=np.float32)[None],
+        }
+
+        with self.assertRaises(PreviewFailure) as raised:
+            attach_depth_world_points(
+                predictions,
+                unproject_depth_map_to_point_map=lambda *_: np.zeros((1, 1, 1, 3), dtype=np.float32),
+            )
+
+        self.assertEqual(raised.exception.code, "LINGBOT_EXTRINSIC_W2C_MISSING")
+
+    def test_lingbot_visualization_preserves_w2c_and_uses_c2w_for_viewer(self) -> None:
+        from app.preview.vendor.lingbot_runtime import predictions_to_visualization_np
+
+        class FakeTensor:
+            def __init__(self, array):
+                self.array = np.asarray(array, dtype=np.float32)
+                self.shape = self.array.shape
+                self.device = "cpu"
+                self.dtype = self.array.dtype
+
+            def __getitem__(self, key):
+                return self.array[key]
+
+            def __setitem__(self, key, value):
+                self.array[key] = value.array if isinstance(value, FakeTensor) else value
+
+            def detach(self):
+                return self
+
+            def to(self, _device):
+                return self
+
+            def is_floating_point(self):
+                return True
+
+            def float(self):
+                return self
+
+            def numpy(self):
+                return self.array
+
+        class FakeTorch:
+            Tensor = FakeTensor
+
+            @staticmethod
+            def zeros(shape, *, device, dtype):
+                return FakeTensor(np.zeros(shape, dtype=dtype))
+
+        extrinsic_w2c = FakeTensor(np.array([[[1.0, 0.0, 0.0, -2.0], [0.0, 1.0, 0.0, -3.0], [0.0, 0.0, 1.0, -4.0]]], dtype=np.float32))
+        intrinsic = FakeTensor(np.eye(3, dtype=np.float32)[None])
+
+        def fake_pose_encoding_to_extri_intri(_pose_enc, _image_shape):
+            return extrinsic_w2c, intrinsic
+
+        def fake_inverse(matrix):
+            inverse = np.array(matrix.array, copy=True)
+            inverse[..., :3, 3] *= -1.0
+            return FakeTensor(inverse)
+
+        visualized = predictions_to_visualization_np(
+            {"pose_enc": FakeTensor(np.zeros((1, 1, 1), dtype=np.float32))},
+            FakeTensor(np.zeros((1, 3, 2, 2), dtype=np.float32)),
+            pose_encoding_to_extri_intri=fake_pose_encoding_to_extri_intri,
+            closed_form_inverse_se3_general=fake_inverse,
+            torch_module=FakeTorch,
+        )
+
+        np.testing.assert_allclose(visualized["extrinsic_w2c"], extrinsic_w2c.array)
+        np.testing.assert_allclose(visualized["extrinsic"][..., 3], np.array([[2.0, 3.0, 4.0]], dtype=np.float32))
+
+    def test_lingbot_camera_view_uses_c2w_position(self) -> None:
+        from app.preview.vendor.lingbot_runtime import lingbot_camera_view_from_frame
+
+        c2w = np.eye(4, dtype=np.float32)
+        c2w[:3, 3] = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+        view = lingbot_camera_view_from_frame(
+            {
+                "extrinsic": c2w[:3, :4],
+                "intrinsic": np.eye(3, dtype=np.float32),
+                "images": np.zeros((3, 10, 20), dtype=np.float32),
+            },
+            radius_hint=2.0,
+        )
+
+        self.assertIsNotNone(view)
+        assert view is not None
+        np.testing.assert_allclose(view["position"], [1.0, 2.0, 3.0])
+        np.testing.assert_allclose(view["target"], [1.0, 2.0, 5.0])
 
     def test_lingbot_official_viewer_tool_uses_upstream_pointcloud_viewer(self) -> None:
         source = (BACKEND_ROOT / "app" / "preview" / "tools" / "lingbot_official_pointcloud_viewer.py").read_text(encoding="utf-8")
@@ -571,7 +760,7 @@ class LingBotVideoPreviewTests(unittest.TestCase):
     def test_upload_page_passes_preview_meta_to_viewer(self) -> None:
         source = (BACKEND_ROOT.parent / "frontend" / "app" / "upload" / "page.tsx").read_text(encoding="utf-8")
 
-        self.assertIn("previewMetaUrl={viewer.preview_meta_url}", source)
+        self.assertIn("viewerMetaUrl={viewer.viewer_meta_url ?? viewer.preview_meta_url}", source)
 
     def test_lingbot_preview_logs_diagnostic_fields(self) -> None:
         adapter_source = (BACKEND_ROOT / "app" / "preview" / "adapters" / "lingbot.py").read_text(encoding="utf-8")

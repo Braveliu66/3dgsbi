@@ -32,6 +32,7 @@ _BATCHED_NDIMS = {
     "world_points": 5,
     "world_points_conf": 4,
     "world_points_from_depth": 5,
+    "extrinsic_w2c": 4,
     "extrinsic": 4,
     "intrinsic": 4,
     "chunk_scales": 2,
@@ -62,6 +63,7 @@ class LingBotInferenceProfile:
     num_scale_frames: int
     window_size: int
     kv_cache_sliding_window: int
+    overlap_size: int
     overlap_keyframes: int
     preprocess_mode: str
 
@@ -117,6 +119,7 @@ def run_lingbot_video_preview(
     num_scale_frames: int,
     preprocess_mode: str,
     window_size: int,
+    overlap_size: int,
     overlap_keyframes: int,
     max_points: int,
     frame_stride: int,
@@ -140,7 +143,7 @@ def run_lingbot_video_preview(
         f"target_size={target_width}x{target_height} "
         f"mode={mode} keyframe_interval={keyframe_interval} camera_iterations={camera_iterations} "
         f"num_scale_frames={num_scale_frames} preprocess_mode={preprocess_mode} "
-        f"window_size={window_size} overlap_keyframes={overlap_keyframes} "
+        f"window_size={window_size} overlap_size={overlap_size} overlap_keyframes={overlap_keyframes} "
         f"frame_stride={frame_stride} pixel_stride={pixel_stride} conf_percentile={conf_percentile} "
         f"min_conf={min_conf} max_points={max_points} save_predictions={save_predictions} "
         f"compile={compile_model} keyframes_only_points={keyframes_only_points} "
@@ -185,6 +188,7 @@ def run_lingbot_video_preview(
         num_scale_frames=num_scale_frames,
         window_size=window_size,
         kv_cache_sliding_window=resolve_kv_cache_sliding_window(window_size),
+        overlap_size=overlap_size,
         overlap_keyframes=overlap_keyframes,
         preprocess_mode=preprocess_mode,
     )
@@ -223,10 +227,11 @@ def run_lingbot_video_preview(
     )
     if output_official_predictions_npz is not None:
         save_official_predictions_npz(pred_np, output_official_predictions_npz)
-    attach_depth_world_points(
-        pred_np,
-        unproject_depth_map_to_point_map=unproject_depth_map_to_point_map,
-    )
+    if "world_points" not in pred_np:
+        attach_depth_world_points(
+            pred_np,
+            unproject_depth_map_to_point_map=unproject_depth_map_to_point_map,
+        )
     _log(
         "prediction keys "
         f"depth={'depth' in pred_np} extrinsic={'extrinsic' in pred_np} intrinsic={'intrinsic' in pred_np} "
@@ -570,23 +575,17 @@ def run_lingbot_inference_profile(
     progress(
         "lingbot_preprocess",
         34,
-        f"preprocessing {len(selected_frame_paths)} frames to <= {target_width}x{target_height} using {resolved_preprocess_mode}",
+        f"preprocessing {len(selected_frame_paths)} frames with official LingBot {resolved_preprocess_mode} mode",
     )
     try:
-        if resolved_preprocess_mode == "crop":
-            images = load_and_preprocess_images_to_target_box(
-                [str(path) for path in selected_frame_paths],
-                target_width=target_width,
-                target_height=target_height,
-                patch_size=14,
-            )
-        else:
-            images = load_and_preprocess_images(
-                [str(path) for path in selected_frame_paths],
-                mode=resolved_preprocess_mode,
-                image_size=profile.image_size,
-                patch_size=14,
-            )
+        images = load_and_preprocess_images(
+            [str(path) for path in selected_frame_paths],
+            mode=resolved_preprocess_mode,
+            image_size=profile.image_size,
+            patch_size=14,
+        )
+        if isinstance(images, tuple):
+            images = images[0]
     except Exception as exc:
         raise PreviewFailure("LINGBOT_PREPROCESS_FAILED", f"LingBot-Map preprocessing failed: {exc}") from exc
 
@@ -604,7 +603,8 @@ def run_lingbot_inference_profile(
         f"target_size={target_width}x{target_height} preprocessed_size={preprocessed_width}x{preprocessed_height} "
         f"image_size={profile.image_size} camera_iterations={profile.camera_iterations} "
         f"num_scale_frames={profile.num_scale_frames} window_size={profile.window_size} "
-        f"overlap_keyframes={profile.overlap_keyframes} kv_cache_sliding_window={profile.kv_cache_sliding_window} "
+        f"overlap_size={profile.overlap_size} overlap_keyframes={profile.overlap_keyframes} "
+        f"kv_cache_sliding_window={profile.kv_cache_sliding_window} "
         f"compile_requested={compile_requested} use_sdpa={use_sdpa} flashinfer_available={flashinfer_found} "
         f"allow_sdpa_fallback={allow_sdpa_fallback} dtype={dtype}"
     )
@@ -618,7 +618,6 @@ def run_lingbot_inference_profile(
         num_scale_frames=profile.num_scale_frames,
         window_size=profile.window_size,
         kv_cache_sliding_window=profile.kv_cache_sliding_window,
-        enable_point=True,
     )
     model_image_size = int(getattr(model, "_lingbot_model_image_size", DEFAULT_LINGBOT_MODEL_IMAGE_SIZE))
     aggregator_dtype = cast_lingbot_aggregator_for_inference(model, dtype)
@@ -650,6 +649,7 @@ def run_lingbot_inference_profile(
                 images,
                 resolved_mode=resolved_mode,
                 window_size=profile.window_size,
+                overlap_size=profile.overlap_size,
                 overlap_keyframes=profile.overlap_keyframes,
                 num_scale_frames=profile.num_scale_frames,
                 keyframe_interval=resolved_keyframe_interval,
@@ -683,7 +683,6 @@ def run_lingbot_inference_profile(
             num_scale_frames=profile.num_scale_frames,
             window_size=profile.window_size,
             kv_cache_sliding_window=profile.kv_cache_sliding_window,
-            enable_point=True,
         )
         model_image_size = int(getattr(model, "_lingbot_model_image_size", DEFAULT_LINGBOT_MODEL_IMAGE_SIZE))
         aggregator_dtype = cast_lingbot_aggregator_for_inference(model, dtype)
@@ -706,12 +705,13 @@ def run_lingbot_inference_profile(
         "lingbot_num_scale_frames": int(profile.num_scale_frames),
         "lingbot_window_size": int(profile.window_size) if resolved_mode == "windowed" else None,
         "lingbot_kv_cache_sliding_window": int(profile.kv_cache_sliding_window),
+        "lingbot_overlap_size": int(profile.overlap_size) if resolved_mode == "windowed" else None,
         "lingbot_overlap_keyframes": int(profile.overlap_keyframes) if resolved_mode == "windowed" else None,
         "lingbot_use_sdpa": bool(use_sdpa),
         "lingbot_flashinfer_available": bool(flashinfer_found),
         "lingbot_allow_sdpa_fallback": bool(allow_sdpa_fallback),
         "lingbot_sdpa_fallback_active": bool(use_sdpa),
-        "lingbot_enable_point": True,
+        "lingbot_enable_point": None,
         "lingbot_aggregator_dtype": str(aggregator_dtype).replace("torch.", ""),
         "lingbot_compile": bool(compile_active),
         "lingbot_compile_requested": bool(compile_requested),
@@ -858,7 +858,8 @@ def load_lingbot_model(
     num_scale_frames: int,
     window_size: int,
     kv_cache_sliding_window: int,
-    enable_point: bool = True,
+    enable_point: bool | None = None,
+    enable_depth: bool | None = None,
 ):
     try:
         import torch
@@ -873,20 +874,23 @@ def load_lingbot_model(
         checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
         state_dict = checkpoint.get("model", checkpoint) if isinstance(checkpoint, dict) else checkpoint
         model_image_size = infer_lingbot_model_image_size_from_state_dict(state_dict if isinstance(state_dict, dict) else {})
-        model = GCTStream(
-            img_size=model_image_size,
-            patch_size=14,
-            enable_3d_rope=True,
-            max_frame_num=max(1024, window_size * 16),
-            kv_cache_sliding_window=kv_cache_sliding_window,
-            kv_cache_scale_frames=num_scale_frames,
-            kv_cache_cross_frame_special=True,
-            kv_cache_include_scale_frames=True,
-            use_sdpa=use_sdpa,
-            camera_num_iterations=camera_iterations,
-            enable_point=enable_point,
-            enable_depth=True,
-        )
+        model_kwargs = {
+            "img_size": model_image_size,
+            "patch_size": 14,
+            "enable_3d_rope": True,
+            "max_frame_num": max(1024, window_size * 16),
+            "kv_cache_sliding_window": kv_cache_sliding_window,
+            "kv_cache_scale_frames": num_scale_frames,
+            "kv_cache_cross_frame_special": True,
+            "kv_cache_include_scale_frames": True,
+            "use_sdpa": use_sdpa,
+            "camera_num_iterations": camera_iterations,
+        }
+        if enable_point is not None:
+            model_kwargs["enable_point"] = enable_point
+        if enable_depth is not None:
+            model_kwargs["enable_depth"] = enable_depth
+        model = GCTStream(**model_kwargs)
         model.load_state_dict(state_dict, strict=False)
     except Exception as exc:
         raise PreviewFailure("LINGBOT_WEIGHT_LOAD_FAILED", f"Could not load LingBot-Map checkpoint: {exc}") from exc
@@ -926,6 +930,7 @@ def run_lingbot_inference(
     *,
     resolved_mode: str,
     window_size: int,
+    overlap_size: int,
     overlap_keyframes: int,
     num_scale_frames: int,
     keyframe_interval: int,
@@ -940,6 +945,7 @@ def run_lingbot_inference(
         return model.inference_windowed(
             images,
             window_size=window_size,
+            overlap_size=overlap_size,
             overlap_keyframes=overlap_keyframes,
             num_scale_frames=num_scale_frames,
             keyframe_interval=keyframe_interval,
@@ -967,16 +973,17 @@ def predictions_to_visualization_np(
     torch_module: Any,
 ) -> dict[str, np.ndarray]:
     if "pose_enc" in predictions:
-        extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])
+        extrinsic_w2c, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])
         extrinsic_4x4 = torch_module.zeros(
-            (*extrinsic.shape[:-2], 4, 4),
-            device=extrinsic.device,
-            dtype=extrinsic.dtype,
+            (*extrinsic_w2c.shape[:-2], 4, 4),
+            device=extrinsic_w2c.device,
+            dtype=extrinsic_w2c.dtype,
         )
-        extrinsic_4x4[..., :3, :4] = extrinsic
+        extrinsic_4x4[..., :3, :4] = extrinsic_w2c
         extrinsic_4x4[..., 3, 3] = 1.0
-        extrinsic_4x4 = closed_form_inverse_se3_general(extrinsic_4x4)
-        predictions["extrinsic"] = extrinsic_4x4[..., :3, :4]
+        extrinsic_c2w_4x4 = closed_form_inverse_se3_general(extrinsic_4x4)
+        predictions["extrinsic_w2c"] = extrinsic_w2c
+        predictions["extrinsic"] = extrinsic_c2w_4x4[..., :3, :4]
         predictions["intrinsic"] = intrinsic
 
     predictions.pop("pose_enc_list", None)
@@ -1001,17 +1008,25 @@ def attach_depth_world_points(
 ) -> None:
     if "world_points_from_depth" in predictions:
         return
-    if not all(key in predictions for key in ("depth", "extrinsic", "intrinsic")):
+    if "world_points" in predictions:
         return
+    if not all(key in predictions for key in ("depth", "intrinsic")):
+        return
+
+    extrinsic_w2c = predictions.get("extrinsic_w2c")
+    if extrinsic_w2c is None:
+        raise PreviewFailure(
+            "LINGBOT_EXTRINSIC_W2C_MISSING",
+            "Depth reprojection needs world-to-camera extrinsic, not c2w extrinsic.",
+        )
+
     try:
         depth_points = unproject_depth_map_to_point_map(
             predictions["depth"],
-            predictions["extrinsic"],
+            extrinsic_w2c,
             predictions["intrinsic"],
         )
     except Exception as exc:
-        if "world_points" in predictions:
-            return
         raise PreviewFailure("LINGBOT_DEPTH_REPROJECT_FAILED", f"LingBot depth reprojection failed: {exc}") from exc
     predictions["world_points_from_depth"] = np.asarray(depth_points, dtype=np.float32)
     if "depth_conf" not in predictions:
@@ -1635,16 +1650,11 @@ def lingbot_camera_view_from_frame(frame: Any, *, radius_hint: float) -> dict[st
             return None
         extrinsic = np.asarray(frame["extrinsic"], dtype=np.float32)
         intrinsic = np.asarray(frame["intrinsic"], dtype=np.float32)
-        if extrinsic.shape[0] == 4 and extrinsic.shape[1] == 4:
-            w2c = extrinsic[:3, :4]
-        else:
-            w2c = extrinsic[:3, :4]
-        rotation = w2c[:3, :3]
-        translation = w2c[:3, 3]
-        camera_to_world = rotation.T
-        position = (-camera_to_world @ translation).astype(np.float32)
-        forward = normalize_vector(camera_to_world @ np.asarray([0.0, 0.0, 1.0], dtype=np.float32))
-        up = normalize_vector(camera_to_world @ np.asarray([0.0, -1.0, 0.0], dtype=np.float32))
+        camera_to_world = extrinsic[:3, :4]
+        rotation = camera_to_world[:3, :3]
+        position = camera_to_world[:3, 3].astype(np.float32)
+        forward = normalize_vector(rotation @ np.asarray([0.0, 0.0, 1.0], dtype=np.float32))
+        up = normalize_vector(rotation @ np.asarray([0.0, -1.0, 0.0], dtype=np.float32))
         if forward is None or up is None:
             return None
         view: dict[str, Any] = {

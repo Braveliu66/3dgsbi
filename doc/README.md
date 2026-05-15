@@ -21,7 +21,6 @@
 7. `07-backend-constraints.md`：真实算法接入、高并发、多 GPU、存储、权限和禁止占位实现的约束。
 8. `08-progress.md`：当前工程实现进度、已验证项、未接入项和下一步。
 9. `09-deployment.md`：Docker/WSL 启动方式、环境变量、迁移、种子账号和运行验证。
-10. `10-optimization-architecture.md`：系统优化点、渐进式渲染、LOD 加载和架构融合创新点。
 
 ## 重要约束
 

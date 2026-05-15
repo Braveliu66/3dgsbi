@@ -7,17 +7,10 @@ Workers download only the weights required by the selected pipeline. Downloads u
 Expected paths:
 
 - `litevggt/te_dict.pt`
-- `roma/roma_outdoor.pth`
-- `roma/roma_indoor.pth`
-- `roma/dinov2_vitl14_pretrain.pth`
-- `speed3r_pi3/config.json`
-- `speed3r_pi3/model.safetensors`
-- `mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth`
-- `mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth`
-- `mast3r/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl`
+- `lingbot/lingbot-map-long.pt`
 - `torch/`
 - `huggingface/`
 
-`mobilegs_lmrs` fine reconstruction uses pycolmap for SfM and only needs RoMA weights when EDGS initialization is enabled. `video_artdeco_speed3r` fine reconstruction uses the Speed3R-Pi3 files plus the MASt3R checkpoint and retrieval codebook. The video weights carry upstream research/non-commercial restrictions; verify ARTDECO, MASt3R and Speed3R-Pi3 terms before commercial use.
+Image fine reconstruction uses vendored official FastGS-Big and pycolmap/COLMAP initialization, so it has no task-specific model weight download.
 
 Each completed download writes `<filename>.download.json` with URL, size and completion metadata. If a `.part` file is stuck or corrupted, stop the worker, delete only that `.part` and matching `.lock`, then start the worker again.

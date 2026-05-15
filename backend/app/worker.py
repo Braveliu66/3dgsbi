@@ -771,6 +771,7 @@ def preview_artifact_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "lingbot_num_scale_frames",
         "lingbot_window_size",
         "lingbot_kv_cache_sliding_window",
+        "lingbot_overlap_size",
         "lingbot_overlap_keyframes",
         "lingbot_use_sdpa",
         "lingbot_flashinfer_available",

@@ -338,10 +338,9 @@ Worker 返回结果：
 Fine tasks accept uploaded JPG/PNG images without EXIF camera metadata. Valid task options include:
 
 - `fine_sfm_backend=pycolmap` by default. `fine_sfm_backend=colmap` is accepted as an alias. The deprecated fine value `litevggt` is unsupported; preview still uses LiteVGGT.
-- `fine_deblur_enabled=auto|true|false`. `auto` enables DeblurMLP for `motion`、`defocus`、`mixed` blur modes and disables it for `sharp`.
+- `fine_deblur_enabled=auto|true|false`. `auto` enables vendored FastGS-Big GTnet deblur training for `motion`、`defocus`、`mixed` blur modes and disables it for `sharp`.
 - `fine_deblur_mode=motion|defocus|mixed|sharp` can override blur analysis.
-- `fine_deblur_num_moments` controls the DeblurMLP motion branch moment count.
-- `fine_lm_start_iter` explicitly schedules LM-RS. When DeblurMLP auto-enables and this option is absent, LM-RS starts at the final iteration by default.
+- `fine_deblur_num_moments` controls the GTnet motion branch moment count.
 
 Fine `metrics.json` now includes:
 
@@ -351,13 +350,9 @@ Fine `metrics.json` now includes:
   "sfm_registered_images": 6,
   "sfm_sparse_points": 250000,
   "deblur_mlp_enabled": true,
-  "deblur_algorithm": "Deblurring-3DGS_GTnet",
-  "deblur_source_commit": "e63366b8581c0fde2fda0ab1aea99518da2e2f10",
+  "deblur_algorithm": "Deblurring-3DGS_GTnet_fastgs",
   "deblur_mlp_use_position_moments": true,
-  "deblur_mlp_num_moments": 4,
-  "compact_box_rasterizer": {
-    "available": true
-  }
+  "deblur_mlp_num_moments": 4
 }
 ```
 

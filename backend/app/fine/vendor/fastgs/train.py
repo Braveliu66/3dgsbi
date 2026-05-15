@@ -176,7 +176,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             optim_start.record()
             
             # Densification
-            can_update_topology = bool(iteration < opt.densify_until_iter and not deblur_active)
+            can_update_topology = bool(iteration < opt.densify_until_iter)
             if can_update_topology:
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
@@ -212,7 +212,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 and iteration % late_prune_interval == 0
                 and iteration > late_prune_from_iter
                 and iteration < late_prune_until_iter
-                and not deblur_state.enabled
             ):
                 my_viewpoint_stack = scene.getTrainCameras().copy()
                 camlist = sampling_cameras(my_viewpoint_stack, opt.fastgs_sample_cameras)
