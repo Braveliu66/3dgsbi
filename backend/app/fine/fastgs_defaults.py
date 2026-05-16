@@ -166,11 +166,11 @@ FASTGS_LOSS_THRESH = 0.1
 
 # clone 类型 densify 梯度阈值。
 # 越低越容易 clone/加密，点更多，细节可能更好但更慢/更易飞点。
-FASTGS_GRAD_THRESH = 0.0008
+FASTGS_GRAD_THRESH = 0.001
 
 # split 类型 densify 的绝对梯度阈值。
 # 越低越容易 split；0.00035 是较常用平衡值。
-FASTGS_GRAD_ABS_THRESH = 0.00035
+FASTGS_GRAD_ABS_THRESH = 0.0005
 
 # FastGS densify_grad_threshold。
 # 质量优先建议 0.0002；motion blur 场景可以试 0.0005。
@@ -189,6 +189,7 @@ FASTGS_OPACITY_RESET_INTERVAL = 100_000
 # effectively disabled for deblur runs, but large blobs still need pruning.
 FASTGS_SIZE_PRUNE_FROM_ITER = 3_000
 FASTGS_SIZE_PRUNE_MAX_SCREEN_SIZE = 12
+FASTGS_SIZE_PRUNE_MAX_WORLD_SCALE_RATIO = 0.06
 
 # densify 从第几轮开始。
 # 500 是标准设置，让初始点先稳定一点再加密。
@@ -239,6 +240,7 @@ FASTGS_LATE_PRUNE_MIN_OPACITY = 0.04
 # late prune 的 score 阈值。
 # 1.0 基本最保守；0.95/0.98 会更积极剪。
 FASTGS_LATE_PRUNE_SCORE_THRESH = 0.90
+FASTGS_LATE_PRUNE_MAX_WORLD_SCALE_RATIO = 0.05
 
 # final prune 的 opacity 阈值。
 # 0.001 很轻，质量优先推荐。
@@ -248,6 +250,7 @@ FASTGS_FINAL_PRUNE_MIN_OPACITY = 0.03
 # 1.0 最保守，尽量不按 score 剪。
 # 如果后处理飞点很多，可试 0.98 或 0.95。
 FASTGS_FINAL_PRUNE_SCORE_THRESH = 0.90
+FASTGS_FINAL_PRUNE_MAX_WORLD_SCALE_RATIO = 0.04
 
 
 # ============================================================
@@ -343,12 +346,16 @@ FASTGS_DEBLUR_BLURRED_VIEWS_ONLY = "true"
 # Keep GTnet as a training-time blur renderer only.  The final stage disables
 # deblur and fine-tunes ordinary Gaussians from clear frames for PLY/SPZ export.
 FASTGS_DEBLUR_SHARP_REFINE_ENABLED = "true"
-FASTGS_DEBLUR_SHARP_REFINE_FROM_ITER = 21_000
+FASTGS_DEBLUR_SHARP_REFINE_FROM_ITER = 20_000
 FASTGS_DEBLUR_SHARP_REFINE_CLEAR_ONLY = "true"
 
 # Extra points are risky on mixed sharp/blurred captures because they clone from
 # blurred-view gradients without the usual multiview score filter.
 FASTGS_DEBLUR_EXTRA_POINTS_ENABLED = "false"
+
+# Do not let blurred-view GTnet gradients drive topology decisions.  FastGS
+# densification/pruning scores should come from ordinary sharp renders.
+FASTGS_DEBLUR_TOPOLOGY_SHARP_ONLY = "true"
 
 # 是否启用 Deblur 后期二次 densify。
 # false: 中后期不再额外加密，更稳，飞点更少。

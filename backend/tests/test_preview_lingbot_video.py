@@ -177,10 +177,10 @@ class LingBotVideoPreviewTests(unittest.TestCase):
                 self.assertEqual(config.fps, 10.0)
                 self.assertEqual(config.target_width, 518)
                 self.assertEqual(config.target_height, 378)
-                self.assertEqual(config.window_size, 96)
+                self.assertEqual(config.window_size, 128)
                 self.assertEqual(config.keyframe_interval, 13)
-                self.assertEqual(config.overlap_keyframes, 8)
-                self.assertEqual(config.camera_iterations_fast, 1)
+                self.assertEqual(config.overlap_keyframes, 16)
+                self.assertEqual(config.camera_iterations_fast, 2)
                 self.assertEqual(config.num_scale_frames, 8)
                 self.assertEqual(config.pixel_stride_fast, 5)
                 self.assertEqual(config.pixel_stride_full, 3)
@@ -292,6 +292,16 @@ class LingBotVideoPreviewTests(unittest.TestCase):
         self.assertNotIn("images = load_and_preprocess_images_to_target_box(", source)
         self.assertNotIn("enable_point=True", source)
         self.assertNotIn("enable_depth=True", source)
+
+    def test_lingbot_pointcloud_runtime_uses_official_sequence_semantics(self) -> None:
+        source = (BACKEND_ROOT / "app" / "preview" / "vendor" / "lingbot_runtime.py").read_text(encoding="utf-8")
+
+        self.assertIn("run_lingbot_inference_profile(", source)
+        self.assertIn("input_frames_are_prefiltered=false external_stitching=false", source)
+        self.assertNotIn("upstream_keyframe_interval=1", source)
+        self.assertNotIn("keyframe_interval=1", source)
+        self.assertEqual(source.count("estimate_window_to_global_transform("), 1)
+        self.assertEqual(source.count("apply_world_transform("), 1)
 
     def test_lingbot_windowed_inference_passes_overlap_size(self) -> None:
         from app.preview.vendor.lingbot_runtime import run_lingbot_inference
@@ -852,7 +862,7 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             self.assertIn("rgb24", command)
             self.assertEqual(command[-1], "pipe:1")
 
-    def test_lingbot_window_builder_uses_macro_span_overlap_and_tail(self) -> None:
+    def test_lingbot_window_builder_keeps_full_frames_for_official_keyframe_semantics(self) -> None:
         from app.preview.vendor.lingbot_runtime import iter_lingbot_video_windows, lingbot_window_frame_span, lingbot_window_overlap_span
 
         frame_iter = ((index, np.zeros((1, 1, 3), dtype=np.uint8)) for index in range(25))
@@ -869,8 +879,9 @@ class LingBotVideoPreviewTests(unittest.TestCase):
         self.assertEqual(lingbot_window_frame_span(window_size=4, num_scale_frames=1, keyframe_interval=3), 10)
         self.assertEqual(lingbot_window_overlap_span(overlap_keyframes=1, keyframe_interval=3), 3)
         self.assertGreaterEqual(len(windows), 3)
-        self.assertEqual(windows[0].frame_indices, (0, 1, 4, 7))
-        self.assertGreaterEqual(windows[-1].frame_indices[-1], 21)
+        self.assertEqual(windows[0].frame_indices, tuple(range(10)))
+        self.assertEqual(len(windows[0].frames), 10)
+        self.assertGreaterEqual(windows[-1].frame_indices[-1], 24)
 
     def test_lingbot_streaming_voxel_map_keeps_highest_confidence(self) -> None:
         from app.preview.vendor.lingbot_runtime import StreamingVoxelMap

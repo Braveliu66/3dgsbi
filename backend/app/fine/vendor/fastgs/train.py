@@ -100,6 +100,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     deblur_extra_densify_steps = 0
     sharp_score_sample_count = 0
     sharp_score_skipped_steps = 0
+    topology_blur_stats_skipped = 0
+    late_prune_steps = 0
+    late_prune_removed = 0
+    late_prune_scale_candidates = 0
+    final_prune_metrics = {}
     last_deblur_reg = None
     log_interval = 200
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress", miniters=log_interval)
@@ -216,13 +221,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         _, pruning_score = compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, opt)
                     else:
                         sharp_score_skipped_steps += 1
-                    gaussians.final_prune_fastgs(
+                    final_max_world_scale = scale_limit_from_extent(
+                        scene.cameras_extent,
+                        getattr(opt, "fastgs_final_prune_max_world_scale_ratio", 0.0),
+                    )
+                    final_prune_metrics = gaussians.final_prune_fastgs(
                         min_opacity = opt.fastgs_final_prune_min_opacity,
                         pruning_score = pruning_score,
                         score_thresh = opt.fastgs_final_prune_score_thresh,
+                        max_world_scale = final_max_world_scale,
                     )
                     deblur_final_pruned = True
-                    print(f"\n[ITER {iteration}] FastGS final prune complete")
+                    print(f"\n[ITER {iteration}] FastGS final prune complete {final_prune_metrics}")
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
             
@@ -231,9 +241,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # Densification
             can_update_topology = schedule_densify_active(iteration, deblur_schedule)
             if can_update_topology:
-                # Keep track of max radii in image-space for pruning
-                gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+                topology_sharp_only = option_bool(
+                    getattr(opt, "deblur_topology_sharp_only", "true"),
+                    True,
+                )
+                topology_stats_active = not (topology_sharp_only and deblur_view_active)
+                if topology_stats_active:
+                    # Keep topology signals tied to ordinary sharp renders.  Deblur
+                    # renders intentionally learn blur formation and should not
+                    # decide where the base Gaussian topology grows.
+                    gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+                    gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+                else:
+                    topology_blur_stats_skipped += 1
 
                 deblur_extra_densified = False
                 enable_deblur_extra_points = option_bool(
@@ -243,6 +263,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if (
                     enable_deblur_extra_points
                     and deblur_view_active
+                    and not topology_sharp_only
                     and not sharp_refine_active
                     and iteration > opt.deblur_warmup_iters
                     and iteration < min(int(opt.densify_until_iter), 15_000)
@@ -260,6 +281,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 if (
                     not sharp_refine_active
+                    and topology_stats_active
                     and not deblur_extra_densified
                     and iteration > opt.densify_from_iter
                     and iteration % opt.densification_interval == 0
@@ -311,11 +333,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if camlist:
                     sharp_score_sample_count += len(camlist)
                     _, pruning_score = compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, opt)                    
-                    gaussians.final_prune_fastgs(
+                    late_max_world_scale = scale_limit_from_extent(
+                        scene.cameras_extent,
+                        getattr(opt, "fastgs_late_prune_max_world_scale_ratio", 0.0),
+                    )
+                    late_metrics = gaussians.final_prune_fastgs(
                         min_opacity = opt.fastgs_late_prune_min_opacity,
                         pruning_score = pruning_score,
                         score_thresh = opt.fastgs_late_prune_score_thresh,
+                        max_world_scale = late_max_world_scale,
                     )
+                    late_prune_steps += 1
+                    late_prune_removed += int(late_metrics.get("removed", 0))
+                    late_prune_scale_candidates += int(late_metrics.get("scale_candidates", 0))
+                    print(f"\n[ITER {iteration}] FastGS late prune {late_metrics}")
                 else:
                     sharp_score_skipped_steps += 1
         
@@ -354,6 +385,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         deblur_extra_densify_steps,
         sharp_score_sample_count,
         sharp_score_skipped_steps,
+        topology_blur_stats_skipped,
+        late_prune_steps,
+        late_prune_removed,
+        late_prune_scale_candidates,
+        final_prune_metrics,
         last_deblur_reg,
         opt,
         deblur_schedule,
@@ -443,6 +479,13 @@ def option_bool(value, default=False):
     if normalized in {"0", "false", "no", "off"}:
         return False
     return bool(default)
+
+
+def scale_limit_from_extent(extent, ratio):
+    ratio = float(ratio or 0.0)
+    if ratio <= 0:
+        return None
+    return float(extent) * ratio
 
 
 def clamp_int(value, minimum, maximum):
@@ -557,6 +600,11 @@ def write_deblur_metrics(
     deblur_extra_densify_steps,
     sharp_score_sample_count,
     sharp_score_skipped_steps,
+    topology_blur_stats_skipped,
+    late_prune_steps,
+    late_prune_removed,
+    late_prune_scale_candidates,
+    final_prune_metrics,
     last_deblur_reg,
     opt,
     deblur_schedule=None,
@@ -571,6 +619,11 @@ def write_deblur_metrics(
         "deblur_mode": getattr(opt, "deblur_mode", "sharp"),
         "deblur_warmup_iters": getattr(opt, "deblur_warmup_iters", None),
         "deblur_xyz_lr_scale": getattr(opt, "deblur_xyz_lr_scale", None),
+        "deblur_extra_points_enabled": getattr(opt, "deblur_extra_points_enabled", None),
+        "deblur_sharp_refine_enabled": getattr(opt, "deblur_sharp_refine_enabled", None),
+        "deblur_sharp_refine_from_iter": getattr(opt, "deblur_sharp_refine_from_iter", None),
+        "deblur_sharp_refine_clear_only": getattr(opt, "deblur_sharp_refine_clear_only", None),
+        "deblur_topology_sharp_only": getattr(opt, "deblur_topology_sharp_only", None),
         "deblur_training_blur_frames": training_blur_frames,
         "deblur_rejected_blur_frames": rejected_blur_frames,
         "deblur_clear_train_cameras": clear_train_cameras,
@@ -580,8 +633,18 @@ def write_deblur_metrics(
         "deblur_extra_densify_steps": deblur_extra_densify_steps,
         "sharp_score_sample_count": sharp_score_sample_count,
         "sharp_score_skipped_steps": sharp_score_skipped_steps,
+        "topology_blur_stats_skipped": topology_blur_stats_skipped,
+        "late_prune_steps": late_prune_steps,
+        "late_prune_removed": late_prune_removed,
+        "late_prune_scale_candidates": late_prune_scale_candidates,
         "deblur_final_prune_uses_sharp_score": True,
         "deblur_final_pruned": deblur_final_pruned,
+        "final_prune_metrics": final_prune_metrics,
+        "fastgs_size_prune_from_iter": getattr(opt, "fastgs_size_prune_from_iter", None),
+        "fastgs_size_prune_max_screen_size": getattr(opt, "fastgs_size_prune_max_screen_size", None),
+        "fastgs_size_prune_max_world_scale_ratio": getattr(opt, "fastgs_size_prune_max_world_scale_ratio", None),
+        "fastgs_late_prune_max_world_scale_ratio": getattr(opt, "fastgs_late_prune_max_world_scale_ratio", None),
+        "fastgs_final_prune_max_world_scale_ratio": getattr(opt, "fastgs_final_prune_max_world_scale_ratio", None),
         "deblur_last_transform_regularization": last_deblur_reg,
         "deblur_schedule": deblur_schedule or {},
         "final_gaussians": int(gaussians.get_xyz.shape[0]),

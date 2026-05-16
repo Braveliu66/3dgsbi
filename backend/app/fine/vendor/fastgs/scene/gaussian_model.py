@@ -33,7 +33,10 @@ _BACKEND_ROOT = Path(__file__).resolve().parents[5]
 if str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
 
-from app.fine.fastgs_defaults import FASTGS_FINAL_PRUNE_SCORE_THRESH
+from app.fine.fastgs_defaults import (
+    FASTGS_FINAL_PRUNE_SCORE_THRESH,
+    FASTGS_SIZE_PRUNE_MAX_WORLD_SCALE_RATIO,
+)
 
 class GaussianModel:
 
@@ -531,7 +534,10 @@ class GaussianModel:
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
-            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
+            max_world_scale_ratio = float(
+                getattr(args, "fastgs_size_prune_max_world_scale_ratio", FASTGS_SIZE_PRUNE_MAX_WORLD_SCALE_RATIO)
+            )
+            big_points_ws = self.get_scaling.max(dim=1).values > max_world_scale_ratio * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
 
         scores = 1 - pruning_score 
@@ -582,7 +588,13 @@ class GaussianModel:
         self.xyz_gradient_accum_abs[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter, 2:], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
 
-    def final_prune_fastgs(self, min_opacity, pruning_score = None, score_thresh = FASTGS_FINAL_PRUNE_SCORE_THRESH):
+    def final_prune_fastgs(
+        self,
+        min_opacity,
+        pruning_score = None,
+        score_thresh = FASTGS_FINAL_PRUNE_SCORE_THRESH,
+        max_world_scale = None,
+    ):
         """Final-stage pruning: remove Gaussians based on opacity and multi-view consistency.
         In the final stage we remove Gaussians that have low opacity or that are flagged by
         our multi-view reconstruction consistency metric (provided as `pruning_score`)."""
@@ -590,6 +602,20 @@ class GaussianModel:
         if pruning_score is None:
             scores_mask = torch.zeros_like(prune_mask, dtype=bool, device="cuda")
         else:
-            scores_mask = pruning_score > score_thresh
-        final_prune = torch.logical_or(prune_mask, scores_mask)
-        self.prune_points(final_prune)
+            scores_mask = torch.zeros_like(prune_mask, dtype=bool, device="cuda")
+            score_values = (pruning_score > score_thresh).reshape(-1)
+            scores_mask[:score_values.shape[0]] = score_values
+        if max_world_scale is None or float(max_world_scale) <= 0:
+            scale_mask = torch.zeros_like(prune_mask, dtype=bool, device="cuda")
+        else:
+            scale_mask = self.get_scaling.max(dim=1).values > float(max_world_scale)
+        final_prune = torch.logical_or(torch.logical_or(prune_mask, scores_mask), scale_mask)
+        metrics = {
+            "removed": int(torch.count_nonzero(final_prune).detach().item()),
+            "opacity_candidates": int(torch.count_nonzero(prune_mask).detach().item()),
+            "score_candidates": int(torch.count_nonzero(scores_mask).detach().item()),
+            "scale_candidates": int(torch.count_nonzero(scale_mask).detach().item()),
+        }
+        if metrics["removed"]:
+            self.prune_points(final_prune)
+        return metrics

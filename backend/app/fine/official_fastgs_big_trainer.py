@@ -16,6 +16,7 @@ from app.fine.fastgs_defaults import (
     FASTGS_DEBLUR_AUTO_SCHEDULE,
     FASTGS_DEBLUR_BLURRED_VIEWS_ONLY,
     FASTGS_DEBLUR_ENABLED,
+    FASTGS_DEBLUR_EXTRA_POINTS_ENABLED,
     FASTGS_DEBLUR_GTNET_LR,
     FASTGS_DEBLUR_HIDDEN,
     FASTGS_DEBLUR_LAMBDA_P,
@@ -26,6 +27,10 @@ from app.fine.fastgs_defaults import (
     FASTGS_DEBLUR_MODE,
     FASTGS_DEBLUR_NUM_MOMENTS,
     FASTGS_DEBLUR_SCHEDULE_PROFILE,
+    FASTGS_DEBLUR_SHARP_REFINE_CLEAR_ONLY,
+    FASTGS_DEBLUR_SHARP_REFINE_ENABLED,
+    FASTGS_DEBLUR_SHARP_REFINE_FROM_ITER,
+    FASTGS_DEBLUR_TOPOLOGY_SHARP_ONLY,
     FASTGS_DEBLUR_TRANSFORM_REG_WEIGHT,
     FASTGS_DEBLUR_WARMUP_ITERS,
     FASTGS_DEBLUR_WIDTH,
@@ -36,6 +41,7 @@ from app.fine.fastgs_defaults import (
     FASTGS_DENSIFY_GRAD_THRESHOLD,
     FASTGS_DENSIFY_UNTIL_ITER,
     FASTGS_FEATURE_LR,
+    FASTGS_FINAL_PRUNE_MAX_WORLD_SCALE_RATIO,
     FASTGS_FINAL_PRUNE_MIN_OPACITY,
     FASTGS_FINAL_PRUNE_SCORE_THRESH,
     FASTGS_GRAD_ABS_THRESH,
@@ -45,6 +51,7 @@ from app.fine.fastgs_defaults import (
     FASTGS_LATE_PRUNE_ENABLED,
     FASTGS_LATE_PRUNE_FROM_ITER,
     FASTGS_LATE_PRUNE_INTERVAL,
+    FASTGS_LATE_PRUNE_MAX_WORLD_SCALE_RATIO,
     FASTGS_LATE_PRUNE_MIN_OPACITY,
     FASTGS_LATE_PRUNE_SCORE_THRESH,
     FASTGS_LATE_PRUNE_UNTIL_ITER,
@@ -63,6 +70,9 @@ from app.fine.fastgs_defaults import (
     FASTGS_SAMPLE_CAMERAS,
     FASTGS_SCALING_LR,
     FASTGS_SHFEATURE_LR,
+    FASTGS_SIZE_PRUNE_FROM_ITER,
+    FASTGS_SIZE_PRUNE_MAX_SCREEN_SIZE,
+    FASTGS_SIZE_PRUNE_MAX_WORLD_SCALE_RATIO,
 )
 from app.fine.option_utils import read_float, read_int
 from app.fine.types import FineFailure
@@ -122,14 +132,19 @@ def train_official_fastgs_big(
     densify_from_iter = read_int(options.get("fine_densify_from_iter"), schedule["densify_from_iter"], minimum=0, maximum=100_000)
     densify_until_iter = read_int(options.get("fine_densify_until_iter"), schedule["densify_until_iter"], minimum=0, maximum=100_000)
     opacity_reset_interval = read_int(options.get("fine_opacity_reset_interval"), schedule["opacity_reset_interval"], minimum=1, maximum=100_000)
+    size_prune_from_iter = read_int(options.get("fine_fastgs_size_prune_from_iter"), FASTGS_SIZE_PRUNE_FROM_ITER, minimum=0, maximum=100_000)
+    size_prune_max_screen_size = read_int(options.get("fine_fastgs_size_prune_max_screen_size"), FASTGS_SIZE_PRUNE_MAX_SCREEN_SIZE, minimum=1, maximum=10_000)
+    size_prune_max_world_scale_ratio = read_float(options.get("fine_fastgs_size_prune_max_world_scale_ratio"), FASTGS_SIZE_PRUNE_MAX_WORLD_SCALE_RATIO, minimum=0.0, maximum=1.0)
     late_prune_enabled = _bool_string(options.get("fine_fastgs_late_prune_enabled"), FASTGS_LATE_PRUNE_ENABLED)
     late_prune_interval = read_int(options.get("fine_fastgs_late_prune_interval"), schedule["late_prune_interval"], minimum=1, maximum=100_000)
     late_prune_from_iter = read_int(options.get("fine_fastgs_late_prune_from_iter"), schedule["late_prune_from_iter"], minimum=0, maximum=100_000)
     late_prune_until_iter = read_int(options.get("fine_fastgs_late_prune_until_iter"), schedule["late_prune_until_iter"], minimum=0, maximum=100_000)
     late_prune_min_opacity = read_float(options.get("fine_fastgs_late_prune_min_opacity"), FASTGS_LATE_PRUNE_MIN_OPACITY, minimum=0.001, maximum=0.2)
     late_prune_score_thresh = read_float(options.get("fine_fastgs_late_prune_score_thresh"), FASTGS_LATE_PRUNE_SCORE_THRESH, minimum=0.5, maximum=1.0)
+    late_prune_max_world_scale_ratio = read_float(options.get("fine_fastgs_late_prune_max_world_scale_ratio"), FASTGS_LATE_PRUNE_MAX_WORLD_SCALE_RATIO, minimum=0.0, maximum=1.0)
     final_prune_min_opacity = read_float(options.get("fine_fastgs_final_prune_min_opacity"), FASTGS_FINAL_PRUNE_MIN_OPACITY, minimum=0.001, maximum=0.2)
     final_prune_score_thresh = read_float(options.get("fine_fastgs_final_prune_score_thresh"), FASTGS_FINAL_PRUNE_SCORE_THRESH, minimum=0.5, maximum=1.0)
+    final_prune_max_world_scale_ratio = read_float(options.get("fine_fastgs_final_prune_max_world_scale_ratio"), FASTGS_FINAL_PRUNE_MAX_WORLD_SCALE_RATIO, minimum=0.0, maximum=1.0)
     deblur_enabled = _choice_string(options.get("fine_deblur_enabled"), FASTGS_DEBLUR_ENABLED, {"auto", "true", "false"})
     deblur_mode = _choice_string(options.get("fine_deblur_mode"), FASTGS_DEBLUR_MODE, {"sharp", "defocus", "motion", "mixed"})
     deblur_blur_registry = str(options.get("fine_deblur_blur_registry") or "").strip()
@@ -145,6 +160,11 @@ def train_official_fastgs_big(
         {"true", "false"},
     )
     deblur_warmup_iters = read_int(options.get("fine_deblur_warmup_iters"), schedule["deblur_warmup_iters"], minimum=0, maximum=max(0, iterations - 1))
+    deblur_extra_points_enabled = _choice_string(options.get("fine_deblur_extra_points_enabled"), FASTGS_DEBLUR_EXTRA_POINTS_ENABLED, {"true", "false"})
+    deblur_sharp_refine_enabled = _choice_string(options.get("fine_deblur_sharp_refine_enabled"), FASTGS_DEBLUR_SHARP_REFINE_ENABLED, {"true", "false"})
+    deblur_sharp_refine_from_iter = read_int(options.get("fine_deblur_sharp_refine_from_iter"), FASTGS_DEBLUR_SHARP_REFINE_FROM_ITER, minimum=0, maximum=max(0, iterations - 1))
+    deblur_sharp_refine_clear_only = _choice_string(options.get("fine_deblur_sharp_refine_clear_only"), FASTGS_DEBLUR_SHARP_REFINE_CLEAR_ONLY, {"true", "false"})
+    deblur_topology_sharp_only = _choice_string(options.get("fine_deblur_topology_sharp_only"), FASTGS_DEBLUR_TOPOLOGY_SHARP_ONLY, {"true", "false"})
     deblur_num_moments = read_int(options.get("fine_deblur_num_moments"), FASTGS_DEBLUR_NUM_MOMENTS, minimum=1, maximum=8)
     deblur_gtnet_lr = read_float(options.get("fine_deblur_gtnet_lr"), FASTGS_DEBLUR_GTNET_LR, minimum=1e-6, maximum=0.1)
     deblur_hidden = read_int(options.get("fine_deblur_hidden"), FASTGS_DEBLUR_HIDDEN, minimum=1, maximum=8)
@@ -182,6 +202,12 @@ def train_official_fastgs_big(
         str(densify_from_iter),
         "--densify_until_iter",
         str(densify_until_iter),
+        "--fastgs_size_prune_from_iter",
+        str(size_prune_from_iter),
+        "--fastgs_size_prune_max_screen_size",
+        str(size_prune_max_screen_size),
+        "--fastgs_size_prune_max_world_scale_ratio",
+        str(size_prune_max_world_scale_ratio),
         "--densify_grad_threshold",
         str(densify_grad_threshold),
         "--optimizer_type",
@@ -234,6 +260,16 @@ def train_official_fastgs_big(
         deblur_late_densify_enabled,
         "--deblur_warmup_iters",
         str(deblur_warmup_iters),
+        "--deblur_extra_points_enabled",
+        deblur_extra_points_enabled,
+        "--deblur_sharp_refine_enabled",
+        deblur_sharp_refine_enabled,
+        "--deblur_sharp_refine_from_iter",
+        str(deblur_sharp_refine_from_iter),
+        "--deblur_sharp_refine_clear_only",
+        deblur_sharp_refine_clear_only,
+        "--deblur_topology_sharp_only",
+        deblur_topology_sharp_only,
         "--deblur_num_moments",
         str(deblur_num_moments),
         "--deblur_gtnet_lr",
@@ -260,6 +296,8 @@ def train_official_fastgs_big(
         str(final_prune_min_opacity),
         "--fastgs_final_prune_score_thresh",
         str(final_prune_score_thresh),
+        "--fastgs_final_prune_max_world_scale_ratio",
+        str(final_prune_max_world_scale_ratio),
         "--fastgs_late_prune_enabled",
         late_prune_enabled,
         "--fastgs_late_prune_interval",
@@ -272,6 +310,8 @@ def train_official_fastgs_big(
         str(late_prune_min_opacity),
         "--fastgs_late_prune_score_thresh",
         str(late_prune_score_thresh),
+        "--fastgs_late_prune_max_world_scale_ratio",
+        str(late_prune_max_world_scale_ratio),
     ]
     if deblur_blur_registry:
         command.extend(["--deblur_blur_registry", deblur_blur_registry])
@@ -327,6 +367,9 @@ def train_official_fastgs_big(
         "optimizer_type": FASTGS_OPTIMIZER_TYPE,
         "densification_interval": densification_interval,
         "opacity_reset_interval": opacity_reset_interval,
+        "fastgs_size_prune_from_iter": size_prune_from_iter,
+        "fastgs_size_prune_max_screen_size": size_prune_max_screen_size,
+        "fastgs_size_prune_max_world_scale_ratio": size_prune_max_world_scale_ratio,
         "densify_from_iter": densify_from_iter,
         "densify_until_iter": densify_until_iter,
         "densify_grad_threshold": densify_grad_threshold,
@@ -349,12 +392,14 @@ def train_official_fastgs_big(
         "lambda_dssim": lambda_dssim,
         "fastgs_final_prune_min_opacity": final_prune_min_opacity,
         "fastgs_final_prune_score_thresh": final_prune_score_thresh,
+        "fastgs_final_prune_max_world_scale_ratio": final_prune_max_world_scale_ratio,
         "fastgs_late_prune_enabled": late_prune_enabled,
         "fastgs_late_prune_interval": late_prune_interval,
         "fastgs_late_prune_from_iter": late_prune_from_iter,
         "fastgs_late_prune_until_iter": late_prune_until_iter,
         "fastgs_late_prune_min_opacity": late_prune_min_opacity,
         "fastgs_late_prune_score_thresh": late_prune_score_thresh,
+        "fastgs_late_prune_max_world_scale_ratio": late_prune_max_world_scale_ratio,
         "deblur_enabled": deblur_enabled,
         "deblur_mode": deblur_mode,
         "deblur_blur_registry": deblur_blur_registry or None,
@@ -362,6 +407,11 @@ def train_official_fastgs_big(
         "deblur_schedule_profile": deblur_schedule_profile,
         "deblur_late_densify_enabled": deblur_late_densify_enabled,
         "deblur_warmup_iters": deblur_warmup_iters,
+        "deblur_extra_points_enabled": deblur_extra_points_enabled,
+        "deblur_sharp_refine_enabled": deblur_sharp_refine_enabled,
+        "deblur_sharp_refine_from_iter": deblur_sharp_refine_from_iter,
+        "deblur_sharp_refine_clear_only": deblur_sharp_refine_clear_only,
+        "deblur_topology_sharp_only": deblur_topology_sharp_only,
         "deblur_num_moments": deblur_num_moments,
         "deblur_gtnet_lr": deblur_gtnet_lr,
         "deblur_hidden": deblur_hidden,

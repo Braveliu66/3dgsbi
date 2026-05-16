@@ -38,6 +38,7 @@ from app.fine.fastgs_defaults import (
     FASTGS_DEBLUR_SHARP_REFINE_CLEAR_ONLY,
     FASTGS_DEBLUR_SHARP_REFINE_ENABLED,
     FASTGS_DEBLUR_SHARP_REFINE_FROM_ITER,
+    FASTGS_DEBLUR_TOPOLOGY_SHARP_ONLY,
     FASTGS_DEBLUR_TRANSFORM_REG_WEIGHT,
     FASTGS_DEBLUR_WARMUP_ITERS,
     FASTGS_DEBLUR_WIDTH,
@@ -48,6 +49,7 @@ from app.fine.fastgs_defaults import (
     FASTGS_DENSIFY_GRAD_THRESHOLD,
     FASTGS_DENSIFY_UNTIL_ITER,
     FASTGS_FEATURE_LR,
+    FASTGS_FINAL_PRUNE_MAX_WORLD_SCALE_RATIO,
     FASTGS_FINAL_PRUNE_MIN_OPACITY,
     FASTGS_FINAL_PRUNE_SCORE_THRESH,
     FASTGS_GRAD_ABS_THRESH,
@@ -58,6 +60,7 @@ from app.fine.fastgs_defaults import (
     FASTGS_LATE_PRUNE_ENABLED,
     FASTGS_LATE_PRUNE_FROM_ITER,
     FASTGS_LATE_PRUNE_INTERVAL,
+    FASTGS_LATE_PRUNE_MAX_WORLD_SCALE_RATIO,
     FASTGS_LATE_PRUNE_MIN_OPACITY,
     FASTGS_LATE_PRUNE_SCORE_THRESH,
     FASTGS_LATE_PRUNE_UNTIL_ITER,
@@ -81,6 +84,7 @@ from app.fine.fastgs_defaults import (
     FASTGS_SHFEATURE_LR,
     FASTGS_SIZE_PRUNE_FROM_ITER,
     FASTGS_SIZE_PRUNE_MAX_SCREEN_SIZE,
+    FASTGS_SIZE_PRUNE_MAX_WORLD_SCALE_RATIO,
 )
 
 class GroupParams:
@@ -158,6 +162,7 @@ class OptimizationParams(ParamGroup):
         self.opacity_reset_interval = FASTGS_OPACITY_RESET_INTERVAL
         self.fastgs_size_prune_from_iter = FASTGS_SIZE_PRUNE_FROM_ITER
         self.fastgs_size_prune_max_screen_size = FASTGS_SIZE_PRUNE_MAX_SCREEN_SIZE
+        self.fastgs_size_prune_max_world_scale_ratio = FASTGS_SIZE_PRUNE_MAX_WORLD_SCALE_RATIO
         self.densify_from_iter = FASTGS_DENSIFY_FROM_ITER
         self.densify_until_iter = FASTGS_DENSIFY_UNTIL_ITER
         self.densify_grad_threshold = FASTGS_DENSIFY_GRAD_THRESHOLD
@@ -184,6 +189,7 @@ class OptimizationParams(ParamGroup):
         self.deblur_sharp_refine_enabled = FASTGS_DEBLUR_SHARP_REFINE_ENABLED
         self.deblur_sharp_refine_from_iter = FASTGS_DEBLUR_SHARP_REFINE_FROM_ITER
         self.deblur_sharp_refine_clear_only = FASTGS_DEBLUR_SHARP_REFINE_CLEAR_ONLY
+        self.deblur_topology_sharp_only = FASTGS_DEBLUR_TOPOLOGY_SHARP_ONLY
         self.deblur_num_moments = FASTGS_DEBLUR_NUM_MOMENTS
         self.deblur_gtnet_lr = FASTGS_DEBLUR_GTNET_LR
         self.deblur_hidden = FASTGS_DEBLUR_HIDDEN
@@ -197,12 +203,14 @@ class OptimizationParams(ParamGroup):
         self.deblur_blurred_views_only = FASTGS_DEBLUR_BLURRED_VIEWS_ONLY
         self.fastgs_final_prune_min_opacity = FASTGS_FINAL_PRUNE_MIN_OPACITY
         self.fastgs_final_prune_score_thresh = FASTGS_FINAL_PRUNE_SCORE_THRESH
+        self.fastgs_final_prune_max_world_scale_ratio = FASTGS_FINAL_PRUNE_MAX_WORLD_SCALE_RATIO
         self.fastgs_late_prune_enabled = "true" if FASTGS_LATE_PRUNE_ENABLED else "false"
         self.fastgs_late_prune_interval = FASTGS_LATE_PRUNE_INTERVAL
         self.fastgs_late_prune_from_iter = FASTGS_LATE_PRUNE_FROM_ITER
         self.fastgs_late_prune_until_iter = FASTGS_LATE_PRUNE_UNTIL_ITER
         self.fastgs_late_prune_min_opacity = FASTGS_LATE_PRUNE_MIN_OPACITY
         self.fastgs_late_prune_score_thresh = FASTGS_LATE_PRUNE_SCORE_THRESH
+        self.fastgs_late_prune_max_world_scale_ratio = FASTGS_LATE_PRUNE_MAX_WORLD_SCALE_RATIO
 
         self.random_background = FASTGS_RANDOM_BACKGROUND
         self.optimizer_type = FASTGS_OPTIMIZER_TYPE

@@ -30,11 +30,11 @@ def run(ctx: PreviewContext) -> PreviewResult:
         image_size=read_int(ctx.options.get("preview_lingbot_image_size"), 518, minimum=224, maximum=1024),
         target_width=read_int(ctx.options.get("preview_lingbot_target_width"), 518, minimum=14, maximum=2048),
         target_height=read_int(ctx.options.get("preview_lingbot_target_height"), 378, minimum=14, maximum=2048),
-        window_size=read_int(ctx.options.get("preview_lingbot_window_size"), 96, minimum=8, maximum=512),
+        window_size=read_int(ctx.options.get("preview_lingbot_window_size"), 128, minimum=8, maximum=512),
         keyframe_interval=read_int(ctx.options.get("preview_lingbot_keyframe_interval"), 13, minimum=1, maximum=100_000),
-        overlap_keyframes=read_int(ctx.options.get("preview_lingbot_overlap_keyframes"), 8, minimum=1, maximum=128),
+        overlap_keyframes=read_int(ctx.options.get("preview_lingbot_overlap_keyframes"), 16, minimum=1, maximum=128),
         num_scale_frames=read_int(ctx.options.get("preview_lingbot_num_scale_frames"), 8, minimum=1, maximum=64),
-        camera_iterations_fast=read_int(ctx.options.get("preview_lingbot_camera_iterations"), 1, minimum=1, maximum=8),
+        camera_iterations_fast=read_int(ctx.options.get("preview_lingbot_camera_iterations"), 2, minimum=1, maximum=8),
         camera_iterations_retry=read_int(ctx.options.get("preview_lingbot_camera_iterations_retry"), 2, minimum=1, maximum=8),
         pixel_stride_fast=read_int(ctx.options.get("preview_lingbot_pixel_stride_fast"), 5, minimum=1, maximum=512),
         pixel_stride_full=read_int(ctx.options.get("preview_lingbot_pixel_stride_full"), 3, minimum=1, maximum=512),
@@ -47,6 +47,7 @@ def run(ctx: PreviewContext) -> PreviewResult:
         voxel_target_fast=read_int(ctx.options.get("preview_lingbot_voxel_target_fast"), 3000, minimum=1, maximum=100_000),
         voxel_target_full=read_int(ctx.options.get("preview_lingbot_voxel_target_full"), 5200, minimum=1, maximum=100_000),
         coverage_keyframes=read_bool(ctx.options.get("preview_lingbot_coverage_keyframes"), True),
+        save_debug_predictions=read_bool(ctx.options.get("preview_lingbot_save_official_predictions"), False),
     )
     print(
         "[lingbot-pointcloud] adapter params "
