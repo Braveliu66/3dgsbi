@@ -13,10 +13,11 @@ import {
   LogIn,
   LogOut,
   MemoryStick,
+  Shield,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api, clearToken } from "@/lib/api";
-import { formatEta, isActiveTask, taskStatusLabel, taskTypeLabel } from "@/lib/labels";
+import { formatTaskEta, isActiveTask, taskStatusLabel, taskTypeLabel } from "@/lib/labels";
 import { readTrackedTaskIds, TRACKED_TASKS_EVENT, writeTrackedTaskIds } from "@/lib/taskTracking";
 import type { Task, User } from "@/lib/types";
 
@@ -24,6 +25,7 @@ const nav = [
   { href: "/", label: "新建项目", icon: Home },
   { href: "/projects", label: "项目控制台", icon: FolderKanban }
 ];
+const adminNav = { href: "/admin", label: "管理", icon: Shield };
 
 const RESOURCE_REFRESH_MS = 1000;
 
@@ -118,6 +120,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [user]);
 
   const routeLabel = useMemo(() => getRouteLabel(pathname), [pathname]);
+  const navItems = useMemo(() => user?.role === "admin" ? [...nav, adminNav] : nav, [user?.role]);
   const activeTask = tasks[0];
 
   function logout() {
@@ -134,7 +137,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <span>3DGS</span>
         </Link>
         <nav className="nav-list" aria-label="主导航">
-          {nav.map((item) => {
+          {navItems.map((item) => {
             const Icon = item.icon;
             const active = pathname === item.href || (item.href !== "/" && pathname.startsWith(item.href));
             return (
@@ -148,10 +151,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <div className="sidebar-footer">
           {user ? (
             <>
-              <div className="user-card">
-                <strong title={user.username}>{user.username}</strong>
-                <span>{user.role === "admin" ? "管理员" : "普通用户"}</span>
-              </div>
+              <Link className="user-card clickable" href="/profile">
+                <span className="user-avatar">{user.username.slice(0, 1).toUpperCase()}</span>
+                <span className="user-card-text">
+                  <strong title={user.username}>{user.username}</strong>
+                  <span>{user.role === "admin" ? "管理员" : "普通用户"}</span>
+                </span>
+              </Link>
               <button className="ghost-button full" type="button" onClick={logout}>
                 <LogOut size={16} />退出
               </button>
@@ -169,14 +175,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <>
                 <button className="top-task-summary" type="button" onClick={() => setTaskOpen((value) => !value)}>
                   <span className="activity-dot" />
+                  <span className={`task-count-badge ${tasks.length > 1 ? "" : "hidden"}`}>{tasks.length}</span>
                   <span className="top-task-title" title={activeTask.current_stage || activeTask.type}>
                     {taskProjectName(activeTask)}
                     <small className="top-task-stage">({taskTypeLabel(activeTask.type)} · {activeTask.current_stage || taskStatusLabel(activeTask.status)})</small>
                   </span>
                   <span className="top-task-meta">
-                    {Math.round(activeTask.progress || 0)}% · {formatEta(activeTask.eta_seconds)}
+                    {Math.round(activeTask.progress || 0)}% · {formatTaskEta(activeTask)}
                     <ChevronDown size={14} />
                   </span>
+                  <div className="progress-track top-task-progress" aria-label="任务进度">
+                    <span style={{ width: `${Math.max(0, Math.min(100, activeTask.progress || 0))}%` }} />
+                  </div>
                 </button>
                 {taskOpen ? (
                   <div className="task-popover">
@@ -185,7 +195,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                         <span className="truncate">
                           <strong>{taskProjectName(task)}</strong> <small>({taskTypeLabel(task.type)} · {task.current_stage || taskStatusLabel(task.status)})</small>
                         </span>
-                        <span className={`status-pill ${task.status}`}>{Math.round(task.progress || 0)}%</span>
+                        <span className={`status-pill ${task.status}`}>{Math.round(task.progress || 0)}% · {formatTaskEta(task)}</span>
                         <div className="progress-track" style={{ gridColumn: "1 / -1" }} aria-label="任务进度">
                           <span style={{ width: `${Math.max(0, Math.min(100, task.progress || 0))}%` }} />
                         </div>

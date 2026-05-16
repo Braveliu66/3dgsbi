@@ -183,6 +183,8 @@ export default function UploadPage() {
       if (project.input_type === "images") {
         options.preview_scene_profile = previewSceneProfile;
         options.scene_type = sceneTypeForProfile(previewSceneProfile);
+        options.litevggt_preprocess_mode = "pad";
+        options.preserve_aspect_ratio = true;
       }
       const next = await api.startPreview(project.id, options);
       rememberTaskId(next.id);
@@ -215,6 +217,31 @@ export default function UploadPage() {
     }
   }
 
+  async function resetUploadArea() {
+    if (task && isActiveTask(task)) return;
+    setBusy(true);
+    setError(null);
+    try {
+      if (project) {
+        await Promise.all(media.map((item) => api.deleteMedia(project.id, item.id).catch(() => null)));
+      }
+      Object.values(thumbsRef.current).forEach((url) => URL.revokeObjectURL(url));
+      thumbsRef.current = {};
+      setThumbs({});
+      setMedia([]);
+      setSelectedMedia(null);
+      setUploadProgress(null);
+      setViewer(null);
+      setTask(null);
+      if (project) await refreshProject(project.id);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "重新上传失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function startFine() {
     if (!project) return;
     setBusy(true);
@@ -225,6 +252,7 @@ export default function UploadPage() {
         options.fine_scene_profile = previewSceneProfile;
         options.fine_scene_type = sceneTypeForProfile(previewSceneProfile);
         options.scene_type = sceneTypeForProfile(previewSceneProfile);
+        options.preserve_aspect_ratio = true;
       }
       const next = await api.startFine(project.id, options);
       rememberTaskId(next.id);
@@ -261,7 +289,7 @@ export default function UploadPage() {
             {project ? <span className={`status-pill ${project.status}`}>{projectStatusLabel(project.status)}</span> : <span className="status-pill">未创建</span>}
           </div>
 
-          <div className="panel-body scrollable stack">
+          <div className="panel-body upload-panel-body stack">
             <div className="grid two">
               <div className="field">
                 <label>项目名称</label>
@@ -278,14 +306,6 @@ export default function UploadPage() {
             <div className="field">
               <label>标签</label>
               <input className="input" value={tags} onChange={(event) => setTags(event.target.value)} disabled={Boolean(project)} />
-            </div>
-            <div className="field">
-              <label>预览管线</label>
-              {inputType === "images" ? (
-                <input className="input" value="LiteVGGT 直接出 Spark-SPZ" disabled />
-              ) : (
-                <input className="input" value="LingBot-Map 视频极速预览" disabled />
-              )}
             </div>
             {inputType === "images" ? (
               <div className="field">
@@ -332,46 +352,47 @@ export default function UploadPage() {
 
             <TransferProgressBar progress={uploadProgress} />
 
-            <div className="grid three">
-              <div className="panel stat flat"><span className="muted small">文件</span><strong>{media.length}</strong></div>
-              <div className="panel stat flat"><span className="muted small">图片</span><strong>{imageCount}</strong></div>
-              <div className="panel stat flat"><span className="muted small">视频</span><strong>{videoCount}</strong></div>
+            <div className="upload-dot-stats">
+              <span><i />{media.length} 个文件</span>
+              <span><i />{formatBytes(totalBytes)}</span>
             </div>
 
-            <div className="media-grid dense">
-              {media.map((item) => {
-                const thumb = thumbs[item.id] ?? mediaThumbnailUrl(item);
-                return (
-                  <div
-                    className="media-tile selectable"
-                    title={`${item.file_name} · ${formatBytes(item.file_size)}`}
-                    key={item.id}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => setSelectedMedia(item)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") setSelectedMedia(item);
-                    }}
-                  >
-                    {thumb ? <img src={thumb} alt={item.file_name} /> : item.kind === "image" ? <Images size={24} /> : <Film size={24} />}
-                    <span className="media-name" title={item.file_name}>{item.file_name}</span>
-                    <span className="media-kind">{item.kind === "image" ? "图片" : "视频"}</span>
-                    <button
-                      className="media-delete"
-                      type="button"
-                      aria-label="删除素材"
-                      disabled={busy}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void deleteMedia(item);
+            <div className="upload-media-scroll">
+              <div className="media-grid dense upload-thumbs">
+                {media.map((item) => {
+                  const thumb = thumbs[item.id] ?? mediaThumbnailUrl(item);
+                  return (
+                    <div
+                      className="media-tile selectable"
+                      title={`${item.file_name} · ${formatBytes(item.file_size)}`}
+                      key={item.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setSelectedMedia(item)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") setSelectedMedia(item);
                       }}
                     >
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                );
-              })}
-              {media.length === 0 ? <div className="empty-state" style={{ gridColumn: "1 / -1" }}>等待上传真实素材</div> : null}
+                      {thumb ? <img src={thumb} alt={item.file_name} /> : item.kind === "image" ? <Images size={24} /> : <Film size={24} />}
+                      <span className="media-name" title={item.file_name}>{item.file_name}</span>
+                      <span className="media-kind">{item.kind === "image" ? "图片" : "视频"}</span>
+                      <button
+                        className="media-delete"
+                        type="button"
+                        aria-label="删除素材"
+                        disabled={busy}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void deleteMedia(item);
+                        }}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  );
+                })}
+                {media.length === 0 ? <div className="empty-state" style={{ gridColumn: "1 / -1" }}>等待上传真实素材</div> : null}
+              </div>
             </div>
 
             {inputType === "images" && imageCount > 0 && imageCount < MIN_INPUT_FRAMES ? (
@@ -384,8 +405,8 @@ export default function UploadPage() {
           </div>
 
           <div className="sticky-actions">
-            <button className="ghost-button" type="button" onClick={() => void createProjectOnly()} disabled={Boolean(project) || busy}>
-              {busy && !project ? <Loader2 size={17} /> : <CheckCircle2 size={17} />}创建项目
+            <button className="ghost-button" type="button" onClick={() => void resetUploadArea()} disabled={busy || Boolean(task && isActiveTask(task)) || (!project && media.length === 0)}>
+              {busy ? <Loader2 size={17} /> : <RefreshCw size={17} />}重新上传
             </button>
             <button className="ghost-button" type="button" onClick={() => fileInputRef.current?.click()} disabled={busy}>
               <FileUp size={17} />继续上传

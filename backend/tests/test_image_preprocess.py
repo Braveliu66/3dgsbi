@@ -58,6 +58,19 @@ class ImagePreprocessTests(unittest.TestCase):
                 self.assertEqual(normalized.mode, "RGB")
                 self.assertEqual(normalized.size, (20, 20))
 
+    def test_downscale_preserves_original_aspect_ratio(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "input"
+            output = root / "output"
+            source.mkdir()
+            Image.new("RGB", (1200, 600), (30, 90, 140)).save(source / "wide.jpg")
+
+            normalize_image_directory(source, output, max_side=300, jpeg_quality=90)
+
+            with Image.open(output / "000000.jpg") as normalized:
+                self.assertEqual(normalized.size, (300, 150))
+
     def test_no_exif_jpg_and_png_normalize_without_camera_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

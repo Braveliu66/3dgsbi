@@ -4,7 +4,7 @@ import Link from "next/link";
 import { FilePlus2, Image, Search, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api, formatBytes, mediaThumbnailUrl } from "@/lib/api";
-import { formatDateTime, formatEta, inputTypeLabel, projectStatusLabel, taskTypeLabel } from "@/lib/labels";
+import { formatDateTime, formatTaskEta, inputTypeLabel, projectStatusLabel, taskTypeLabel } from "@/lib/labels";
 import type { Project, ProjectStatus, Task } from "@/lib/types";
 
 export default function ProjectsPage() {
@@ -223,7 +223,7 @@ function ProjectTrainingProgress({ task }: { task: Task | null }) {
       </div>
       <div className="row between small muted">
         <span>{task.status === "queued" ? "排队中" : "训练中"}</span>
-        <span>剩余 {formatEta(task.eta_seconds)}</span>
+        <span>剩余 {formatTaskEta(task)}</span>
       </div>
     </div>
   );

@@ -192,6 +192,7 @@ class LingBotVideoPreviewTests(unittest.TestCase):
                 self.assertEqual(config.conf_percentile_full, 35.0)
                 self.assertEqual(config.min_conf, 1e-5)
                 self.assertTrue(config.use_sdpa)
+                self.assertFalse(config.compile_model)
                 self.assertEqual(config.voxel_target_fast, 3000)
                 self.assertEqual(config.voxel_target_full, 5200)
                 self.assertFalse(config.allow_sdpa_fallback)
@@ -247,7 +248,7 @@ class LingBotVideoPreviewTests(unittest.TestCase):
         self.assertEqual(infer_lingbot_model_image_size_from_state_dict(small_checkpoint), 448)
         self.assertEqual(infer_lingbot_model_image_size_from_state_dict({}), 518)
 
-    def test_lingbot_attention_defaults_to_official_sdpa_without_flashinfer(self) -> None:
+    def test_lingbot_attention_defaults_to_studio_sdpa_and_can_require_flashinfer(self) -> None:
         from app.preview.types import PreviewFailure
         from app.preview.vendor.lingbot_runtime import resolve_lingbot_attention_backend
 
@@ -270,18 +271,50 @@ class LingBotVideoPreviewTests(unittest.TestCase):
         self.assertTrue(use_sdpa)
         self.assertFalse(flashinfer_found)
 
+        use_sdpa, flashinfer_found = resolve_lingbot_attention_backend(
+            allow_sdpa_fallback=False,
+            use_sdpa=False,
+            flashinfer_probe=lambda: True,
+        )
+        self.assertFalse(use_sdpa)
+        self.assertTrue(flashinfer_found)
+
     def test_lingbot_cuda_illegal_memory_access_is_classified(self) -> None:
         from app.preview.vendor.lingbot_runtime import is_cuda_illegal_memory_access
 
         self.assertTrue(is_cuda_illegal_memory_access(RuntimeError("CUDA error: an illegal memory access was encountered")))
         self.assertFalse(is_cuda_illegal_memory_access(RuntimeError("CUDA error: out of memory")))
 
+    def test_lingbot_compile_cache_defaults_to_model_cache(self) -> None:
+        from app.preview.vendor.lingbot_runtime import configure_torch_compile_cache
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {}, clear=True):
+            model_path = Path(tmp) / "model-cache" / "lingbot" / "lingbot-map-long.pt"
+            model_path.parent.mkdir(parents=True)
+            model_path.write_bytes(b"weight")
+
+            cache = configure_torch_compile_cache(model_path)
+
+            self.assertEqual(cache["torchinductor_cache_dir"], str(model_path.parents[1] / "torchinductor"))
+            self.assertEqual(cache["torch_extensions_dir"], str(model_path.parents[1] / "torch_extensions"))
+            self.assertEqual(cache["torchinductor_fx_graph_cache"], "1")
+            self.assertEqual(cache["torchinductor_autograd_cache"], "1")
+            self.assertTrue((model_path.parents[1] / "torchinductor").exists())
+            self.assertTrue((model_path.parents[1] / "torch_extensions").exists())
+
+    def test_lingbot_compile_only_applies_to_streaming(self) -> None:
+        from app.preview.vendor.lingbot_runtime import should_compile_lingbot_model
+
+        self.assertTrue(should_compile_lingbot_model(True, "streaming"))
+        self.assertFalse(should_compile_lingbot_model(True, "windowed"))
+        self.assertFalse(should_compile_lingbot_model(False, "streaming"))
+
     def test_lingbot_runtime_no_longer_exposes_experimental_fallback_helpers(self) -> None:
         from app.preview.vendor import lingbot_runtime
 
         self.assertFalse(hasattr(lingbot_runtime, "make_lingbot_oom_fallback_profile"))
         self.assertFalse(hasattr(lingbot_runtime, "make_lingbot_oom_fallback_profiles"))
-        self.assertEqual(lingbot_runtime.resolve_kv_cache_sliding_window(64), 16)
+        self.assertEqual(lingbot_runtime.resolve_kv_cache_sliding_window(64), 32)
         self.assertEqual(lingbot_runtime.resolve_kv_cache_sliding_window(8), 8)
 
     def test_lingbot_auto_mode_switches_to_windowed_before_streaming_cache_gets_large(self) -> None:
@@ -299,8 +332,8 @@ class LingBotVideoPreviewTests(unittest.TestCase):
         self.assertEqual(streaming.overlap_keyframes, 8)
         windowed = effective_pointcloud_config(PointCloudVideoConfig(), 577)
         self.assertEqual(windowed.mode, "windowed")
-        self.assertEqual(windowed.window_size, 128)
-        self.assertEqual(windowed.keyframe_interval, 13)
+        self.assertEqual(windowed.window_size, 64)
+        self.assertEqual(windowed.keyframe_interval, 6)
         self.assertEqual(windowed.overlap_keyframes, 8)
         low_mem = effective_pointcloud_config(PointCloudVideoConfig(profile="low_mem", window_size=32, keyframe_interval=6), 577)
         self.assertEqual(low_mem.mode, "windowed")
@@ -414,7 +447,7 @@ class LingBotVideoPreviewTests(unittest.TestCase):
 
         self.assertEqual(result, {"ok": True})
         self.assertEqual(model.kwargs["overlap_size"], 16)
-        self.assertEqual(model.kwargs["overlap_keyframes"], 8)
+        self.assertNotIn("overlap_keyframes", model.kwargs)
 
     def test_lingbot_target_resolution_crops_portrait_before_resize(self) -> None:
         from app.preview.vendor.lingbot_runtime import resolve_lingbot_target_dimensions

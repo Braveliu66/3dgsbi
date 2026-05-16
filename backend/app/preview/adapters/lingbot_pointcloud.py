@@ -47,7 +47,7 @@ def run(ctx: PreviewContext) -> PreviewResult:
         min_conf=read_float(ctx.options.get("preview_lingbot_min_conf"), 1e-5, minimum=-100.0, maximum=100.0),
         use_sdpa=read_bool(ctx.options.get("preview_lingbot_use_sdpa"), bool(defaults["use_sdpa"])),
         allow_sdpa_fallback=read_bool(ctx.options.get("preview_lingbot_allow_sdpa_fallback"), False),
-        compile_model=read_bool(ctx.options.get("preview_lingbot_compile"), False),
+        compile_model=read_bool(ctx.options.get("preview_lingbot_compile"), bool(defaults["compile"])),
         write_progressive_preview=read_bool(ctx.options.get("preview_lingbot_write_progressive_preview"), True),
         voxel_target_fast=read_int(ctx.options.get("preview_lingbot_voxel_target_fast"), 3000, minimum=1, maximum=100_000),
         voxel_target_full=read_int(ctx.options.get("preview_lingbot_voxel_target_full"), 5200, minimum=1, maximum=100_000),
@@ -137,6 +137,7 @@ def pointcloud_profile_defaults(profile: str) -> dict[str, int | float | str | b
             "camera_iterations": 2,
             "conf_percentile_fast": 65.0,
             "use_sdpa": True,
+            "compile": False,
         }
     if profile == "long_video":
         return {
@@ -149,6 +150,7 @@ def pointcloud_profile_defaults(profile: str) -> dict[str, int | float | str | b
             "camera_iterations": 4,
             "conf_percentile_fast": 65.0,
             "use_sdpa": True,
+            "compile": False,
         }
     return {
         "mode": "auto",
@@ -160,6 +162,7 @@ def pointcloud_profile_defaults(profile: str) -> dict[str, int | float | str | b
         "camera_iterations": 4,
         "conf_percentile_fast": 65.0,
         "use_sdpa": True,
+        "compile": False,
     }
 
 

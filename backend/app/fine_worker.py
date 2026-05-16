@@ -25,6 +25,7 @@ from app.worker import (
     append_log,
     download_media,
     emit,
+    ensure_worker_heartbeat_schema,
     fail_task,
     format_options,
     heartbeat,
@@ -48,6 +49,7 @@ def main() -> None:
         print("[fine-worker] FINE_RECONSTRUCTION_ENABLED is false; worker will not start", flush=True)
         return
     initialize_database_schema()
+    ensure_worker_heartbeat_schema()
     redis_client = redis.Redis.from_url(settings.redis_url, decode_responses=True)
     recover_interrupted_fine_tasks(redis_client)
     print(f"[fine-worker] {worker_id} listening on {settings.fine_queue_name}", flush=True)

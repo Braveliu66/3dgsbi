@@ -15,18 +15,18 @@ from pathlib import Path
 from typing import Any, Callable
 
 import redis
-from sqlalchemy import select
+from sqlalchemy import inspect, select, text
 from sqlalchemy.orm import selectinload
 
 from app.algorithms import normalize_preview_pipeline
 from app.config import get_settings
-from app.database import SessionLocal, initialize_database_schema
+from app.database import SessionLocal, engine, initialize_database_schema
 from app.models import Artifact, MediaAsset, Project, Task, TaskEvent, User, WorkerHeartbeat, utc_now
 from app.preview.image_preprocess import normalize_image_directory
 from app.preview.runner import run_preview_pipeline
 from app.preview.types import PreviewContext, PreviewFailure
 from app.preview.weights import ModelDownloadError, download_model_weights, weights_for_pipeline
-from app.resources import collect_gpu
+from app.resources import collect_cpu, collect_gpu
 from app.storage import Storage, sha256_path, storage_key
 from app.task_control import task_cancel_requested
 from app.work_names import work_save_stem
@@ -111,6 +111,7 @@ class TaskLogCapture:
 def main() -> None:
     worker_id = os.getenv("WORKER_ID") or f"preview-{socket.gethostname()}-{os.getpid()}"
     initialize_database_schema()
+    ensure_worker_heartbeat_schema()
     redis_client = redis.Redis.from_url(settings.redis_url, decode_responses=True)
     recover_interrupted_preview_tasks(redis_client)
     print(f"[worker] {worker_id} listening on {settings.preview_queue_name}", flush=True)
@@ -308,10 +309,12 @@ def recover_interrupted_preview_tasks(redis_client: redis.Redis) -> None:
 
 
 def heartbeat(worker_id: str, current_task_id: str | None = None) -> None:
+    cpu = collect_cpu()
     gpu = collect_gpu()
     first = (gpu.get("gpus") or [{}])[0] if gpu.get("available") else {}
     with SessionLocal() as db:
         item = db.get(WorkerHeartbeat, worker_id) or WorkerHeartbeat(worker_id=worker_id, hostname=socket.gethostname())
+        item.cpu_utilization = cpu.get("usage_percent")
         item.gpu_index = first.get("index")
         item.gpu_name = first.get("name")
         item.gpu_memory_total = first.get("memory_total")
@@ -321,6 +324,17 @@ def heartbeat(worker_id: str, current_task_id: str | None = None) -> None:
         item.last_seen_at = utc_now()
         db.merge(item)
         db.commit()
+
+
+def ensure_worker_heartbeat_schema() -> None:
+    inspector = inspect(engine)
+    if "worker_heartbeats" not in inspector.get_table_names():
+        return
+    columns = {item["name"] for item in inspector.get_columns("worker_heartbeats")}
+    if "cpu_utilization" in columns:
+        return
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE worker_heartbeats ADD COLUMN cpu_utilization INTEGER"))
 
 
 def run_preview_task(task_id: str, worker_id: str) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import json
 import math
+import os
 import shutil
 import subprocess
 import threading
@@ -47,7 +48,7 @@ _BATCHED_NDIMS = {
 }
 DEFAULT_LINGBOT_MODEL_IMAGE_SIZE = 518
 DEFAULT_LINGBOT_MIN_INFERENCE_FPS = 3.0
-DEFAULT_KV_CACHE_SLIDING_WINDOW = 16
+DEFAULT_KV_CACHE_SLIDING_WINDOW = 32
 AUTO_WINDOWED_FRAME_THRESHOLD = 320
 DEFAULT_PREVIEW_SPLAT_SCALE = 0.006
 DEFAULT_PREVIEW_OPACITY = 0.65
@@ -236,9 +237,6 @@ def lingbot_window_overlap_span(*, overlap_keyframes: int, keyframe_interval: in
 
 def effective_pointcloud_config(config: PointCloudVideoConfig, frame_count: int) -> PointCloudVideoConfig:
     mode = resolve_mode(config.mode, frame_count)
-    requested_auto = (config.mode or "auto").strip().lower() == "auto"
-    if requested_auto and mode == "windowed" and config.profile != "low_mem":
-        return replace(config, mode="windowed", window_size=128, keyframe_interval=13, overlap_keyframes=8)
     return replace(config, mode=mode)
 
 
@@ -1627,6 +1625,7 @@ def run_lingbot_inference_profile(
     torch_module: Any,
     progress: Progress,
 ) -> tuple[dict[str, Any], Any, dict[str, Any]]:
+    compile_cache = configure_torch_compile_cache(model_path)
     selected_frame_paths = select_lingbot_frame_paths(frame_paths, profile.max_frames)
     if selected_frame_paths:
         try:
@@ -1678,7 +1677,8 @@ def run_lingbot_inference_profile(
         f"overlap_size={profile.overlap_size} overlap_keyframes={profile.overlap_keyframes} "
         f"kv_cache_sliding_window={profile.kv_cache_sliding_window} "
         f"compile_requested={compile_requested} use_sdpa={use_sdpa} flashinfer_available={flashinfer_found} "
-        f"allow_sdpa_fallback={allow_sdpa_fallback} dtype={dtype}"
+        f"allow_sdpa_fallback={allow_sdpa_fallback} dtype={dtype} "
+        f"torchinductor_cache_dir={compile_cache['torchinductor_cache_dir']}"
     )
     model = load_lingbot_model(
         model_path,
@@ -1696,7 +1696,7 @@ def run_lingbot_inference_profile(
     aggregator_dtype = cast_lingbot_aggregator_for_inference(model, dtype)
     compile_active = False
     compile_fallback = False
-    if compile_requested:
+    if should_compile_lingbot_model(compile_requested, resolved_mode):
         model = compile_lingbot_model(model)
         compile_active = True
 
@@ -1803,6 +1803,10 @@ def run_lingbot_inference_profile(
         "lingbot_compile_requested": bool(compile_requested),
         "lingbot_compile_cudagraphs": False,
         "lingbot_compile_fallback": compile_fallback,
+        "lingbot_compile_cache_dir": compile_cache["torchinductor_cache_dir"],
+        "lingbot_torch_extensions_dir": compile_cache["torch_extensions_dir"],
+        "lingbot_torchinductor_fx_graph_cache": compile_cache["torchinductor_fx_graph_cache"],
+        "lingbot_torchinductor_autograd_cache": compile_cache["torchinductor_autograd_cache"],
         "lingbot_max_frames": int(profile.max_frames),
         "lingbot_inference_seconds": round(inference_seconds, 3),
         "lingbot_inference_fps": round(inference_fps, 3),
@@ -1816,6 +1820,35 @@ def run_lingbot_inference_profile(
         f"compile_fallback={metrics['lingbot_compile_fallback']}"
     )
     return predictions, images, metrics
+
+
+def configure_torch_compile_cache(model_path: Path) -> dict[str, str]:
+    cache_root = model_path.parent.parent if model_path.parent.name == "lingbot" else model_path.parent
+    torchinductor_cache_dir = os.environ.setdefault(
+        "TORCHINDUCTOR_CACHE_DIR",
+        str(cache_root / "torchinductor"),
+    )
+    torch_extensions_dir = os.environ.setdefault(
+        "TORCH_EXTENSIONS_DIR",
+        str(cache_root / "torch_extensions"),
+    )
+    fx_graph_cache = os.environ.setdefault("TORCHINDUCTOR_FX_GRAPH_CACHE", "1")
+    autograd_cache = os.environ.setdefault("TORCHINDUCTOR_AUTOGRAD_CACHE", "1")
+    for path in (torchinductor_cache_dir, torch_extensions_dir):
+        try:
+            Path(path).mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+    return {
+        "torchinductor_cache_dir": torchinductor_cache_dir,
+        "torch_extensions_dir": torch_extensions_dir,
+        "torchinductor_fx_graph_cache": fx_graph_cache,
+        "torchinductor_autograd_cache": autograd_cache,
+    }
+
+
+def should_compile_lingbot_model(compile_requested: bool, resolved_mode: str) -> bool:
+    return bool(compile_requested) and str(resolved_mode).strip().lower() == "streaming"
 
 
 def infer_lingbot_model_image_size_from_state_dict(
@@ -2038,7 +2071,6 @@ def run_lingbot_inference(
             images,
             window_size=window_size,
             overlap_size=overlap_size,
-            overlap_keyframes=overlap_keyframes,
             num_scale_frames=num_scale_frames,
             keyframe_interval=keyframe_interval,
             output_device=output_device,

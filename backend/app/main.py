@@ -27,7 +27,7 @@ from app.algorithms import license_notice_for, normalize_preview_pipeline, runti
 from app.config import get_settings
 from app.database import SessionLocal, engine, get_db, initialize_database_schema
 from app.fine.fastgs_defaults import DEFAULT_FINE_SCENE_PROFILE, FINE_SCENE_PROFILE_MAX_SIDES
-from app.models import AlgorithmRegistry, Artifact, Feedback, MediaAsset, Project, Task, TaskEvent, UploadSession, User, new_id, utc_now
+from app.models import AlgorithmRegistry, Artifact, Feedback, MediaAsset, Project, Task, TaskEvent, UploadSession, User, WorkerHeartbeat, new_id, utc_now
 from app.resources import collect_resources
 from app.security import (
     create_access_token,
@@ -612,6 +612,17 @@ def ensure_project_share_schema() -> None:
             connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_projects_share_token ON projects (share_token)"))
 
 
+def ensure_worker_heartbeat_schema() -> None:
+    inspector = inspect(engine)
+    if "worker_heartbeats" not in inspector.get_table_names():
+        return
+    columns = {item["name"] for item in inspector.get_columns("worker_heartbeats")}
+    if "cpu_utilization" in columns:
+        return
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE worker_heartbeats ADD COLUMN cpu_utilization INTEGER"))
+
+
 @app.on_event("startup")
 def startup() -> None:
     initialize_database_schema()
@@ -619,6 +630,7 @@ def startup() -> None:
     ensure_media_asset_order_schema()
     ensure_algorithm_registry_schema()
     ensure_project_share_schema()
+    ensure_worker_heartbeat_schema()
     storage.ensure_bucket()
     with SessionLocal() as db:
         seed_database(db)
@@ -1695,10 +1707,125 @@ def admin_tasks(_: User = Depends(require_admin), db: Session = Depends(get_db))
     return {"tasks": [task_dict(item) for item in tasks]}
 
 
+@app.get("/api/admin/projects")
+def admin_projects(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, Any]:
+    projects = db.scalars(
+        select(Project)
+        .options(selectinload(Project.owner), selectinload(Project.tasks), selectinload(Project.artifacts))
+        .order_by(Project.updated_at.desc())
+        .limit(200)
+    ).all()
+    workers = db.scalars(select(WorkerHeartbeat)).all()
+    workers_by_task = {item.current_task_id: item for item in workers if item.current_task_id}
+    return {
+        "projects": [
+            {
+                "id": project.id,
+                "name": project.name,
+                "owner_id": project.owner_id,
+                "owner_username": project.owner.username if project.owner else None,
+                "status": project.status,
+                "input_type": project.input_type,
+                "total_size_bytes": project.total_size_bytes + sum(item.file_size for item in project.artifacts),
+                "created_at": iso(project.created_at),
+                "updated_at": iso(project.updated_at),
+                "latest_task": admin_task_summary(project.tasks[0]) if project.tasks else None,
+                "worker": admin_worker_summary(workers_by_task.get(project.tasks[0].id)) if project.tasks else None,
+            }
+            for project in projects
+        ]
+    }
+
+
+@app.get("/api/admin/users")
+def admin_users(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, Any]:
+    project_stats = {
+        row.user_id: {"project_count": int(row.project_count or 0), "total_size_bytes": int(row.total_size_bytes or 0)}
+        for row in db.execute(
+            select(
+                Project.owner_id.label("user_id"),
+                func.count(Project.id).label("project_count"),
+                func.coalesce(func.sum(Project.total_size_bytes), 0).label("total_size_bytes"),
+            ).group_by(Project.owner_id)
+        )
+    }
+    feedback_stats = {
+        row.user_id: int(row.feedback_count or 0)
+        for row in db.execute(select(Feedback.user_id.label("user_id"), func.count(Feedback.id).label("feedback_count")).group_by(Feedback.user_id))
+    }
+    users = db.scalars(select(User).order_by(User.created_at.desc())).all()
+    return {
+        "users": [
+            {
+                **user_dict(user),
+                "project_count": project_stats.get(user.id, {}).get("project_count", 0),
+                "total_size_bytes": project_stats.get(user.id, {}).get("total_size_bytes", 0),
+                "feedback_count": feedback_stats.get(user.id, 0),
+            }
+            for user in users
+        ]
+    }
+
+
+@app.get("/api/admin/feedback")
+def admin_feedback(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, Any]:
+    feedback_items = db.scalars(select(Feedback).order_by(Feedback.created_at.desc()).limit(200)).all()
+    user_ids = {item.user_id for item in feedback_items}
+    project_ids = {item.project_id for item in feedback_items if item.project_id}
+    users = {item.id: item for item in db.scalars(select(User).where(User.id.in_(user_ids))).all()} if user_ids else {}
+    projects = {item.id: item for item in db.scalars(select(Project).where(Project.id.in_(project_ids))).all()} if project_ids else {}
+    return {
+        "feedback": [
+            {
+                "id": item.id,
+                "user_id": item.user_id,
+                "username": users[item.user_id].username if item.user_id in users else None,
+                "project_id": item.project_id,
+                "project_name": projects[item.project_id].name if item.project_id and item.project_id in projects else None,
+                "title": item.title,
+                "content": item.content,
+                "status": item.status,
+                "created_at": iso(item.created_at),
+            }
+            for item in feedback_items
+        ]
+    }
+
+
+def admin_task_summary(task: Task) -> dict[str, Any]:
+    return {
+        "id": task.id,
+        "project_id": task.project_id,
+        "type": task.type,
+        "status": task.status,
+        "progress": task.progress,
+        "worker_id": task.worker_id,
+        "current_stage": task.current_stage,
+        "eta_seconds": task.eta_seconds,
+        "created_at": iso(task.created_at),
+        "started_at": iso(task.started_at),
+        "finished_at": iso(task.finished_at),
+    }
+
+
+def admin_worker_summary(worker: WorkerHeartbeat | None) -> dict[str, Any] | None:
+    if not worker:
+        return None
+    return {
+        "worker_id": worker.worker_id,
+        "hostname": worker.hostname,
+        "gpu_index": worker.gpu_index,
+        "gpu_name": worker.gpu_name,
+        "gpu_memory_total": worker.gpu_memory_total,
+        "gpu_memory_used": worker.gpu_memory_used,
+        "gpu_utilization": worker.gpu_utilization,
+        "cpu_utilization": worker.cpu_utilization,
+        "last_seen_at": iso(worker.last_seen_at),
+    }
+
+
 @app.get("/api/admin/workers")
 def admin_workers(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, Any]:
-    from app.models import WorkerHeartbeat
-
     workers = db.scalars(select(WorkerHeartbeat).order_by(WorkerHeartbeat.last_seen_at.desc())).all()
     return {
         "workers": [
@@ -1710,6 +1837,7 @@ def admin_workers(_: User = Depends(require_admin), db: Session = Depends(get_db
                 "gpu_memory_total": item.gpu_memory_total,
                 "gpu_memory_used": item.gpu_memory_used,
                 "gpu_utilization": item.gpu_utilization,
+                "cpu_utilization": item.cpu_utilization,
                 "current_task_id": item.current_task_id,
                 "last_seen_at": iso(item.last_seen_at),
             }

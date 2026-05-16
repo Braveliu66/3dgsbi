@@ -71,6 +71,8 @@ interface ModelLoadProgress {
   loadedBytes: number;
   totalBytes: number;
   percent: number;
+  label?: string;
+  indeterminate?: boolean;
 }
 
 interface LoadedModel {
@@ -115,7 +117,7 @@ export function SplatViewer({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewerApiRef = useRef<ViewerControlApi | null>(null);
   const applyPointCloudControlsRef = useRef<(() => void) | null>(null);
-  const debugControlsRef = useRef({ pointSizeScale: 1, confidenceThreshold: 0, downsampleFactor: 1 });
+  const debugControlsRef = useRef({ downsampleFactor: 10 });
   const [state, setState] = useState<ViewerState>("idle");
   const [viewerReady, setViewerReady] = useState(false);
   const [message, setMessage] = useState("Waiting for a 3D asset.");
@@ -127,14 +129,10 @@ export function SplatViewer({
   const [cameraMode, setCameraMode] = useState<CameraMode>("orbit");
   const [panSensitivity, setPanSensitivity] = useState(0.7);
   const [zoomSensitivity, setZoomSensitivity] = useState(0.9);
-  const [debugPointSizeScale, setDebugPointSizeScale] = useState(1);
-  const [debugConfidenceThreshold, setDebugConfidenceThreshold] = useState(0);
-  const [debugDownsampleFactor, setDebugDownsampleFactor] = useState(1);
+  const [debugDownsampleFactor, setDebugDownsampleFactor] = useState(10);
   const [pointStats, setPointStats] = useState<{ shown: number; total: number; hasConfidence: boolean } | null>(null);
 
   debugControlsRef.current = {
-    pointSizeScale: debugPointSizeScale,
-    confidenceThreshold: debugConfidenceThreshold,
     downsampleFactor: debugDownsampleFactor
   };
 
@@ -147,7 +145,7 @@ export function SplatViewer({
 
   useEffect(() => {
     applyPointCloudControlsRef.current?.();
-  }, [debugPointSizeScale, debugConfidenceThreshold, debugDownsampleFactor]);
+  }, [debugDownsampleFactor]);
 
   useEffect(() => {
     const activeModelUrl = viewMode === "ply" ? gaussianPlyUrl : modelUrl;
@@ -199,6 +197,7 @@ export function SplatViewer({
         }
         if (cancelled) return;
         setMessage(debugMode ? "Initializing point cloud viewer" : "Initializing Spark viewer");
+        setModelLoadProgress({ loadedBytes: 0, totalBytes: 0, percent: 0, indeterminate: true, label: debugMode ? "Initializing point cloud" : "Initializing viewer" });
         const THREE = await import("three");
         const { OrbitControls } = await import("three/examples/jsm/controls/OrbitControls.js");
         const Spark = debugMode
@@ -281,7 +280,20 @@ export function SplatViewer({
             setCustomPropertyNameMapping: (mapping: Record<string, string[]>) => void;
           };
           loader.setCustomPropertyNameMapping({ confidence: ["confidence"] });
-          rawPointGeometry = await loader.loadAsync(artifactUrl(debugPointsUrl));
+          const pointBytes = await fetchBytesWithProgress(
+            artifactUrl(debugPointsUrl),
+            "points.ply",
+            0,
+            (progress) => {
+              if (!cancelled) {
+                setModelLoadProgress({ ...modelProgress(progress.loadedBytes, progress.totalBytes), label: "PLY point cloud transfer" });
+              }
+            },
+            abortController.signal
+          );
+          setModelLoadProgress({ loadedBytes: 0, totalBytes: 0, percent: 0, indeterminate: true, label: "Initializing point cloud" });
+          const pointBuffer = pointBytes.bytes.buffer.slice(pointBytes.bytes.byteOffset, pointBytes.bytes.byteOffset + pointBytes.bytes.byteLength) as ArrayBuffer;
+          rawPointGeometry = loader.parse(pointBuffer);
           rawPointGeometry.computeBoundingBox();
           const radius = viewerMeta?.radius ?? 1;
           const basePointSize = Math.max(radius * 0.00016, 0.000012);
@@ -297,13 +309,13 @@ export function SplatViewer({
             const nextGeometry = buildDebugPointGeometry(
               THREE,
               rawPointGeometry,
-              controlsValue.confidenceThreshold,
+              0,
               controlsValue.downsampleFactor
             );
             const oldGeometry = pointCloud.geometry;
             pointCloud.geometry = nextGeometry.geometry;
             oldGeometry.dispose();
-            pointMaterial.size = basePointSize * controlsValue.pointSizeScale;
+            pointMaterial.size = basePointSize;
             setPointStats(nextGeometry.stats);
           };
           applyPointCloudControlsRef.current();
@@ -542,24 +554,6 @@ export function SplatViewer({
       {debugPointsUrl && viewMode === "points" ? (
         <div className="viewer-point-controls">
           <label>
-            <span>Size</span>
-            <input type="range" min="0.25" max="4" step="0.05" value={debugPointSizeScale} onChange={(event) => setDebugPointSizeScale(Number(event.target.value))} />
-            <strong>{debugPointSizeScale.toFixed(2)}x</strong>
-          </label>
-          <label>
-            <span>Conf</span>
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.01"
-              value={debugConfidenceThreshold}
-              disabled={pointStats?.hasConfidence === false}
-              onChange={(event) => setDebugConfidenceThreshold(Number(event.target.value))}
-            />
-            <strong>{debugConfidenceThreshold.toFixed(2)}</strong>
-          </label>
-          <label>
             <span>Sample</span>
             <input type="range" min="1" max="30" step="1" value={debugDownsampleFactor} onChange={(event) => setDebugDownsampleFactor(Number(event.target.value))} />
             <strong>{debugDownsampleFactor}x</strong>
@@ -618,17 +612,19 @@ function buildDebugPointGeometry(
 
 function ViewerLoadProgress({ progress, format }: { progress: ModelLoadProgress; format: ModelFormat }) {
   return (
-    <div className="viewer-progress">
+    <div className={`viewer-progress ${progress.indeterminate ? "indeterminate" : ""}`}>
       <div className="row between small">
-        <span>{format.toUpperCase()} model transfer</span>
-        <span>{progress.percent}%</span>
+        <span>{progress.label ?? `${format.toUpperCase()} model transfer`}</span>
+        <span>{progress.indeterminate ? "..." : `${progress.percent}%`}</span>
       </div>
       <div className="progress-track" aria-label="SPZ model loading progress">
-        <span style={{ width: `${progress.percent}%` }} />
+        <span style={{ width: progress.indeterminate ? "38%" : `${progress.percent}%` }} />
       </div>
-      <div className="muted small">
-        {formatBytes(progress.loadedBytes)} / {progress.totalBytes ? formatBytes(progress.totalBytes) : "calculating"}
-      </div>
+      {!progress.indeterminate ? (
+        <div className="muted small">
+          {formatBytes(progress.loadedBytes)} / {progress.totalBytes ? formatBytes(progress.totalBytes) : "calculating"}
+        </div>
+      ) : null}
     </div>
   );
 }

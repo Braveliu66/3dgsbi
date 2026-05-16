@@ -258,10 +258,16 @@ export default function ProjectDetailPage() {
 
   return (
     <div className="workspace-page">
-      <header className="page-header compact">
-        <div>
+      <header className="page-header compact project-detail-header">
+        <div className="project-detail-titlebar">
           <p className="eyebrow">Project Detail</p>
           <h1 className="truncate" title={project?.name}>{project?.name ?? "加载项目中"}</h1>
+          <div className="project-detail-meta">
+            <span>创建 {formatDateTime(project?.created_at)}</span>
+            <span>更新 {formatDateTime(project?.updated_at)}</span>
+            <span>占用 {formatBytes(storageStats.mediaBytes + storageStats.artifactBytes)}</span>
+            {project ? <span className={`status-pill ${project.status}`}>{projectStatusLabel(project.status)}</span> : null}
+          </div>
         </div>
         <div className="actions">
           <Link className="ghost-button" href="/projects">返回项目</Link>

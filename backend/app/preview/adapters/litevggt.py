@@ -249,7 +249,9 @@ def run(ctx: PreviewContext) -> PreviewResult:
         ctx.options.get("litevggt_depth_conf_thresh"),
         profile_defaults["litevggt_depth_conf_thresh"],
     )
-    preprocess_mode = str(ctx.options.get("litevggt_preprocess_mode") or profile_defaults["litevggt_preprocess_mode"])
+    preprocess_mode = str(ctx.options.get("litevggt_preprocess_mode") or profile_defaults["litevggt_preprocess_mode"]).strip().lower()
+    if preprocess_mode not in {"pad", "crop"}:
+        preprocess_mode = "pad"
     point_selection_strategy = str(
         ctx.options.get("litevggt_point_selection_strategy") or profile_defaults["litevggt_point_selection_strategy"]
     )

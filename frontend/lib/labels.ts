@@ -51,6 +51,26 @@ export function isActiveTask(task?: Task | null): boolean {
   return task?.status === "queued" || task?.status === "running";
 }
 
+export function formatTaskEta(task?: Task | null): string {
+  if (!task || !isActiveTask(task)) return formatEta(0);
+  const estimated = estimateTaskEtaSeconds(task);
+  return formatEta(estimated ?? task.eta_seconds);
+}
+
+export function estimateTaskEtaSeconds(task: Pick<Task, "progress" | "eta_seconds" | "logs" | "created_at" | "started_at">): number | null {
+  const progress = Math.max(0, Math.min(99, Number(task.progress || 0)));
+  if (progress <= 0) return task.eta_seconds ?? null;
+  const logEstimate = estimateEtaFromLogs(task, progress);
+  if (logEstimate !== null) return logEstimate;
+
+  const startedAt = Date.parse(task.started_at || task.created_at);
+  if (Number.isFinite(startedAt)) {
+    const elapsedSeconds = Math.max(1, (Date.now() - startedAt) / 1000);
+    return Math.max(0, Math.round((elapsedSeconds * (100 - progress)) / progress));
+  }
+  return task.eta_seconds ?? null;
+}
+
 export function formatDateTime(value?: string | null): string {
   if (!value) return "-";
   const date = new Date(value);
@@ -71,4 +91,53 @@ export function formatEta(seconds?: number | null): string {
   if (minutes < 60) return `${minutes} 分 ${remain} 秒`;
   const hours = Math.floor(minutes / 60);
   return `${hours} 小时 ${minutes % 60} 分`;
+}
+
+function estimateEtaFromLogs(task: Pick<Task, "logs" | "created_at" | "started_at">, currentProgress: number): number | null {
+  const points = (task.logs ?? []).map(parseTimedProgressLog).filter((item): item is { time: number; progress: number } => Boolean(item));
+  if (points.length >= 2) {
+    const first = points[0];
+    const last = points[points.length - 1];
+    const progressDelta = last.progress - first.progress;
+    const secondsDelta = (last.time - first.time) / 1000;
+    if (progressDelta > 0 && secondsDelta > 0) {
+      return Math.max(0, Math.round((secondsDelta / progressDelta) * (100 - currentProgress)));
+    }
+  }
+
+  const timedLogs = (task.logs ?? []).map(parseLogTime).filter((value): value is number => value !== null);
+  const startedAt = Date.parse(task.started_at || task.created_at);
+  if (timedLogs.length >= 2 && Number.isFinite(startedAt)) {
+    const latestLogTime = Math.max(...timedLogs);
+    const elapsedSeconds = Math.max(1, (latestLogTime - startedAt) / 1000);
+    if (elapsedSeconds > 0) {
+      return Math.max(0, Math.round((elapsedSeconds * (100 - currentProgress)) / currentProgress));
+    }
+  }
+  return null;
+}
+
+function parseTimedProgressLog(line: string): { time: number; progress: number } | null {
+  const time = parseLogTime(line);
+  if (time === null) return null;
+  const progressMatch = line.match(/(?:progress\s*[=:]\s*(\d{1,3})(?:\.\d+)?|(\d{1,3})(?:\.\d+)?\s*%)/i);
+  const progressValue = progressMatch?.[1] ?? progressMatch?.[2];
+  const progress = progressValue ? Number(progressValue) : NaN;
+  if (!Number.isFinite(progress) || progress < 0 || progress > 100) return null;
+  return { time, progress };
+}
+
+function parseLogTime(line: string): number | null {
+  const iso = line.match(/\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/);
+  if (iso) {
+    const normalized = iso[0].includes("T") ? iso[0] : iso[0].replace(" ", "T");
+    const parsed = Date.parse(normalized);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  const bracketed = line.match(/\[(\d{2}:\d{2}:\d{2})\]/);
+  if (!bracketed) return null;
+  const base = new Date();
+  const [hours, minutes, seconds] = bracketed[1].split(":").map(Number);
+  base.setHours(hours, minutes, seconds, 0);
+  return base.getTime();
 }

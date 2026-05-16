@@ -1,4 +1,19 @@
-import type { AlgorithmEntry, Artifact, AuthResponse, MediaAsset, Project, ProjectShareResponse, RuntimePreflight, SharedProject, Task, User, ViewerConfig } from "@/lib/types";
+import type {
+  AdminProjectUsage,
+  AdminUserUsage,
+  AlgorithmEntry,
+  Artifact,
+  AuthResponse,
+  FeedbackEntry,
+  MediaAsset,
+  Project,
+  ProjectShareResponse,
+  RuntimePreflight,
+  SharedProject,
+  Task,
+  User,
+  ViewerConfig
+} from "@/lib/types";
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
 const TOKEN_KEY = "three_dgs_token";
@@ -605,6 +620,9 @@ export const api = {
   adminAlgorithms: () => request<{ algorithms: AlgorithmEntry[] }>("/api/admin/algorithms"),
   runtimePreflight: () => request<RuntimePreflight>("/api/admin/runtime/preflight"),
   adminTasks: () => request<{ tasks: Task[] }>("/api/admin/tasks"),
+  adminProjects: () => request<{ projects: AdminProjectUsage[] }>("/api/admin/projects"),
+  adminUsers: () => request<{ users: AdminUserUsage[] }>("/api/admin/users"),
+  adminFeedback: () => request<{ feedback: FeedbackEntry[] }>("/api/admin/feedback"),
   workers: () => request<{ workers: unknown[]; message?: string }>("/api/admin/workers"),
   projectSummary: () => request<Record<string, number>>("/api/projects/summary"),
   projects: () => request<{ projects: Project[] }>("/api/projects"),

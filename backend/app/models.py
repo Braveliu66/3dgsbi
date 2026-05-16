@@ -184,6 +184,7 @@ class WorkerHeartbeat(Base):
     gpu_memory_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
     gpu_memory_used: Mapped[int | None] = mapped_column(Integer, nullable=True)
     gpu_utilization: Mapped[float | None] = mapped_column(Integer, nullable=True)
+    cpu_utilization: Mapped[float | None] = mapped_column(Integer, nullable=True)
     current_task_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 

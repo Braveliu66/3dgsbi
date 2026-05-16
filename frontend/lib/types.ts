@@ -82,6 +82,72 @@ export interface Task {
   finished_at?: string | null;
 }
 
+export interface AdminTaskSummary {
+  id: string;
+  project_id: string;
+  type: Task["type"];
+  status: Task["status"];
+  progress: number;
+  worker_id?: string | null;
+  current_stage: string;
+  eta_seconds?: number | null;
+  created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+export interface AdminWorkerSummary {
+  worker_id: string;
+  hostname: string;
+  gpu_index?: number | null;
+  gpu_name?: string | null;
+  gpu_memory_total?: number | null;
+  gpu_memory_used?: number | null;
+  gpu_utilization?: number | null;
+  cpu_utilization?: number | null;
+  last_seen_at: string;
+}
+
+export interface AdminProjectUsage {
+  id: string;
+  name: string;
+  owner_id: string;
+  owner_username?: string | null;
+  status: ProjectStatus;
+  input_type: Project["input_type"];
+  total_size_bytes: number;
+  created_at: string;
+  updated_at: string;
+  latest_task?: AdminTaskSummary | null;
+  worker?: AdminWorkerSummary | null;
+}
+
+export interface AdminUserUsage extends User {
+  project_count: number;
+  total_size_bytes: number;
+  feedback_count: number;
+}
+
+export interface FeedbackEntry {
+  id: string;
+  user_id: string;
+  username?: string | null;
+  project_id?: string | null;
+  project_name?: string | null;
+  title: string;
+  content: string;
+  status: string;
+  created_at: string;
+}
+
+export interface ResourceSnapshotPoint {
+  time: number;
+  cpu: number;
+  memory: number;
+  gpu: number;
+  vram: number;
+}
+
 export interface Artifact {
   id: string;
   project_id: string;
