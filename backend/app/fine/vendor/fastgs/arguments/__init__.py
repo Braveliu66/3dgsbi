@@ -28,6 +28,7 @@ from app.fine.fastgs_defaults import (
     FASTGS_DEBLUR_HIDDEN,
     FASTGS_DEBLUR_LAMBDA_P,
     FASTGS_DEBLUR_LAMBDA_S,
+    FASTGS_DEBLUR_LATE_DENSIFY_ENABLED,
     FASTGS_DEBLUR_MAX_CLAMP,
     FASTGS_DEBLUR_MAX_POSITION_DELTA,
     FASTGS_DEBLUR_MODE,
@@ -169,6 +170,7 @@ class OptimizationParams(ParamGroup):
         self.deblur_blur_registry = FASTGS_DEBLUR_BLUR_REGISTRY
         self.deblur_auto_schedule = FASTGS_DEBLUR_AUTO_SCHEDULE
         self.deblur_schedule_profile = FASTGS_DEBLUR_SCHEDULE_PROFILE
+        self.deblur_late_densify_enabled = FASTGS_DEBLUR_LATE_DENSIFY_ENABLED
         self.deblur_warmup_iters = FASTGS_DEBLUR_WARMUP_ITERS
         self.deblur_num_moments = FASTGS_DEBLUR_NUM_MOMENTS
         self.deblur_gtnet_lr = FASTGS_DEBLUR_GTNET_LR

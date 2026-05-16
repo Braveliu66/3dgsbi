@@ -735,6 +735,38 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(file_response.status_code, 200)
             self.assertEqual(file_response.content, content)
 
+    def test_chunked_upload_lists_media_by_client_order_not_completion_order(self) -> None:
+        first_content = b"first upload content"
+        second_content = b"second upload content"
+        with TestClient(app) as client:
+            headers = auth_headers(client)
+            project_id = create_video_project(client, headers, "ordered chunked upload")
+            first_payload = {**chunk_check_payload("first.mp4", first_content, chunk_size=8), "client_order": 0}
+            second_payload = {**chunk_check_payload("second.mp4", second_content, chunk_size=8), "client_order": 1}
+
+            first_check = client.post(f"/api/projects/{project_id}/uploads/check", json=first_payload, headers=headers)
+            second_check = client.post(f"/api/projects/{project_id}/uploads/check", json=second_payload, headers=headers)
+            first_check.raise_for_status()
+            second_check.raise_for_status()
+            first_upload_id = first_check.json()["upload_id"]
+            second_upload_id = second_check.json()["upload_id"]
+
+            for upload_id, content in ((second_upload_id, second_content), (first_upload_id, first_content)):
+                for index, start in enumerate(range(0, len(content), 8)):
+                    chunk_response = client.put(
+                        f"/api/uploads/{upload_id}/chunks/{index}/raw",
+                        content=content[start : start + 8],
+                        headers={**headers, "Content-Type": "application/octet-stream"},
+                    )
+                    chunk_response.raise_for_status()
+                complete_response = client.post(f"/api/uploads/{upload_id}/complete", headers=headers)
+                complete_response.raise_for_status()
+
+            media_response = client.get(f"/api/projects/{project_id}/media", headers=headers)
+            media_response.raise_for_status()
+            media_names = [item["file_name"] for item in media_response.json()["media"]]
+            self.assertEqual(media_names, ["first.mp4", "second.mp4"])
+
     def test_chunked_upload_rejects_incomplete_complete(self) -> None:
         content = b"0123456789"
         with TestClient(app) as client:

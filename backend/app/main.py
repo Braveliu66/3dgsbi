@@ -98,6 +98,7 @@ class UploadCheckPayload(BaseModel):
     file_size: int
     chunk_size: int
     total_chunks: int
+    client_order: int | None = None
     file_hash: str | None = None
     file_signature: str | None = None
     content_type: str | None = None
@@ -129,6 +130,7 @@ def media_dict(item: MediaAsset) -> dict[str, Any]:
         "duration_seconds": item.duration_seconds,
         "quality_flags": item.quality_flags or {},
         "source_version": item.source_version,
+        "client_order": item.client_order,
         "created_at": iso(item.created_at),
     }
 
@@ -339,8 +341,17 @@ def validate_media_kind(project: Project, kind: str) -> None:
         raise HTTPException(status_code=400, detail="视频项目只能上传视频")
 
 
-def add_media_asset(db: Session, project: Project, file_name: str, kind: str, uri: str, size: int, media_id: str | None = None) -> MediaAsset:
-    media = MediaAsset(project_id=project.id, id=media_id or new_id(), kind=kind, object_uri=uri, file_name=file_name, file_size=size)
+def add_media_asset(
+    db: Session,
+    project: Project,
+    file_name: str,
+    kind: str,
+    uri: str,
+    size: int,
+    media_id: str | None = None,
+    client_order: int = 0,
+) -> MediaAsset:
+    media = MediaAsset(project_id=project.id, id=media_id or new_id(), kind=kind, object_uri=uri, file_name=file_name, file_size=size, client_order=client_order)
     project.total_size_bytes += size
     project.source_version += 1
     media.source_version = project.source_version
@@ -370,6 +381,8 @@ def validate_upload_payload(payload: UploadCheckPayload) -> None:
         raise HTTPException(status_code=400, detail="file_size must be positive")
     if payload.chunk_size <= 0:
         raise HTTPException(status_code=400, detail="chunk_size must be positive")
+    if payload.client_order is not None and payload.client_order < 0:
+        raise HTTPException(status_code=400, detail="client_order must be non-negative")
     if payload.chunk_size > MAX_UPLOAD_CHUNK_SIZE:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="chunk_size exceeds 64MB limit")
     expected_chunks = (payload.file_size + payload.chunk_size - 1) // payload.chunk_size
@@ -381,6 +394,14 @@ def validate_upload_payload(payload: UploadCheckPayload) -> None:
         return
     if not payload.file_signature or len(payload.file_signature) > 512:
         raise HTTPException(status_code=400, detail="file_hash or file_signature is required")
+
+
+def normalized_client_order(value: int | None) -> int:
+    if value is None:
+        return 0
+    if value < 0:
+        raise HTTPException(status_code=400, detail="client_order must be non-negative")
+    return value
 
 
 def upload_session_key(payload: UploadCheckPayload) -> str:
@@ -525,10 +546,22 @@ def ensure_upload_session_schema() -> None:
     if "upload_sessions" not in inspector.get_table_names():
         return
     columns = {item["name"] for item in inspector.get_columns("upload_sessions")}
-    if "error_message" in columns:
+    with engine.begin() as connection:
+        if "error_message" not in columns:
+            connection.execute(text("ALTER TABLE upload_sessions ADD COLUMN error_message TEXT"))
+        if "client_order" not in columns:
+            connection.execute(text("ALTER TABLE upload_sessions ADD COLUMN client_order INTEGER DEFAULT 0"))
+
+
+def ensure_media_asset_order_schema() -> None:
+    inspector = inspect(engine)
+    if "media_assets" not in inspector.get_table_names():
+        return
+    columns = {item["name"] for item in inspector.get_columns("media_assets")}
+    if "client_order" in columns:
         return
     with engine.begin() as connection:
-        connection.execute(text("ALTER TABLE upload_sessions ADD COLUMN error_message TEXT"))
+        connection.execute(text("ALTER TABLE media_assets ADD COLUMN client_order INTEGER DEFAULT 0"))
 
 
 def ensure_algorithm_registry_schema() -> None:
@@ -564,6 +597,7 @@ def ensure_project_share_schema() -> None:
 def startup() -> None:
     initialize_database_schema()
     ensure_upload_session_schema()
+    ensure_media_asset_order_schema()
     ensure_algorithm_registry_schema()
     ensure_project_share_schema()
     storage.ensure_bucket()
@@ -688,6 +722,7 @@ def bulk_delete_projects(payload: ProjectBulkDeletePayload, user: User = Depends
 @app.post("/api/projects/{project_id}/media")
 async def upload_media(
     project_id: str,
+    client_order: int | None = Query(None),
     file: UploadFile = File(...),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -703,10 +738,19 @@ async def upload_media(
     if project.input_type == "video" and kind != "video":
         raise HTTPException(status_code=400, detail="视频项目只能上传视频")
 
+    requested_client_order = normalized_client_order(client_order)
     media_id = new_id()
     file_name = safe_filename(file.filename or "upload.bin")
     uri, size = await storage.save_upload(file, media_key(project, media_id, file_name, kind))
-    media = MediaAsset(project_id=project.id, id=media_id, kind=kind, object_uri=uri, file_name=file_name, file_size=size)
+    media = MediaAsset(
+        project_id=project.id,
+        id=media_id,
+        kind=kind,
+        object_uri=uri,
+        file_name=file_name,
+        file_size=size,
+        client_order=requested_client_order,
+    )
     project.total_size_bytes += size
     project.source_version += 1
     media.source_version = project.source_version
@@ -747,6 +791,7 @@ def check_upload(
     validate_media_kind(project, kind)
     session_key = upload_session_key(payload)
     has_strong_hash = upload_has_strong_hash(payload)
+    client_order = normalized_client_order(payload.client_order)
 
     if has_strong_hash:
         completed_session = db.scalar(
@@ -785,6 +830,7 @@ def check_upload(
             total_chunks=payload.total_chunks,
             content_type=payload.content_type,
             kind=kind,
+            client_order=client_order,
             status="uploading",
             error_message=None,
         )
@@ -793,6 +839,10 @@ def check_upload(
         db.refresh(session)
     elif session.file_size != payload.file_size or session.chunk_size != payload.chunk_size or session.total_chunks != payload.total_chunks:
         raise HTTPException(status_code=409, detail="Existing upload session metadata does not match")
+    elif session.client_order != client_order:
+        session.client_order = client_order
+        session.updated_at = utc_now()
+        db.commit()
     elif session.status == "failed":
         session.status = "uploading"
         session.error_message = None
@@ -924,7 +974,7 @@ def complete_upload(upload_id: str, user: User = Depends(get_current_user), db: 
                 raise HTTPException(status_code=400, detail=session.error_message)
             media_id = new_id()
             uri = storage.upload_path(merged_path, media_key(project, media_id, session.file_name, session.kind))
-            media = add_media_asset(db, project, session.file_name, session.kind, uri, session.file_size, media_id)
+            media = add_media_asset(db, project, session.file_name, session.kind, uri, session.file_size, media_id, session.client_order)
             session.status = "completed"
             session.object_uri = uri
             session.media_id = media.id

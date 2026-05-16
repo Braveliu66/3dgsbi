@@ -57,6 +57,7 @@ export interface MediaAsset {
   duration_seconds?: number | null;
   quality_flags?: Record<string, unknown>;
   source_version?: number;
+  client_order?: number;
   created_at: string;
 }
 

@@ -100,7 +100,7 @@ interface UploadCompleteResponse {
   media: MediaAsset;
 }
 
-async function uploadMediaInChunks(projectId: string, file: File, onProgress?: TransferProgressCallback): Promise<MediaAsset> {
+async function uploadMediaInChunks(projectId: string, file: File, clientOrder: number, onProgress?: TransferProgressCallback): Promise<MediaAsset> {
   const uploadBase = getUploadApiBase();
   const totalChunks = Math.ceil(file.size / UPLOAD_CHUNK_SIZE);
   emitTransferProgress(onProgress, file.name, "checking", 0, file.size);
@@ -113,6 +113,7 @@ async function uploadMediaInChunks(projectId: string, file: File, onProgress?: T
         file_size: file.size,
         chunk_size: UPLOAD_CHUNK_SIZE,
         total_chunks: totalChunks,
+        client_order: clientOrder,
         file_signature: fileSignature(file),
         content_type: file.type || null
       })
@@ -613,7 +614,7 @@ export const api = {
     request<{ deleted: number; project_ids: string[] }>("/api/projects/bulk-delete", { method: "POST", body: JSON.stringify({ project_ids: projectIds }) }),
   createProject: (payload: { name: string; input_type: Project["input_type"]; tags: string[] }) =>
     request<Project>("/api/projects", { method: "POST", body: JSON.stringify(payload) }),
-  uploadMedia: (projectId: string, file: File, onProgress?: TransferProgressCallback) => uploadMediaInChunks(projectId, file, onProgress),
+  uploadMedia: (projectId: string, file: File, clientOrder: number, onProgress?: TransferProgressCallback) => uploadMediaInChunks(projectId, file, clientOrder, onProgress),
   deleteMedia: (projectId: string, mediaId: string) =>
     request<{ deleted: boolean; source_version?: number }>(`/api/projects/${projectId}/media/${mediaId}`, { method: "DELETE" }),
   media: (projectId: string) => request<{ media: MediaAsset[] }>(`/api/projects/${projectId}/media`),

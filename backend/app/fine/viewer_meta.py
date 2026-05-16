@@ -126,6 +126,59 @@ def write_scaled_viewer_ply(
     }
 
 
+def write_far_noise_filtered_ply(input_ply: Path, output_ply: Path, *, profile: str) -> dict[str, Any]:
+    profile = profile if profile in FAR_NOISE_PROFILE_FACTORS else "mixed_balanced"
+    vertex_count, vertex_dtype, data_offset = read_binary_little_endian_ply_layout(input_ply)
+    payload = input_ply.read_bytes()
+    required_size = vertex_count * vertex_dtype.itemsize
+    body_end = data_offset + required_size
+    if len(payload) < body_end:
+        raise ValueError(f"PLY body is truncated: {input_ply}")
+
+    records = np.frombuffer(payload[data_offset:body_end], dtype=vertex_dtype, count=vertex_count).copy()
+    points = np.column_stack((records["x"], records["y"], records["z"])).astype(np.float32, copy=False)
+    finite = np.isfinite(points).all(axis=1)
+    finite_points = points[finite]
+    if finite_points.shape[0] <= 0:
+        raise ValueError(f"PLY contains no finite xyz vertices: {input_ply}")
+
+    bbox_min = np.percentile(finite_points, 1, axis=0).astype(np.float32)
+    bbox_max = np.percentile(finite_points, 99, axis=0).astype(np.float32)
+    center = ((bbox_min + bbox_max) * 0.5).astype(np.float32)
+    distances = np.linalg.norm(points - center, axis=1)
+    finite_distances = distances[finite & np.isfinite(distances)]
+    robust_radius = max(float(np.percentile(finite_distances, 98)), 0.05)
+    threshold = robust_radius * FAR_NOISE_PROFILE_FACTORS[profile]
+
+    keep = finite & np.isfinite(distances) & (distances <= threshold)
+    if "opacity" in (vertex_dtype.names or ()):
+        opacities = _ply_opacity_to_probability(records["opacity"].astype(np.float32, copy=False))
+        low_opacity = opacities < FAR_NOISE_LOW_OPACITY
+        keep &= ~((distances > robust_radius) & low_opacity)
+    if int(np.count_nonzero(keep)) <= 0:
+        keep = finite & np.isfinite(distances)
+
+    removed = int(vertex_count - np.count_nonzero(keep))
+    if removed <= 0:
+        shutil.copy2(input_ply, output_ply)
+    else:
+        output_ply.parent.mkdir(parents=True, exist_ok=True)
+        filtered_records = records[keep]
+        with output_ply.open("wb") as handle:
+            handle.write(_rewrite_vertex_count(payload[:data_offset], int(filtered_records.shape[0])))
+            handle.write(filtered_records.tobytes())
+            handle.write(payload[body_end:])
+
+    return {
+        "far_noise_filter_enabled": True,
+        "far_noise_profile": profile,
+        "far_noise_removed_points": removed,
+        "far_noise_kept_points": int(vertex_count - removed),
+        "far_noise_input_points": int(vertex_count),
+        "far_noise_distance_threshold": threshold,
+    }
+
+
 def read_ply_xyz_bounds(path: Path) -> dict[str, Any]:
     vertex_count, vertex_dtype, data_offset = read_binary_little_endian_ply_layout(path)
     records = np.memmap(path, dtype=vertex_dtype, mode="r", offset=data_offset, shape=(vertex_count,))
@@ -261,3 +314,31 @@ def camera_fov_y_degrees(camera: Any) -> float | None:
     if focal_y <= 0:
         return None
     return float(math.degrees(2.0 * math.atan(height / (2.0 * focal_y))))
+
+
+FAR_NOISE_PROFILE_FACTORS = {
+    "indoor_full": 1.25,
+    "mixed_balanced": 1.45,
+    "outdoor_fast_clean": 1.85,
+}
+FAR_NOISE_LOW_OPACITY = 0.03
+
+
+def _ply_opacity_to_probability(values: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-values))
+
+
+def _rewrite_vertex_count(header: bytes, vertex_count: int) -> bytes:
+    lines = header.decode("ascii", errors="strict").splitlines(keepends=True)
+    rewritten = []
+    replaced = False
+    for line in lines:
+        if line.startswith("element vertex "):
+            suffix = "\r\n" if line.endswith("\r\n") else "\n"
+            rewritten.append(f"element vertex {vertex_count}{suffix}")
+            replaced = True
+        else:
+            rewritten.append(line)
+    if not replaced:
+        raise ValueError("PLY vertex count missing")
+    return "".join(rewritten).encode("ascii")

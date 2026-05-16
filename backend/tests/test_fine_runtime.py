@@ -279,6 +279,46 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertEqual(summary.deblur_trigger_reason, "blur_detected:defocus")
         self.assertTrue(deblur_mlp_enabled_by_default(summary.mode, {}))
 
+    def test_low_texture_frame_is_not_marked_blurred(self) -> None:
+        BlurScore, _, summarize_blur_scores, *_ = import_fine_runtime()
+        scores = [
+            BlurScore(path=Path(f"sharp_{index}.jpg"), laplacian=180.0, gradient=55.0, fft_high_ratio=0.12, texture_density=0.10)
+            for index in range(9)
+        ]
+        scores.append(
+            BlurScore(
+                path=Path("white_wall.jpg"),
+                laplacian=10.0,
+                gradient=5.0,
+                fft_high_ratio=0.01,
+                texture_density=0.0,
+                exposure_bad_ratio=0.0,
+            )
+        )
+
+        summary = summarize_blur_scores(scores, reject_ratio=0.0)
+
+        self.assertEqual(summary.training_blur_frames, 0)
+        self.assertEqual(summary.mode, "sharp")
+        self.assertFalse(summary.per_frame_blur["white_wall.jpg"]["blurred"])
+        self.assertEqual(summary.per_frame_blur["white_wall.jpg"]["quality_label"], "sharp_low_texture")
+
+    def test_exposure_bad_frame_can_be_rejected_without_deblur(self) -> None:
+        BlurScore, _, summarize_blur_scores, *_ = import_fine_runtime()
+        scores = [
+            BlurScore(path=Path("overexposed.jpg"), laplacian=100.0, gradient=40.0, fft_high_ratio=0.08, exposure_bad_ratio=0.60),
+            BlurScore(path=Path("sharp_0.jpg"), laplacian=180.0, gradient=55.0, fft_high_ratio=0.12),
+            BlurScore(path=Path("sharp_1.jpg"), laplacian=190.0, gradient=55.0, fft_high_ratio=0.12),
+            BlurScore(path=Path("sharp_2.jpg"), laplacian=200.0, gradient=55.0, fft_high_ratio=0.12),
+        ]
+
+        summary = summarize_blur_scores(scores, reject_ratio=0.25, min_images=3)
+
+        self.assertEqual(summary.rejected_images, 1)
+        self.assertEqual(summary.training_blur_frames, 0)
+        self.assertEqual(summary.mode, "sharp")
+        self.assertEqual(summary.per_frame_blur["overexposed.jpg"]["quality_label"], "low_quality")
+
     def test_prepare_fine_images_writes_normalized_blur_registry(self) -> None:
         try:
             from PIL import Image
@@ -472,6 +512,83 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertFalse(deblur_mlp_enabled_by_default("sharp", {}))
         self.assertFalse(deblur_mlp_enabled_by_default("motion", {"fine_deblur_enabled": "false"}))
         self.assertTrue(deblur_mlp_enabled_by_default("sharp", {"fine_deblur_enabled": "true"}))
+
+    def test_resolve_fine_deblur_mode_follows_detected_label(self) -> None:
+        try:
+            from app.fine.runner import resolve_fine_deblur_mode
+        except Exception as exc:
+            raise unittest.SkipTest(f"fine runner import unavailable: {exc}") from exc
+
+        registry = {"000000.jpg": {"blurred": True, "rejected": False}}
+
+        self.assertEqual(resolve_fine_deblur_mode({}, "defocus", registry), ("defocus", "detected"))
+        self.assertEqual(resolve_fine_deblur_mode({}, "motion", registry), ("motion", "detected"))
+        self.assertEqual(resolve_fine_deblur_mode({}, "mixed", registry), ("mixed", "detected"))
+        self.assertEqual(resolve_fine_deblur_mode({"fine_deblur_mode": "mixed"}, "defocus", registry), ("mixed", "override"))
+
+    def test_resolve_fine_deblur_mode_uses_mixed_only_without_label(self) -> None:
+        try:
+            from app.fine.runner import resolve_fine_deblur_mode
+        except Exception as exc:
+            raise unittest.SkipTest(f"fine runner import unavailable: {exc}") from exc
+
+        blurred_registry = {"000000.jpg": {"blurred": True, "rejected": False}}
+        sharp_registry = {"000000.jpg": {"blurred": False, "rejected": False}}
+
+        self.assertEqual(resolve_fine_deblur_mode({}, "unknown", blurred_registry), ("mixed", "fallback_mixed"))
+        self.assertEqual(resolve_fine_deblur_mode({}, "sharp", sharp_registry), ("sharp", "disabled_sharp"))
+
+    def test_far_noise_filter_removes_indoor_outlier_more_than_outdoor(self) -> None:
+        try:
+            import numpy as np
+            from app.fine.viewer_meta import write_far_noise_filtered_ply, read_binary_little_endian_ply_layout
+        except Exception as exc:
+            raise unittest.SkipTest(f"PLY filtering dependencies unavailable: {exc}") from exc
+
+        dtype = np.dtype(
+            [
+                ("x", "<f4"),
+                ("y", "<f4"),
+                ("z", "<f4"),
+                ("opacity", "<f4"),
+                ("scale_0", "<f4"),
+                ("scale_1", "<f4"),
+                ("scale_2", "<f4"),
+            ]
+        )
+        points = np.zeros(101, dtype=dtype)
+        points["x"][:100] = np.linspace(0.0, 1.0, 100, dtype=np.float32)
+        points["x"][100] = 1.35
+        points["opacity"] = 10.0
+        header = (
+            "ply\n"
+            "format binary_little_endian 1.0\n"
+            "element vertex 101\n"
+            "property float x\n"
+            "property float y\n"
+            "property float z\n"
+            "property float opacity\n"
+            "property float scale_0\n"
+            "property float scale_1\n"
+            "property float scale_2\n"
+            "end_header\n"
+        ).encode("ascii")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "final.ply"
+            indoor = root / "indoor.ply"
+            outdoor = root / "outdoor.ply"
+            source.write_bytes(header + points.tobytes())
+
+            indoor_metrics = write_far_noise_filtered_ply(source, indoor, profile="indoor_full")
+            outdoor_metrics = write_far_noise_filtered_ply(source, outdoor, profile="outdoor_fast_clean")
+
+            indoor_count, _, _ = read_binary_little_endian_ply_layout(indoor)
+            outdoor_count, _, _ = read_binary_little_endian_ply_layout(outdoor)
+            self.assertLess(indoor_count, outdoor_count)
+            self.assertEqual(indoor_metrics["far_noise_removed_points"], 1)
+            self.assertEqual(outdoor_metrics["far_noise_removed_points"], 0)
 
     def test_worker_runtime_avoids_duplicate_cuda_stacks(self) -> None:
         worker_root = BACKEND_ROOT.parent / "worker"

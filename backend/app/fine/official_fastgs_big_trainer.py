@@ -20,6 +20,7 @@ from app.fine.fastgs_defaults import (
     FASTGS_DEBLUR_HIDDEN,
     FASTGS_DEBLUR_LAMBDA_P,
     FASTGS_DEBLUR_LAMBDA_S,
+    FASTGS_DEBLUR_LATE_DENSIFY_ENABLED,
     FASTGS_DEBLUR_MAX_CLAMP,
     FASTGS_DEBLUR_MAX_POSITION_DELTA,
     FASTGS_DEBLUR_MODE,
@@ -31,7 +32,9 @@ from app.fine.fastgs_defaults import (
     FASTGS_DEBLUR_XYZ_LR_SCALE,
     FASTGS_DENSE,
     FASTGS_DENSIFICATION_INTERVAL,
+    FASTGS_DENSIFY_FROM_ITER,
     FASTGS_DENSIFY_GRAD_THRESHOLD,
+    FASTGS_DENSIFY_UNTIL_ITER,
     FASTGS_FEATURE_LR,
     FASTGS_FINAL_PRUNE_MIN_OPACITY,
     FASTGS_FINAL_PRUNE_SCORE_THRESH,
@@ -40,12 +43,16 @@ from app.fine.fastgs_defaults import (
     FASTGS_HIGHFEATURE_LR,
     FASTGS_LAMBDA_DSSIM,
     FASTGS_LATE_PRUNE_ENABLED,
+    FASTGS_LATE_PRUNE_FROM_ITER,
+    FASTGS_LATE_PRUNE_INTERVAL,
     FASTGS_LATE_PRUNE_MIN_OPACITY,
     FASTGS_LATE_PRUNE_SCORE_THRESH,
+    FASTGS_LATE_PRUNE_UNTIL_ITER,
     FASTGS_LOSS_THRESH,
     FASTGS_LOWFEATURE_LR,
     FASTGS_MULT,
     FASTGS_OPACITY_LR,
+    FASTGS_OPACITY_RESET_INTERVAL,
     FASTGS_OPTIMIZER_TYPE,
     FASTGS_PERCENT_DENSE,
     FASTGS_POSITION_LR_DELAY_MULT,
@@ -131,6 +138,11 @@ def train_official_fastgs_big(
         options.get("fine_deblur_schedule_profile"),
         FASTGS_DEBLUR_SCHEDULE_PROFILE,
         {"quality", "balanced", "fast"},
+    )
+    deblur_late_densify_enabled = _choice_string(
+        options.get("fine_deblur_late_densify_enabled"),
+        FASTGS_DEBLUR_LATE_DENSIFY_ENABLED,
+        {"true", "false"},
     )
     deblur_warmup_iters = read_int(options.get("fine_deblur_warmup_iters"), schedule["deblur_warmup_iters"], minimum=0, maximum=max(0, iterations - 1))
     deblur_num_moments = read_int(options.get("fine_deblur_num_moments"), FASTGS_DEBLUR_NUM_MOMENTS, minimum=1, maximum=8)
@@ -218,6 +230,8 @@ def train_official_fastgs_big(
         deblur_auto_schedule,
         "--deblur_schedule_profile",
         deblur_schedule_profile,
+        "--deblur_late_densify_enabled",
+        deblur_late_densify_enabled,
         "--deblur_warmup_iters",
         str(deblur_warmup_iters),
         "--deblur_num_moments",
@@ -346,6 +360,7 @@ def train_official_fastgs_big(
         "deblur_blur_registry": deblur_blur_registry or None,
         "deblur_auto_schedule": deblur_auto_schedule,
         "deblur_schedule_profile": deblur_schedule_profile,
+        "deblur_late_densify_enabled": deblur_late_densify_enabled,
         "deblur_warmup_iters": deblur_warmup_iters,
         "deblur_num_moments": deblur_num_moments,
         "deblur_gtnet_lr": deblur_gtnet_lr,
@@ -386,17 +401,14 @@ def _fastgs_vendor_root() -> Path:
 
 def resolve_fastgs_schedule(iterations: int) -> dict[str, int]:
     iterations = max(1, int(iterations))
-    densify_from_iter = max(100, round(iterations * 0.0167))
-    densify_until_iter = round(iterations * 0.50)
-    opacity_reset_interval = max(500, round(iterations * 0.10))
     return {
         "densification_interval": FASTGS_DENSIFICATION_INTERVAL,
-        "densify_from_iter": densify_from_iter,
-        "densify_until_iter": densify_until_iter,
-        "opacity_reset_interval": opacity_reset_interval,
-        "late_prune_interval": opacity_reset_interval,
-        "late_prune_from_iter": densify_until_iter,
-        "late_prune_until_iter": iterations,
+        "densify_from_iter": min(FASTGS_DENSIFY_FROM_ITER, max(0, iterations - 1)),
+        "densify_until_iter": min(FASTGS_DENSIFY_UNTIL_ITER, iterations),
+        "opacity_reset_interval": FASTGS_OPACITY_RESET_INTERVAL,
+        "late_prune_interval": FASTGS_LATE_PRUNE_INTERVAL,
+        "late_prune_from_iter": min(FASTGS_LATE_PRUNE_FROM_ITER, iterations),
+        "late_prune_until_iter": min(FASTGS_LATE_PRUNE_UNTIL_ITER, iterations),
         "deblur_warmup_iters": min(max(0, FASTGS_DEBLUR_WARMUP_ITERS), max(0, iterations - 1)),
         "position_lr_max_steps": iterations,
     }

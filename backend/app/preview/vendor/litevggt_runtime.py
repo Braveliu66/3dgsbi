@@ -2148,7 +2148,7 @@ def run_litevggt_pointcloud(
         requested_mode = "auto"
     original_files = image_files(input_dir)
     original_frame_count = len(original_files)
-    if requested_mode == "auto" and (max_input_frames is not None or frame_stride is not None):
+    if max_input_frames is not None or frame_stride is not None:
         selected_count = len(
             resolve_litevggt_frame_selection(
                 original_files,

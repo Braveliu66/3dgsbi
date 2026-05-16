@@ -49,7 +49,11 @@ class Project(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
     owner: Mapped[User] = relationship(back_populates="projects")
-    media: Mapped[list[MediaAsset]] = relationship(back_populates="project", cascade="all, delete-orphan", order_by="MediaAsset.created_at")
+    media: Mapped[list[MediaAsset]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+        order_by=lambda: [MediaAsset.client_order, MediaAsset.created_at, MediaAsset.id],
+    )
     tasks: Mapped[list[Task]] = relationship(back_populates="project", cascade="all, delete-orphan", order_by="desc(Task.created_at)")
     artifacts: Mapped[list[Artifact]] = relationship(back_populates="project", cascade="all, delete-orphan", order_by="desc(Artifact.created_at)")
 
@@ -69,6 +73,7 @@ class MediaAsset(Base):
     duration_seconds: Mapped[float | None] = mapped_column(Integer, nullable=True)
     quality_flags: Mapped[dict] = mapped_column(JSON, default=dict)
     source_version: Mapped[int] = mapped_column(Integer, default=0)
+    client_order: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     project: Mapped[Project] = relationship(back_populates="media")
@@ -87,6 +92,7 @@ class UploadSession(Base):
     total_chunks: Mapped[int] = mapped_column(Integer)
     content_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
     kind: Mapped[str] = mapped_column(String(20))
+    client_order: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(30), default="uploading", index=True)
     object_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
     media_id: Mapped[str | None] = mapped_column(String(36), nullable=True)

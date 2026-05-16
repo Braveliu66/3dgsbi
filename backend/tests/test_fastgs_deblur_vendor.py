@@ -45,13 +45,16 @@ class FastGSDeblurSourceTests(unittest.TestCase):
         self.assertIn("metric_map = metric_map", source)
         self.assertIn("get_flag=get_flag", source)
 
-    def test_train_loop_allows_topology_updates_with_deblur_and_prunes_with_sharp_score(self) -> None:
+    def test_train_loop_routes_deblur_and_samples_sharp_score_views(self) -> None:
         source = (FASTGS_ROOT / "train.py").read_text(encoding="utf-8")
 
-        self.assertIn("can_update_topology = bool(iteration < opt.densify_until_iter)", source)
-        self.assertNotIn("can_update_topology = bool(iteration < opt.densify_until_iter and not deblur_active)", source)
+        self.assertIn("deblur_view_active = bool(deblur_loss_active and is_deblur_view", source)
         self.assertIn("render_fastgs_deblur", source)
+        self.assertIn("sample_sharp_score_cameras(scene, blur_registry, opt)", source)
+        self.assertIn("is_sharp_score_view", source)
         self.assertIn("compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, opt", source)
+        self.assertIn("sharp_score_skipped_steps", source)
+        self.assertIn("densify_deblur_extra_points", source)
         self.assertIn("fastgs_final_prune_min_opacity", source)
         self.assertIn("fastgs_final_prune_score_thresh", source)
         self.assertIn("score_thresh = opt.fastgs_final_prune_score_thresh", source)
@@ -59,6 +62,7 @@ class FastGSDeblurSourceTests(unittest.TestCase):
         self.assertIn("fastgs_late_prune_min_opacity", source)
         self.assertIn("score_thresh = opt.fastgs_late_prune_score_thresh", source)
         self.assertNotIn("and not deblur_state.enabled", source)
+        self.assertNotIn('opt.deblur_blurred_views_only = "false"', source)
         self.assertIn('"deblur_final_prune_uses_sharp_score": True', source)
 
     def test_fastgs_argparse_uses_central_defaults(self) -> None:

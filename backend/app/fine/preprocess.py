@@ -36,6 +36,9 @@ class BlurAnalysis:
     mean_fft_high_ratio: float
     rejected_images: int
     kept_images: int
+    mean_texture_density: float = 0.0
+    mean_exposure_bad_ratio: float = 0.0
+    mean_sharp_score: float = 0.0
     blurred_images: int = 0
     training_blur_frames: int = 0
     rejected_blur_frames: int = 0
@@ -48,6 +51,9 @@ class BlurAnalysis:
             "blur_mean_laplacian": round(self.mean_laplacian, 4),
             "blur_mean_gradient": round(self.mean_gradient, 4),
             "blur_mean_fft_high_ratio": round(self.mean_fft_high_ratio, 6),
+            "blur_mean_texture_density": round(self.mean_texture_density, 6),
+            "blur_mean_exposure_bad_ratio": round(self.mean_exposure_bad_ratio, 6),
+            "blur_mean_sharp_score": round(self.mean_sharp_score, 6),
             "blur_rejected_images": self.rejected_images,
             "blur_kept_images": self.kept_images,
             "blurred_images": self.blurred_images,
@@ -64,6 +70,13 @@ class BlurScore:
     laplacian: float
     gradient: float
     fft_high_ratio: float
+    tenengrad: float | None = None
+    edge_density: float = 0.0
+    orientation_coherence: float = 0.0
+    texture_density: float | None = None
+    exposure_bad_ratio: float = 0.0
+    sharp_score: float = 0.0
+    quality_label: str = "unknown"
 
     @property
     def quality(self) -> float:
@@ -133,6 +146,12 @@ def prepare_fine_images(
             "laplacian": round(item.laplacian, 6),
             "gradient": round(item.gradient, 6),
             "fft_high_ratio": round(item.fft_high_ratio, 8),
+            "edge_density": round(item.edge_density, 6),
+            "orientation_coherence": round(item.orientation_coherence, 6),
+            "texture_density": round(_texture_density(item), 6),
+            "exposure_bad_ratio": round(item.exposure_bad_ratio, 6),
+            "sharp_score": round(item.sharp_score, 6),
+            "quality_label": item.quality_label,
         }
         with Image.open(item.path) as original:
             image = ImageOps.exif_transpose(original).convert("RGB")
@@ -152,6 +171,12 @@ def prepare_fine_images(
             "laplacian": round(item.laplacian, 6),
             "gradient": round(item.gradient, 6),
             "fft_high_ratio": round(item.fft_high_ratio, 8),
+            "edge_density": round(item.edge_density, 6),
+            "orientation_coherence": round(item.orientation_coherence, 6),
+            "texture_density": round(_texture_density(item), 6),
+            "exposure_bad_ratio": round(item.exposure_bad_ratio, 6),
+            "sharp_score": round(item.sharp_score, 6),
+            "quality_label": item.quality_label,
         }
     kept_blur = [classifications[item.path] for item in kept if classifications[item.path].blurred]
     all_blur = [classification for classification in classifications.values() if classification.blurred]
@@ -162,6 +187,9 @@ def prepare_fine_images(
         mean_laplacian=analysis.mean_laplacian,
         mean_gradient=analysis.mean_gradient,
         mean_fft_high_ratio=analysis.mean_fft_high_ratio,
+        mean_texture_density=analysis.mean_texture_density,
+        mean_exposure_bad_ratio=analysis.mean_exposure_bad_ratio,
+        mean_sharp_score=analysis.mean_sharp_score,
         rejected_images=len(scores) - len(kept),
         kept_images=len(kept),
         blurred_images=analysis.blurred_images,
@@ -180,27 +208,101 @@ def score_blur_images(input_dir: Path) -> list[BlurScore]:
         raise FineFailure("IMAGE_INPUT_NOT_FOUND", f"no supported image files found in {input_dir}")
     scores = []
     for path in files:
-        with Image.open(path) as original:
-            image = ImageOps.exif_transpose(original).convert("L")
-            gray = np.asarray(image, dtype=np.uint8)
-        lap = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-        grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-        grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-        gradient = float(np.sqrt(grad_x * grad_x + grad_y * grad_y).max())
-        scores.append(BlurScore(path=path, laplacian=lap, gradient=gradient, fft_high_ratio=high_frequency_ratio(gray)))
+        features = blur_features(path)
+        scores.append(
+            BlurScore(
+                path=path,
+                laplacian=features["laplacian"],
+                gradient=features["tenengrad"],
+                fft_high_ratio=features["fft_high_ratio"],
+                tenengrad=features["tenengrad"],
+                edge_density=features["edge_density"],
+                orientation_coherence=features["orientation_coherence"],
+                texture_density=features["texture_density"],
+                exposure_bad_ratio=features["exposure_bad_ratio"],
+            )
+        )
     return scores
+
+
+def resize_for_blur(img: np.ndarray, max_side: int = 768) -> np.ndarray:
+    height, width = img.shape[:2]
+    scale = max_side / max(height, width)
+    if scale >= 1.0:
+        return img
+    resized = (max(1, int(width * scale)), max(1, int(height * scale)))
+    return cv2.resize(img, resized, interpolation=cv2.INTER_AREA)
+
+
+def blur_features(image_path: Path, max_side: int = 768) -> dict[str, float]:
+    if Image is None or ImageOps is None or cv2 is None or np is None:
+        raise FineFailure("IMAGE_ANALYSIS_UNAVAILABLE", "Pillow, OpenCV, and NumPy are required for fine image blur analysis")
+    with Image.open(image_path) as original:
+        rgb = np.asarray(ImageOps.exif_transpose(original).convert("RGB"), dtype=np.uint8)
+    img = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    img = resize_for_blur(img, max_side=max_side)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray_f = gray.astype(np.float32) / 255.0
+
+    lap = cv2.Laplacian(gray_f, cv2.CV_32F, ksize=3)
+    lap_var = float(lap.var())
+
+    grad_x = cv2.Sobel(gray_f, cv2.CV_32F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(gray_f, cv2.CV_32F, 0, 1, ksize=3)
+    grad_mag = np.sqrt(grad_x * grad_x + grad_y * grad_y)
+    tenengrad = float(np.mean(grad_mag * grad_mag))
+
+    edge_threshold = float(np.percentile(grad_mag, 85))
+    edge_density = float(np.mean(grad_mag > edge_threshold))
+
+    spectrum = np.fft.fftshift(np.fft.fft2(gray_f))
+    magnitude = np.log1p(np.abs(spectrum))
+    height, width = magnitude.shape
+    yy, xx = np.ogrid[:height, :width]
+    cy, cx = height // 2, width // 2
+    radius = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+    radius_norm = radius / (radius.max() + 1e-6)
+    total = float(magnitude.sum()) + 1e-6
+    fft_high_ratio = float(magnitude[radius_norm > 0.35].sum() / total)
+
+    strong = grad_mag > float(np.percentile(grad_mag, 90))
+    if int(np.count_nonzero(strong)) > 100:
+        angle = np.arctan2(grad_y, grad_x)
+        c = float(np.cos(2 * angle[strong]).mean())
+        s = float(np.sin(2 * angle[strong]).mean())
+        orientation_coherence = float(math.sqrt(c * c + s * s))
+    else:
+        orientation_coherence = 0.0
+
+    exposure_bad_ratio = float(np.mean(gray < 8) + np.mean(gray > 247))
+    texture_density = float(np.mean(grad_mag > 0.03))
+
+    return {
+        "laplacian": lap_var,
+        "tenengrad": tenengrad,
+        "fft_high_ratio": fft_high_ratio,
+        "edge_density": edge_density,
+        "orientation_coherence": orientation_coherence,
+        "texture_density": texture_density,
+        "exposure_bad_ratio": exposure_bad_ratio,
+    }
 
 
 def summarize_blur_scores(scores: list[BlurScore], *, reject_ratio: float, min_images: int = 0) -> BlurAnalysis:
     laps = [item.laplacian for item in scores]
     gradients = [item.gradient for item in scores]
     fft_ratios = [item.fft_high_ratio for item in scores]
+    texture_densities = [_texture_density(item) for item in scores]
+    exposure_bad_ratios = [item.exposure_bad_ratio for item in scores]
     mean_lap = sum(laps) / len(laps)
     mean_gradient = sum(gradients) / len(gradients)
     mean_fft = sum(fft_ratios) / len(fft_ratios)
+    mean_texture_density = sum(texture_densities) / len(texture_densities)
+    mean_exposure_bad_ratio = sum(exposure_bad_ratios) / len(exposure_bad_ratios)
     median_lap = _median(laps)
     median_fft = _median(fft_ratios)
     classifications = classify_blur_scores(scores, median_laplacian=median_lap, median_fft_high_ratio=median_fft)
+    sharp_scores = [item.sharp_score for item in scores]
     max_rejected = int(math.floor(len(scores) * max(0.0, min(0.45, reject_ratio))))
     max_rejected = min(max_rejected, max(0, len(scores) - max(0, min_images)))
     median_quality = _median([item.quality for item in scores])
@@ -227,6 +329,9 @@ def summarize_blur_scores(scores: list[BlurScore], *, reject_ratio: float, min_i
         mean_fft_high_ratio=mean_fft,
         rejected_images=rejected,
         kept_images=keep_count,
+        mean_texture_density=mean_texture_density,
+        mean_exposure_bad_ratio=mean_exposure_bad_ratio,
+        mean_sharp_score=sum(sharp_scores) / len(sharp_scores),
         blurred_images=sum(1 for item in classifications.values() if item.blurred),
         training_blur_frames=training_blur_frames,
         rejected_blur_frames=len(rejected_blur),
@@ -237,6 +342,8 @@ def summarize_blur_scores(scores: list[BlurScore], *, reject_ratio: float, min_i
                 "blurred": classifications[item.path].blurred,
                 "kind": classifications[item.path].kind,
                 "quality": round(item.quality, 6),
+                "sharp_score": round(item.sharp_score, 6),
+                "quality_label": item.quality_label,
             }
             for item in scores
         },
@@ -253,6 +360,7 @@ def classify_blur_scores(
         median_laplacian = _median([item.laplacian for item in scores])
     if median_fft_high_ratio is None:
         median_fft_high_ratio = _median([item.fft_high_ratio for item in scores])
+    apply_adaptive_sharp_scores(scores)
     return {
         item.path: classify_blur_score(
             item,
@@ -264,6 +372,13 @@ def classify_blur_scores(
 
 
 def classify_blur_score(score: BlurScore, *, median_laplacian: float, median_fft_high_ratio: float) -> BlurClassification:
+    if score.quality_label in {"sharp", "sharp_low_texture", "low_quality"}:
+        return BlurClassification(False, score.quality_label)
+
+    kind = _blur_kind(score, median_laplacian=median_laplacian, median_fft_high_ratio=median_fft_high_ratio)
+    if score.quality_label in {"soft", "blurred"}:
+        return BlurClassification(True, kind)
+
     defocus = score.laplacian < 80.0
     motion = score.gradient >= 40.0 and score.fft_high_ratio < 0.08
     relative_lap_blur = median_laplacian > 1e-6 and score.laplacian < median_laplacian * 0.55
@@ -287,10 +402,12 @@ def classify_blur_score(score: BlurScore, *, median_laplacian: float, median_fft
 
 
 def should_reject_for_training(score: BlurScore, classification: BlurClassification, *, median_quality: float) -> bool:
+    if score.exposure_bad_ratio >= 0.45:
+        return True
     if not classification.blurred:
         return False
     absolute_extreme = score.laplacian < 20.0 and score.gradient < 25.0 and score.fft_high_ratio < 0.03
-    relative_extreme = median_quality > 1e-6 and score.quality < median_quality * 0.30
+    relative_extreme = score.sharp_score < -1.20 and median_quality > 1e-6 and score.quality < median_quality * 0.30
     return absolute_extreme or relative_extreme
 
 
@@ -309,6 +426,63 @@ def _median(values: list[float]) -> float:
     if len(ordered) % 2:
         return float(ordered[midpoint])
     return float((ordered[midpoint - 1] + ordered[midpoint]) / 2.0)
+
+
+def apply_adaptive_sharp_scores(scores: list[BlurScore]) -> None:
+    z_laplacian = robust_z([item.laplacian for item in scores])
+    z_tenengrad = robust_z([item.tenengrad if item.tenengrad is not None else item.gradient for item in scores])
+    z_fft = robust_z([item.fft_high_ratio for item in scores])
+    z_texture = robust_z([_texture_density(item) for item in scores])
+    for index, item in enumerate(scores):
+        item.sharp_score = (
+            0.35 * z_laplacian[index]
+            + 0.30 * z_tenengrad[index]
+            + 0.20 * z_fft[index]
+            + 0.15 * z_texture[index]
+        )
+        if item.exposure_bad_ratio >= 0.45:
+            item.quality_label = "low_quality"
+        elif _texture_density(item) < 0.02 and item.exposure_bad_ratio < 0.20 and item.sharp_score < -0.35:
+            item.quality_label = "sharp_low_texture"
+        elif item.sharp_score >= -0.35:
+            item.quality_label = "sharp"
+        elif item.sharp_score >= -1.20:
+            item.quality_label = "soft"
+        else:
+            item.quality_label = "blurred"
+
+
+def robust_z(values: list[float]) -> list[float]:
+    median = _median(values)
+    mad = _median([abs(value - median) for value in values]) + 1e-6
+    scale = 1.4826 * mad
+    return [(value - median) / scale for value in values]
+
+
+def _texture_density(score: BlurScore) -> float:
+    if score.texture_density is not None:
+        return score.texture_density
+    if score.edge_density > 0.0:
+        return score.edge_density
+    return 1.0
+
+
+def _blur_kind(score: BlurScore, *, median_laplacian: float, median_fft_high_ratio: float) -> str:
+    defocus = score.laplacian < 80.0
+    motion = score.gradient >= 40.0 and score.fft_high_ratio < 0.08
+    if score.orientation_coherence >= 0.65 and _texture_density(score) >= 0.02:
+        motion = True
+    moderate_defocus = (
+        median_laplacian > 1e-6
+        and median_fft_high_ratio > 1e-6
+        and score.laplacian < max(180.0, median_laplacian * 0.65)
+        and score.fft_high_ratio < median_fft_high_ratio * 0.90
+    )
+    if motion and (defocus or moderate_defocus):
+        return "mixed"
+    if motion:
+        return "motion"
+    return "defocus"
 
 
 def high_frequency_ratio(gray: np.ndarray) -> float:

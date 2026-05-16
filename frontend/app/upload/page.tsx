@@ -14,7 +14,7 @@ import { TaskProgress } from "@/components/TaskProgress";
 const MIN_INPUT_FRAMES = 1;
 const MIN_FINE_INPUT_FRAMES = 3;
 const MAX_INPUT_FRAMES = 800;
-const UPLOAD_FILE_CONCURRENCY = 3;
+const UPLOAD_FILE_CONCURRENCY = 6;
 type PreviewSceneProfile = "mixed_balanced" | "indoor_full" | "outdoor_fast_clean";
 const PREVIEW_SCENE_PROFILE_OPTIONS: Array<{ value: PreviewSceneProfile; label: string }> = [
   { value: "mixed_balanced", label: "均衡" },
@@ -103,6 +103,8 @@ export default function UploadPage() {
     const fileList = Array.from(files);
     try {
       const active = await ensureProject();
+      const existingMedia = active.id === project?.id ? media : active.media ?? [];
+      const uploadBaseOrder = Math.max(-1, ...existingMedia.map((item, index) => item.client_order ?? index)) + 1;
       const uploaded: MediaAsset[] = new Array(fileList.length);
       const progressByIndex = new Map<number, TransferProgress>();
       const reportProgress = (index: number, file: File, progress: TransferProgress) => {
@@ -123,7 +125,7 @@ export default function UploadPage() {
         });
       };
       await runUploadPool(fileList, UPLOAD_FILE_CONCURRENCY, async (file, index) => {
-        const asset = await api.uploadMedia(active.id, file, (progress) => {
+        const asset = await api.uploadMedia(active.id, file, uploadBaseOrder + index, (progress) => {
           reportProgress(index, file, progress);
         });
         uploaded[index] = asset;

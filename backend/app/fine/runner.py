@@ -23,7 +23,7 @@ from app.fine.option_utils import read_float, read_int
 from app.fine.official_fastgs_big_trainer import train_official_fastgs_big
 from app.fine.preprocess import build_pycolmap_scene, prepare_fine_images
 from app.fine.types import FineContext, FineFailure, FineResult
-from app.fine.viewer_meta import read_ply_xyz_bounds, write_final_viewer_meta_json, write_scaled_viewer_ply
+from app.fine.viewer_meta import read_ply_xyz_bounds, write_far_noise_filtered_ply, write_final_viewer_meta_json, write_scaled_viewer_ply
 from app.preview.io.spz import convert_ply_to_spz
 from app.preview.types import PreviewFailure
 from app.preview.utils import image_files
@@ -135,13 +135,16 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         json.dumps({"frames": blur.per_frame_blur}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    resolved_deblur_mode, deblur_mode_source = resolve_fine_deblur_mode(ctx.options, blur.mode, blur.per_frame_blur)
     train_options = {
         **ctx.options,
         "_fine_scene_backend": scene_result.backend,
         "fine_scene_profile": fine_scene_profile,
         "fine_image_max_side": image_max_side,
-        "fine_deblur_mode": ctx.options.get("fine_deblur_mode") or "mixed",
+        "fine_deblur_mode": resolved_deblur_mode,
+        "fine_deblur_mode_source": deblur_mode_source,
         "fine_deblur_blur_registry": str(blur_registry_path),
+        "fine_deblur_blurred_views_only": ctx.options.get("fine_deblur_blurred_views_only") or "true",
         "fine_train_resolution": ctx.options.get("fine_train_resolution") or min(image_max_side, FASTGS_RESOLUTION),
     }
     print(
@@ -168,11 +171,15 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
     if not ply_path.exists() or ply_path.stat().st_size <= 0:
         raise FineFailure("ARTIFACT_NOT_FOUND", f"Fine runner did not create non-empty PLY: {ply_path}")
 
+    filtered_ply = ctx.work_dir / "final_filtered.ply"
+    far_noise_metrics = write_far_noise_filtered_ply(ply_path, filtered_ply, profile=fine_scene_profile)
+
     ctx.final_ply.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(ply_path, ctx.final_ply)
+    shutil.copy2(filtered_ply, ctx.final_ply)
     print(
         "[fine-runner] copied final ply "
-        f"source={ply_path} target={ctx.final_ply} bytes={ctx.final_ply.stat().st_size}",
+        f"source={filtered_ply} target={ctx.final_ply} bytes={ctx.final_ply.stat().st_size} "
+        f"far_noise_metrics={_format_for_log(far_noise_metrics)}",
         flush=True,
     )
 
@@ -243,6 +250,7 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         "fine_scene_profile": fine_scene_profile,
         "fine_image_max_side": image_max_side,
         "iterations": iterations,
+        "deblur_mode_source": deblur_mode_source,
         "splat_count": splat_count,
         "final_ply_bytes": ctx.final_ply.stat().st_size,
         "final_viewer_ply_bytes": viewer_ply.stat().st_size,
@@ -250,6 +258,7 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         "viewer_meta_json_bytes": ctx.viewer_meta_json.stat().st_size if ctx.viewer_meta_json and ctx.viewer_meta_json.exists() else None,
         "lod_rad_bytes": lod_rad.stat().st_size if lod_rad else None,
         "warnings": warnings,
+        **far_noise_metrics,
         **viewer_scale_metrics,
         **blur.metrics(),
         **scene_result.metrics,
@@ -364,6 +373,27 @@ def deblur_mlp_enabled_by_default(blur_mode: str, options: dict[str, Any]) -> bo
     if value in {"1", "true", "yes", "on"}:
         return True
     return blur_mode in {"motion", "defocus", "mixed"}
+
+
+def resolve_fine_deblur_mode(
+    options: dict[str, Any],
+    detected_mode: str,
+    per_frame_blur: dict[str, dict[str, Any]],
+) -> tuple[str, str]:
+    explicit = str(options.get("fine_deblur_mode") or "").strip().lower()
+    if explicit in {"sharp", "defocus", "motion", "mixed"}:
+        return explicit, "override"
+    normalized = str(detected_mode or "").strip().lower()
+    if normalized in {"defocus", "motion", "mixed"}:
+        return normalized, "detected"
+    has_blurred_training_frame = any(
+        bool(item.get("blurred")) and not bool(item.get("rejected"))
+        for item in per_frame_blur.values()
+        if isinstance(item, dict)
+    )
+    if has_blurred_training_frame:
+        return "mixed", "fallback_mixed"
+    return "sharp", "disabled_sharp"
 
 
 def first_clear_training_images(per_frame_blur: dict[str, dict[str, Any]]) -> list[str]:

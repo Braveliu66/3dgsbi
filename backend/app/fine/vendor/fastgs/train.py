@@ -65,19 +65,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if blurred_views_only and not blur_registry:
             print(
                 "[Deblur][WARN] deblur is enabled but no blur registry was loaded. "
-                "Forcing deblur_blurred_views_only=false so all training views use deblur."
+                "Sharp/Deblur view routing will not force all training views through deblur."
             )
-            opt.deblur_blurred_views_only = "false"
-    deblur_schedule = build_deblur_topology_schedule(opt, deblur_state)
+    deblur_schedule = build_deblur_training_schedule(opt, deblur_state)
     print(
         "[DeblurSchedule] "
-        f"enabled={deblur_schedule.get('enabled')} "
-        f"profile={deblur_schedule.get('profile', 'manual')} "
-        f"deblur=({deblur_schedule['deblur_start']},{deblur_schedule['deblur_end']}) "
+        f"enabled={deblur_schedule['enabled']} "
+        f"deblur_loss=({deblur_schedule['deblur_loss_from']},{deblur_schedule['deblur_loss_until']}) "
         f"densifyA=({deblur_schedule['densify_a_from']},{deblur_schedule['densify_a_until']}) "
         f"densifyB=({deblur_schedule['densify_b_from']},{deblur_schedule['densify_b_until']}) "
-        f"late_prune=({deblur_schedule['late_prune_from']},{deblur_schedule['late_prune_until']}) "
-        f"final_prune_from={deblur_schedule['final_prune_from']}"
+        f"opacity_reset_until={deblur_schedule['opacity_reset_until']} "
+        f"late_prune=({deblur_schedule['late_prune_from']},{deblur_schedule['late_prune_until']})"
     )
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
@@ -98,6 +96,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     deblur_photometric_views = 0
     deblur_clear_train_cameras = 0
     deblur_final_pruned = False
+    deblur_extra_points_added = 0
+    deblur_extra_densify_steps = 0
+    sharp_score_sample_count = 0
+    sharp_score_skipped_steps = 0
     last_deblur_reg = None
     log_interval = 200
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress", miniters=log_interval)
@@ -118,8 +120,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         iter_start.record()
         
         base_xyz_lr = gaussians.update_learning_rate(iteration)
-        deblur_active = schedule_deblur_active(iteration, deblur_schedule, deblur_state)
-        if deblur_active and base_xyz_lr is not None:
+        deblur_loss_active = schedule_deblur_loss_active(iteration, deblur_schedule, deblur_state)
+        if deblur_loss_active and base_xyz_lr is not None:
             set_xyz_learning_rate(gaussians, base_xyz_lr * float(opt.deblur_xyz_lr_scale))
 
         # Every 1000 its we increase the levels of SH up to a maximum degree
@@ -138,12 +140,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if (iteration - 1) == debug_from:
             pipe.debug = True
 
-        deblur_view_active = bool(deblur_active and is_deblur_view(viewpoint_cam, blur_registry, opt))
+        deblur_view_active = bool(deblur_loss_active and is_deblur_view(viewpoint_cam, blur_registry, opt))
         if deblur_view_active:
             render_pkg = render_fastgs_deblur(viewpoint_cam, gaussians, pipe, bg, opt.mult, deblur_state)
         else:
             render_pkg = render_fastgs(viewpoint_cam, gaussians, pipe, bg, opt.mult)
-            if deblur_active:
+            if deblur_loss_active:
                 deblur_clear_train_cameras += 1
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
@@ -166,10 +168,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             if iteration % log_interval == 0 or iteration == opt.iterations:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Deblur": str(deblur_active)})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "DeblurLoss": str(deblur_loss_active)})
                 progress_bar.update(iteration - progress_bar_last_iter)
                 progress_bar_last_iter = iteration
-                print(f"[ITER {iteration}] loss={ema_loss_for_log:.7f} deblur_active={deblur_active} deblur_view={deblur_view_active}")
+                print(
+                    f"[ITER {iteration}] loss={ema_loss_for_log:.7f} "
+                    f"deblur_loss_active={deblur_loss_active} deblur_view={deblur_view_active}"
+                )
             if iteration == opt.iterations:
                 progress_bar.close()
 
@@ -177,14 +182,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # Log and save
             # training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_time, testing_iterations, scene, render_fastgs, (pipe, background, opt.mult))
             if (iteration in saving_iterations):
-                if (
-                    iteration == opt.iterations
-                    and not deblur_final_pruned
-                    and schedule_final_prune_active(iteration, deblur_schedule)
-                ):
-                    my_viewpoint_stack = scene.getTrainCameras().copy()
-                    camlist = sampling_cameras(my_viewpoint_stack, opt.fastgs_sample_cameras)
-                    _, pruning_score = compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, opt)
+                if iteration == opt.iterations and not deblur_final_pruned:
+                    camlist = sample_sharp_score_cameras(scene, blur_registry, opt)
+                    pruning_score = None
+                    if camlist:
+                        sharp_score_sample_count += len(camlist)
+                        _, pruning_score = compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, opt)
+                    else:
+                        sharp_score_skipped_steps += 1
                     gaussians.final_prune_fastgs(
                         min_opacity = opt.fastgs_final_prune_min_opacity,
                         pruning_score = pruning_score,
@@ -198,28 +203,45 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             optim_start.record()
             
             # Densification
-            can_update_topology = schedule_topology_active(iteration, deblur_schedule)
+            can_update_topology = schedule_densify_active(iteration, deblur_schedule)
             if can_update_topology:
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
-                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                deblur_extra_densified = False
+                if deblur_view_active and iteration > opt.deblur_warmup_iters and iteration % opt.densification_interval == 0:
+                    added = gaussians.densify_deblur_extra_points(extent=scene.cameras_extent, radii=radii, args=opt)
+                    if added:
+                        deblur_extra_points_added += int(added)
+                        deblur_extra_densify_steps += 1
+                        deblur_extra_densified = True
+
+                if not deblur_extra_densified and iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    my_viewpoint_stack = scene.getTrainCameras().copy()
-                    camlist = sampling_cameras(my_viewpoint_stack, opt.fastgs_sample_cameras)
+                    camlist = sample_sharp_score_cameras(scene, blur_registry, opt)
 
                     # The multiview consistent densification of fastgs
-                    importance_score, pruning_score = compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, opt, DENSIFY=True)                    
-                    gaussians.densify_and_prune_fastgs(max_screen_size = size_threshold, 
-                                                min_opacity = 0.005, 
-                                                extent = scene.cameras_extent, 
-                                                radii=radii,
-                                                args = opt,
-                                                importance_score = importance_score,
-                                                pruning_score = pruning_score)
+                    if camlist:
+                        sharp_score_sample_count += len(camlist)
+                        importance_score, pruning_score = compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, opt, DENSIFY=True)                    
+                        gaussians.densify_and_prune_fastgs(max_screen_size = size_threshold, 
+                                                    min_opacity = 0.005, 
+                                                    extent = scene.cameras_extent, 
+                                                    radii=radii,
+                                                    args = opt,
+                                                    importance_score = importance_score,
+                                                    pruning_score = pruning_score)
+                    else:
+                        sharp_score_skipped_steps += 1
 
-                if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                if (
+                    schedule_opacity_reset_active(iteration, deblur_schedule)
+                    and (
+                        iteration % opt.opacity_reset_interval == 0
+                        or (dataset.white_background and iteration == opt.densify_from_iter)
+                    )
+                ):
                     gaussians.reset_opacity()
 
             # The multiview consistent pruning of fastgs.
@@ -233,18 +255,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 late_prune_enabled
                 and schedule_late_prune_active(iteration, deblur_schedule)
                 and iteration % late_prune_interval == 0
-                and iteration > late_prune_from_iter
+                and iteration >= late_prune_from_iter
                 and iteration < late_prune_until_iter
             ):
-                my_viewpoint_stack = scene.getTrainCameras().copy()
-                camlist = sampling_cameras(my_viewpoint_stack, opt.fastgs_sample_cameras)
+                camlist = sample_sharp_score_cameras(scene, blur_registry, opt)
 
-                _, pruning_score = compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, opt)                    
-                gaussians.final_prune_fastgs(
-                    min_opacity = opt.fastgs_late_prune_min_opacity,
-                    pruning_score = pruning_score,
-                    score_thresh = opt.fastgs_late_prune_score_thresh,
-                )
+                if camlist:
+                    sharp_score_sample_count += len(camlist)
+                    _, pruning_score = compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, opt)                    
+                    gaussians.final_prune_fastgs(
+                        min_opacity = opt.fastgs_late_prune_min_opacity,
+                        pruning_score = pruning_score,
+                        score_thresh = opt.fastgs_late_prune_score_thresh,
+                    )
+                else:
+                    sharp_score_skipped_steps += 1
         
             # Optimization step
             if iteration < opt.iterations:
@@ -277,6 +302,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         deblur_photometric_views,
         deblur_clear_train_cameras,
         deblur_final_pruned,
+        deblur_extra_points_added,
+        deblur_extra_densify_steps,
+        sharp_score_sample_count,
+        sharp_score_skipped_steps,
         last_deblur_reg,
         opt,
         deblur_schedule,
@@ -312,6 +341,26 @@ def is_deblur_view(viewpoint_camera, blur_registry, opt):
     return bool(entry.get("blurred")) and not bool(entry.get("rejected"))
 
 
+def sample_sharp_score_cameras(scene, blur_registry, opt):
+    cameras = [
+        camera
+        for camera in scene.getTrainCameras().copy()
+        if is_sharp_score_view(camera, blur_registry)
+    ]
+    if not cameras:
+        return []
+    return sampling_cameras(cameras, opt.fastgs_sample_cameras)
+
+
+def is_sharp_score_view(viewpoint_camera, blur_registry):
+    if not blur_registry:
+        return True
+    entry = blur_registry_entry(viewpoint_camera, blur_registry)
+    if not entry:
+        return True
+    return not bool(entry.get("blurred")) and not bool(entry.get("rejected"))
+
+
 def blur_registry_entry(viewpoint_camera, blur_registry):
     image_name = str(getattr(viewpoint_camera, "image_name", ""))
     candidates = [
@@ -335,13 +384,17 @@ def set_xyz_learning_rate(gaussians, lr):
     return None
 
 
-def option_bool(value, fallback):
-    normalized = str(value if value not in {None, ""} else fallback).strip().lower()
+def option_bool(value, default=False):
+    if value in {None, ""}:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
     if normalized in {"1", "true", "yes", "on"}:
         return True
     if normalized in {"0", "false", "no", "off"}:
         return False
-    return bool(fallback)
+    return bool(default)
 
 
 def clamp_int(value, minimum, maximum):
@@ -352,97 +405,86 @@ def clamp_int(value, minimum, maximum):
     return max(minimum, min(int(value), maximum))
 
 
-def build_deblur_topology_schedule(opt, deblur_state):
+def build_deblur_training_schedule(opt, deblur_state):
     total = max(1, int(opt.iterations))
     enabled = bool(deblur_state.enabled)
     auto = option_bool(getattr(opt, "deblur_auto_schedule", "true"), True)
+    warmup = int(getattr(opt, "deblur_warmup_iters", 7000))
 
     if not enabled or not auto:
         return {
             "enabled": False,
-            "deblur_start": int(getattr(opt, "deblur_warmup_iters", 0)),
-            "deblur_end": total,
-            "densify_a_from": int(getattr(opt, "densify_from_iter", 0)),
+            "profile": "manual",
+            "deblur_loss_from": warmup,
+            "deblur_loss_until": total,
+            "densify_a_from": 0,
             "densify_a_until": int(getattr(opt, "densify_until_iter", total)),
             "densify_b_from": -1,
             "densify_b_until": -1,
+            "opacity_reset_until": total + 1,
             "late_prune_from": int(getattr(opt, "fastgs_late_prune_from_iter", total + 1)),
             "late_prune_until": int(getattr(opt, "fastgs_late_prune_until_iter", total + 1)),
-            "final_prune_from": total,
         }
 
-    profile = str(getattr(opt, "deblur_schedule_profile", "quality")).strip().lower()
-    if profile == "fast":
-        deblur_start_ratio = 0.06
-        deblur_end_ratio = 0.55
-        densify_b_end_ratio = 0.78
-        final_prune_ratio = 0.96
-    elif profile == "balanced":
-        deblur_start_ratio = 0.08
-        deblur_end_ratio = 0.60
-        densify_b_end_ratio = 0.82
-        final_prune_ratio = 0.96
+    if enabled and auto:
+        warmup = clamp_int(warmup, 1000, max(1, total - 1))
+
+    deblur_loss_from = warmup
+    deblur_loss_until = total
+    densify_a_from = int(getattr(opt, "densify_from_iter", 500))
+    densify_a_until = warmup if enabled and auto else int(getattr(opt, "densify_until_iter", total))
+
+    enable_late_densify = option_bool(getattr(opt, "deblur_late_densify_enabled", "false"), False)
+    if enabled and auto and enable_late_densify:
+        densify_b_from = clamp_int(round(total * 0.60), warmup + 1, total)
+        densify_b_until = clamp_int(round(total * 0.80), densify_b_from + 1, total)
     else:
-        profile = "quality"
-        deblur_start_ratio = 0.08
-        deblur_end_ratio = 0.65
-        densify_b_end_ratio = 0.85
-        final_prune_ratio = 0.97
+        densify_b_from = -1
+        densify_b_until = -1
 
-    deblur_start = clamp_int(round(total * deblur_start_ratio), 200, max(0, total - 1))
-    deblur_end = clamp_int(round(total * deblur_end_ratio), deblur_start + 1, total)
-    densify_b_from = deblur_end + 1
-    densify_b_until = clamp_int(round(total * densify_b_end_ratio), densify_b_from, total)
-    final_prune_from = clamp_int(round(total * final_prune_ratio), densify_b_until, total)
+    late_prune_from = clamp_int(round(total * 0.90), warmup + 1, total)
+    late_prune_until = total
+    opacity_reset_until = warmup if enabled and auto else total
 
-    opt.deblur_warmup_iters = deblur_start
-    opt.densify_from_iter = int(getattr(opt, "densify_from_iter", 250))
-    opt.densify_until_iter = densify_b_until
-    opt.fastgs_late_prune_from_iter = final_prune_from
+    opt.deblur_warmup_iters = warmup
+    opt.densify_from_iter = densify_a_from
+    opt.densify_until_iter = densify_b_until if densify_b_until > 0 else densify_a_until
+    opt.fastgs_late_prune_from_iter = late_prune_from
     opt.fastgs_late_prune_until_iter = total
 
     return {
-        "enabled": True,
-        "profile": profile,
-        "deblur_start": deblur_start,
-        "deblur_end": deblur_end,
-        "densify_a_from": int(getattr(opt, "densify_from_iter", 250)),
-        "densify_a_until": deblur_start,
+        "enabled": enabled and auto,
+        "profile": str(getattr(opt, "deblur_schedule_profile", "quality")).strip().lower(),
+        "deblur_loss_from": deblur_loss_from,
+        "deblur_loss_until": deblur_loss_until,
+        "densify_a_from": densify_a_from,
+        "densify_a_until": densify_a_until,
         "densify_b_from": densify_b_from,
         "densify_b_until": densify_b_until,
-        "late_prune_from": final_prune_from,
-        "late_prune_until": total,
-        "final_prune_from": final_prune_from,
+        "opacity_reset_until": opacity_reset_until,
+        "late_prune_from": late_prune_from,
+        "late_prune_until": late_prune_until,
     }
 
 
-def schedule_deblur_active(iteration, schedule, deblur_state):
+def schedule_deblur_loss_active(iteration, schedule, deblur_state):
     if not deblur_state.enabled:
         return False
-    if not schedule.get("enabled"):
-        return iteration > int(schedule["deblur_start"])
-    return int(schedule["deblur_start"]) < iteration <= int(schedule["deblur_end"])
+    return int(schedule["deblur_loss_from"]) < iteration <= int(schedule["deblur_loss_until"])
 
 
-def schedule_topology_active(iteration, schedule):
-    if not schedule.get("enabled"):
-        return iteration < int(schedule["densify_a_until"])
-
-    in_first_densify = int(schedule["densify_a_from"]) < iteration < int(schedule["densify_a_until"])
+def schedule_densify_active(iteration, schedule):
+    in_first_densify = int(schedule["densify_a_from"]) <= iteration < int(schedule["densify_a_until"])
     in_second_densify = int(schedule["densify_b_from"]) <= iteration < int(schedule["densify_b_until"])
     return bool(in_first_densify or in_second_densify)
 
 
+def schedule_opacity_reset_active(iteration, schedule):
+    return iteration < int(schedule["opacity_reset_until"])
+
+
 def schedule_late_prune_active(iteration, schedule):
-    if not schedule.get("enabled"):
-        return True
     return int(schedule["late_prune_from"]) <= iteration < int(schedule["late_prune_until"])
-
-
-def schedule_final_prune_active(iteration, schedule):
-    if not schedule.get("enabled"):
-        return True
-    return iteration >= int(schedule["final_prune_from"])
 
 
 def write_deblur_metrics(
@@ -453,6 +495,10 @@ def write_deblur_metrics(
     deblur_photometric_views,
     deblur_clear_train_cameras,
     deblur_final_pruned,
+    deblur_extra_points_added,
+    deblur_extra_densify_steps,
+    sharp_score_sample_count,
+    sharp_score_skipped_steps,
     last_deblur_reg,
     opt,
     deblur_schedule=None,
@@ -472,6 +518,10 @@ def write_deblur_metrics(
         "deblur_clear_train_cameras": clear_train_cameras,
         "deblur_runtime_clear_train_cameras": deblur_clear_train_cameras,
         "deblur_photometric_views": deblur_photometric_views,
+        "deblur_extra_points_added": deblur_extra_points_added,
+        "deblur_extra_densify_steps": deblur_extra_densify_steps,
+        "sharp_score_sample_count": sharp_score_sample_count,
+        "sharp_score_skipped_steps": sharp_score_skipped_steps,
         "deblur_final_prune_uses_sharp_score": True,
         "deblur_final_pruned": deblur_final_pruned,
         "deblur_last_transform_regularization": last_deblur_reg,

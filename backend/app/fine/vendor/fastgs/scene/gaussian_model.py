@@ -557,6 +557,26 @@ class GaussianModel:
 
         torch.cuda.empty_cache()
 
+    def densify_deblur_extra_points(self, extent, radii, args):
+        before = int(self.get_xyz.shape[0])
+        grad_vars = self.xyz_gradient_accum / self.denom
+        grad_vars[grad_vars.isnan()] = 0.0
+        grads_abs = self.xyz_gradient_accum_abs / self.denom
+        grads_abs[grads_abs.isnan()] = 0.0
+        self.tmp_radii = radii
+
+        metric_mask = torch.ones((before), dtype=bool, device="cuda")
+        clone_qualifiers = torch.logical_or(
+            torch.norm(grad_vars, dim=-1) >= args.grad_thresh,
+            torch.norm(grads_abs, dim=-1) >= args.grad_abs_thresh,
+        )
+
+        self.densify_and_clone_fastgs(metric_mask, clone_qualifiers)
+        added = int(self.get_xyz.shape[0]) - before
+        self.tmp_radii = None
+        torch.cuda.empty_cache()
+        return max(0, added)
+
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.xyz_gradient_accum_abs[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter, 2:], dim=-1, keepdim=True)
@@ -567,6 +587,9 @@ class GaussianModel:
         In the final stage we remove Gaussians that have low opacity or that are flagged by
         our multi-view reconstruction consistency metric (provided as `pruning_score`)."""
         prune_mask = (self.get_opacity < min_opacity).squeeze() 
-        scores_mask = pruning_score > score_thresh
+        if pruning_score is None:
+            scores_mask = torch.zeros_like(prune_mask, dtype=bool, device="cuda")
+        else:
+            scores_mask = pruning_score > score_thresh
         final_prune = torch.logical_or(prune_mask, scores_mask)
         self.prune_points(final_prune)
