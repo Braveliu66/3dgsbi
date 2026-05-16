@@ -244,6 +244,8 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(payload["status"], "queued")
             self.assertEqual(payload["options"]["fine_pipeline"], "official_fastgs_big")
             self.assertEqual(payload["options"]["fine_scene_profile"], "mixed_balanced")
+            self.assertEqual(payload["options"]["scene_type"], "auto")
+            self.assertEqual(payload["options"]["fine_scene_type"], "auto")
             self.assertEqual(payload["options"]["source_version"], 8)
             self.assertEqual(payload["options"]["fine_iterations"], FINE_ITERATIONS)
             self.assertNotIn("fine_amb3r_memory_device", payload["options"])
@@ -269,6 +271,32 @@ class StorageResponseTests(unittest.TestCase):
             response.raise_for_status()
 
             self.assertEqual(response.json()["options"]["fine_scene_profile"], "indoor_full")
+            self.assertEqual(response.json()["options"]["scene_type"], "indoor")
+            self.assertEqual(response.json()["options"]["fine_scene_type"], "indoor")
+
+    def test_fine_task_accepts_scene_type(self) -> None:
+        with TestClient(app) as client, patch("app.main.enqueue_fine_task", return_value=None):
+            headers = auth_headers(client)
+            project_id = create_image_project(client, headers, "outdoor fine start")
+            for index in range(8):
+                upload_response = client.post(
+                    f"/api/projects/{project_id}/media",
+                    files={"file": (f"{index}.png", PNG_BYTES, "image/png")},
+                    headers=headers,
+                )
+                upload_response.raise_for_status()
+
+            response = client.post(
+                f"/api/projects/{project_id}/tasks/fine",
+                json={"options": {"scene_type": "outdoor"}},
+                headers=headers,
+            )
+            response.raise_for_status()
+
+            options = response.json()["options"]
+            self.assertEqual(options["scene_type"], "outdoor")
+            self.assertEqual(options["fine_scene_type"], "outdoor")
+            self.assertEqual(options["fine_scene_profile"], "outdoor_fast_clean")
 
     def test_fine_task_preserves_explicit_pycolmap_options(self) -> None:
         with TestClient(app) as client, patch("app.main.enqueue_fine_task", return_value=None):
@@ -615,6 +643,7 @@ class StorageResponseTests(unittest.TestCase):
             fast_uri = storage.write_bytes("tests/preview-fast.ply", b"fast")
             full_uri = storage.write_bytes("tests/preview-full.ply", b"full")
             meta_uri = storage.write_bytes("tests/preview-meta.json", b"{}")
+            camera_path_uri = storage.write_bytes("tests/camera-path.json", b'{"poses":[],"frames":[]}')
             with SessionLocal() as db:
                 task = Task(project_id=project_id, type="preview", status="succeeded", current_stage="done")
                 db.add(task)
@@ -653,6 +682,17 @@ class StorageResponseTests(unittest.TestCase):
                         source_version=0,
                     )
                 )
+                db.add(
+                    Artifact(
+                        project_id=project_id,
+                        task_id=task.id,
+                        kind="camera_path_json",
+                        object_uri=camera_path_uri,
+                        file_name="camera_path.json",
+                        file_size=23,
+                        source_version=0,
+                    )
+                )
                 db.commit()
 
             response = client.get(f"/api/projects/{project_id}/viewer-config", headers=headers)
@@ -668,6 +708,7 @@ class StorageResponseTests(unittest.TestCase):
             self.assertIn("/api/artifacts/", payload["debug_points_ply_url"])
             self.assertIn("/api/artifacts/", payload["download_ply_url"])
             self.assertIn("/api/artifacts/", payload["preview_meta_url"])
+            self.assertIn("/api/artifacts/", payload["camera_path_url"])
 
     def test_project_share_returns_public_viewer_downloads_and_revokes(self) -> None:
         with TestClient(app) as client:

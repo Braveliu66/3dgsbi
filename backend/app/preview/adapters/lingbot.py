@@ -26,7 +26,7 @@ def run(ctx: PreviewContext) -> PreviewResult:
     official_predictions_path = ctx.work_dir / "lingbot" / "official_predictions.npz"
 
     params = {
-        "fps": read_int(ctx.options.get("preview_lingbot_fps"), 3, minimum=0, maximum=60),
+        "fps": read_int(ctx.options.get("preview_lingbot_fps"), 10, minimum=0, maximum=60),
         "max_frames": read_int(ctx.options.get("preview_lingbot_max_frames"), 0, minimum=0, maximum=100_000),
         "image_size": read_int(ctx.options.get("preview_lingbot_image_size"), 518, minimum=224, maximum=1024),
         "target_width": read_int(ctx.options.get("preview_lingbot_target_width"), 518, minimum=14, maximum=2048),
@@ -47,6 +47,7 @@ def run(ctx: PreviewContext) -> PreviewResult:
         "save_predictions": read_bool(ctx.options.get("preview_lingbot_save_predictions"), True),
         "compile_model": read_bool(ctx.options.get("preview_lingbot_compile"), False),
         "keyframes_only_points": read_bool(ctx.options.get("preview_lingbot_keyframes_only_points"), False),
+        "use_sdpa": read_bool(ctx.options.get("preview_lingbot_use_sdpa"), True),
         "allow_sdpa_fallback": read_bool(ctx.options.get("preview_lingbot_allow_sdpa_fallback"), False),
         "min_inference_fps": read_float(ctx.options.get("preview_lingbot_min_inference_fps"), 3.0, minimum=0.0, maximum=1000.0),
     }

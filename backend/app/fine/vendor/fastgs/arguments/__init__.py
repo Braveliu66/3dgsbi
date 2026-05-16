@@ -60,6 +60,7 @@ from app.fine.fastgs_defaults import (
     FASTGS_LATE_PRUNE_ENABLED,
     FASTGS_LATE_PRUNE_FROM_ITER,
     FASTGS_LATE_PRUNE_INTERVAL,
+    FASTGS_LATE_PRUNE_MAX_FRACTION,
     FASTGS_LATE_PRUNE_MAX_WORLD_SCALE_RATIO,
     FASTGS_LATE_PRUNE_MIN_OPACITY,
     FASTGS_LATE_PRUNE_SCORE_THRESH,
@@ -79,6 +80,7 @@ from app.fine.fastgs_defaults import (
     FASTGS_RESOLUTION,
     FASTGS_ROTATION_LR,
     FASTGS_SAMPLE_CAMERAS,
+    FASTGS_SCENE_TYPE,
     FASTGS_SCALING_LR,
     FASTGS_SH_DEGREE,
     FASTGS_SHFEATURE_LR,
@@ -211,6 +213,8 @@ class OptimizationParams(ParamGroup):
         self.fastgs_late_prune_min_opacity = FASTGS_LATE_PRUNE_MIN_OPACITY
         self.fastgs_late_prune_score_thresh = FASTGS_LATE_PRUNE_SCORE_THRESH
         self.fastgs_late_prune_max_world_scale_ratio = FASTGS_LATE_PRUNE_MAX_WORLD_SCALE_RATIO
+        self.fastgs_late_prune_max_fraction = FASTGS_LATE_PRUNE_MAX_FRACTION
+        self.scene_type = FASTGS_SCENE_TYPE
 
         self.random_background = FASTGS_RANDOM_BACKGROUND
         self.optimizer_type = FASTGS_OPTIMIZER_TYPE

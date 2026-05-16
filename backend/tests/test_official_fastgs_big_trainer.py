@@ -18,6 +18,7 @@ from app.fine.fastgs_defaults import (  # noqa: E402
     FASTGS_GRAD_THRESH,
     FASTGS_LATE_PRUNE_ENABLED,
     FASTGS_LATE_PRUNE_INTERVAL,
+    FASTGS_LATE_PRUNE_MAX_FRACTION,
     FASTGS_LATE_PRUNE_MIN_OPACITY,
     FASTGS_DEBLUR_AUTO_SCHEDULE,
     FASTGS_DEBLUR_BLURRED_VIEWS_ONLY,
@@ -83,7 +84,7 @@ class OfficialFastGSBigTrainerTests(unittest.TestCase):
             self.assertEqual(command[command.index("-r") + 1], "1500")
             self.assertEqual(command[command.index("--position_lr_max_steps") + 1], "30000")
             self.assertEqual(command[command.index("--densify_from_iter") + 1], "500")
-            self.assertEqual(command[command.index("--densify_until_iter") + 1], "15000")
+            self.assertEqual(command[command.index("--densify_until_iter") + 1], "24000")
             self.assertEqual(command[command.index("--opacity_reset_interval") + 1], "100000")
             self.assertEqual(command[command.index("--grad_thresh") + 1], str(FASTGS_GRAD_THRESH))
             self.assertEqual(command[command.index("--grad_abs_thresh") + 1], str(FASTGS_GRAD_ABS_THRESH))
@@ -95,14 +96,17 @@ class OfficialFastGSBigTrainerTests(unittest.TestCase):
             self.assertEqual(command[command.index("--fastgs_final_prune_score_thresh") + 1], str(FASTGS_FINAL_PRUNE_SCORE_THRESH))
             self.assertEqual(command[command.index("--fastgs_late_prune_enabled") + 1], "true" if FASTGS_LATE_PRUNE_ENABLED else "false")
             self.assertEqual(command[command.index("--fastgs_late_prune_interval") + 1], str(FASTGS_LATE_PRUNE_INTERVAL))
-            self.assertEqual(command[command.index("--fastgs_late_prune_from_iter") + 1], "27000")
+            self.assertEqual(command[command.index("--fastgs_late_prune_from_iter") + 1], "28000")
             self.assertEqual(command[command.index("--fastgs_late_prune_until_iter") + 1], "30000")
             self.assertEqual(command[command.index("--fastgs_late_prune_min_opacity") + 1], str(FASTGS_LATE_PRUNE_MIN_OPACITY))
+            self.assertEqual(command[command.index("--fastgs_late_prune_max_fraction") + 1], str(FASTGS_LATE_PRUNE_MAX_FRACTION))
+            self.assertEqual(command[command.index("--scene_type") + 1], "auto")
             self.assertEqual(command[command.index("--deblur_mode") + 1], FASTGS_DEBLUR_MODE)
             self.assertEqual(command[command.index("--deblur_auto_schedule") + 1], FASTGS_DEBLUR_AUTO_SCHEDULE)
             self.assertEqual(command[command.index("--deblur_schedule_profile") + 1], FASTGS_DEBLUR_SCHEDULE_PROFILE)
             self.assertEqual(command[command.index("--deblur_late_densify_enabled") + 1], FASTGS_DEBLUR_LATE_DENSIFY_ENABLED)
-            self.assertEqual(command[command.index("--deblur_warmup_iters") + 1], "7000")
+            self.assertEqual(command[command.index("--deblur_warmup_iters") + 1], "5000")
+            self.assertEqual(command[command.index("--deblur_sharp_refine_from_iter") + 1], "26000")
             self.assertEqual(command[command.index("--deblur_num_moments") + 1], str(FASTGS_DEBLUR_NUM_MOMENTS))
             self.assertEqual(command[command.index("--deblur_transform_reg_weight") + 1], str(FASTGS_DEBLUR_TRANSFORM_REG_WEIGHT))
             self.assertEqual(command[command.index("--deblur_xyz_lr_scale") + 1], str(FASTGS_DEBLUR_XYZ_LR_SCALE))
@@ -143,13 +147,50 @@ class OfficialFastGSBigTrainerTests(unittest.TestCase):
             self.assertEqual(command[command.index("--iterations") + 1], "35000")
             self.assertEqual(command[command.index("--position_lr_max_steps") + 1], "35000")
             self.assertEqual(command[command.index("--densify_from_iter") + 1], "500")
-            self.assertEqual(command[command.index("--densify_until_iter") + 1], "15000")
+            self.assertEqual(command[command.index("--densify_until_iter") + 1], "24000")
             self.assertEqual(command[command.index("--opacity_reset_interval") + 1], "100000")
-            self.assertEqual(command[command.index("--fastgs_late_prune_interval") + 1], "3000")
-            self.assertEqual(command[command.index("--fastgs_late_prune_from_iter") + 1], "27000")
+            self.assertEqual(command[command.index("--fastgs_late_prune_interval") + 1], "4000")
+            self.assertEqual(command[command.index("--fastgs_late_prune_from_iter") + 1], "28000")
             self.assertEqual(command[command.index("--fastgs_late_prune_until_iter") + 1], "30000")
-            self.assertEqual(command[command.index("--deblur_warmup_iters") + 1], "7000")
-            self.assertEqual(result.metrics["densify_until_iter"], 15000)
+            self.assertEqual(command[command.index("--deblur_warmup_iters") + 1], "5000")
+            self.assertEqual(result.metrics["densify_until_iter"], 24000)
+
+    def test_train_official_fastgs_big_applies_outdoor_profile_defaults(self) -> None:
+        train_official_fastgs_big = import_trainer()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            vendor = root / "vendor" / "fastgs"
+            self._write_vendor_stub(vendor)
+            scene = root / "scene"
+            output = root / "output"
+            scene.mkdir()
+            ply = output / "point_cloud" / "iteration_30000" / "point_cloud.ply"
+            ply.parent.mkdir(parents=True)
+            ply.write_bytes(b"ply\n")
+
+            process = SimpleNamespace(stdout=iter([]), wait=lambda: 0, returncode=0)
+            with patch.dict(os.environ, {"FASTGS_VENDOR_ROOT": str(vendor)}), patch(
+                "app.fine.official_fastgs_big_trainer.subprocess.Popen",
+                return_value=process,
+            ) as popen:
+                result = train_official_fastgs_big(
+                    scene_dir=scene,
+                    output_dir=output,
+                    iterations=30000,
+                    options={"fine_scene_profile": "outdoor_fast_clean"},
+                    progress=lambda *_args: None,
+                )
+
+            command = popen.call_args.args[0]
+            self.assertEqual(command[command.index("--scene_type") + 1], "outdoor_full")
+            self.assertEqual(command[command.index("--densify_until_iter") + 1], "15000")
+            self.assertEqual(command[command.index("--fastgs_late_prune_interval") + 1], "2500")
+            self.assertEqual(command[command.index("--fastgs_late_prune_from_iter") + 1], "20000")
+            self.assertEqual(command[command.index("--fastgs_late_prune_max_world_scale_ratio") + 1], "0.06")
+            self.assertEqual(command[command.index("--fastgs_late_prune_max_fraction") + 1], "0.2")
+            self.assertEqual(command[command.index("--fastgs_final_prune_max_world_scale_ratio") + 1], "0.05")
+            self.assertEqual(command[command.index("--deblur_sharp_refine_from_iter") + 1], "22000")
+            self.assertEqual(result.metrics["scene_parameter_profile"], "outdoor")
 
     def test_train_official_fastgs_big_passes_deblur_options_and_registry(self) -> None:
         train_official_fastgs_big = import_trainer()

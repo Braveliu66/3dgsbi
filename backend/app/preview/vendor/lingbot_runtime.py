@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -19,8 +19,13 @@ from app.preview.types import PreviewFailure
 
 Progress = Callable[[str, int, str], None]
 LINGBOT_MAP_COMMIT = "4cd986009b9adeded8a4e740919221940dedeffe"
-POINT_KEYS = ("world_points_from_depth",)
+POINT_KEYS = ("world_points", "world_points_from_depth")
 COLOR_KEYS = ("images", "image", "rgb", "colors")
+MAX_REASONABLE_POINT_RADIUS = 1_000.0
+SUSPICIOUS_POINT_RADIUS_FOR_DEPTH_COMPARE = 50.0
+POINT_SOURCE_FALLBACK_RADIUS_RATIO = 10.0
+SPATIAL_TRIM_LOW_PERCENTILE = 0.5
+SPATIAL_TRIM_HIGH_PERCENTILE = 99.5
 CONF_KEYS_BY_POINT = {
     "world_points": ("world_points_conf", "conf"),
     "world_points_from_depth": ("depth_conf", "world_points_conf", "conf"),
@@ -43,6 +48,7 @@ _BATCHED_NDIMS = {
 DEFAULT_LINGBOT_MODEL_IMAGE_SIZE = 518
 DEFAULT_LINGBOT_MIN_INFERENCE_FPS = 3.0
 DEFAULT_KV_CACHE_SLIDING_WINDOW = 16
+AUTO_WINDOWED_FRAME_THRESHOLD = 320
 DEFAULT_PREVIEW_SPLAT_SCALE = 0.006
 DEFAULT_PREVIEW_OPACITY = 0.65
 SH_C0 = np.float32(0.28209479177387814)
@@ -100,22 +106,33 @@ class PreparedPreviewPoints:
 
 
 @dataclass(frozen=True, slots=True)
+class PointArrayQuality:
+    valid: bool
+    finite_count: int
+    finite_ratio: float
+    radius: float
+
+
+@dataclass(frozen=True, slots=True)
 class PointCloudVideoConfig:
+    profile: str = "stable_fast"
+    mode: str = "auto"
     fps: float = 10.0
     image_size: int = 518
     target_width: int = 518
     target_height: int = 378
-    window_size: int = 128
-    keyframe_interval: int = 13
-    overlap_keyframes: int = 16
-    num_scale_frames: int = 8
-    camera_iterations_fast: int = 2
-    camera_iterations_retry: int = 2
+    window_size: int = 64
+    keyframe_interval: int = 6
+    overlap_keyframes: int = 8
+    num_scale_frames: int = 4
+    camera_iterations_fast: int = 4
+    camera_iterations_retry: int = 4
     pixel_stride_fast: int = 5
     pixel_stride_full: int = 3
-    conf_percentile_fast: float = 45.0
+    conf_percentile_fast: float = 65.0
     conf_percentile_full: float = 35.0
-    min_conf: float = 0.8
+    min_conf: float = 1e-5
+    use_sdpa: bool = True
     allow_sdpa_fallback: bool = False
     compile_model: bool = False
     write_progressive_preview: bool = True
@@ -215,6 +232,14 @@ def lingbot_window_frame_span(*, window_size: int, num_scale_frames: int, keyfra
 
 def lingbot_window_overlap_span(*, overlap_keyframes: int, keyframe_interval: int) -> int:
     return max(0, int(overlap_keyframes)) * max(1, int(keyframe_interval))
+
+
+def effective_pointcloud_config(config: PointCloudVideoConfig, frame_count: int) -> PointCloudVideoConfig:
+    mode = resolve_mode(config.mode, frame_count)
+    requested_auto = (config.mode or "auto").strip().lower() == "auto"
+    if requested_auto and mode == "windowed" and config.profile != "low_mem":
+        return replace(config, mode="windowed", window_size=128, keyframe_interval=13, overlap_keyframes=8)
+    return replace(config, mode=mode)
 
 
 def iter_lingbot_video_windows(
@@ -394,6 +419,7 @@ def run_lingbot_video_preview(
     compile_model: bool,
     progress: Progress,
     keyframes_only_points: bool = False,
+    use_sdpa: bool = True,
     allow_sdpa_fallback: bool = False,
     min_inference_fps: float = DEFAULT_LINGBOT_MIN_INFERENCE_FPS,
 ) -> dict[str, Any]:
@@ -411,7 +437,7 @@ def run_lingbot_video_preview(
         f"frame_stride={frame_stride} pixel_stride={pixel_stride} conf_percentile={conf_percentile} "
         f"min_conf={min_conf} max_points={max_points} save_predictions={save_predictions} "
         f"compile={compile_model} keyframes_only_points={keyframes_only_points} "
-        f"allow_sdpa_fallback={allow_sdpa_fallback} min_inference_fps={min_inference_fps}"
+        f"use_sdpa={use_sdpa} allow_sdpa_fallback={allow_sdpa_fallback} min_inference_fps={min_inference_fps}"
     )
     frames = extract_video_frames(video_path, work_dir / "lingbot_frames", fps=fps, max_frames=max_frames)
     frame_message = (
@@ -439,6 +465,7 @@ def run_lingbot_video_preview(
     device = torch.device("cuda:0")
     use_sdpa, flashinfer_found = resolve_lingbot_attention_backend(
         allow_sdpa_fallback=allow_sdpa_fallback,
+        use_sdpa=use_sdpa,
     )
     dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
     profile = LingBotInferenceProfile(
@@ -589,7 +616,7 @@ def run_lingbot_video_pointcloud_fast(
     work_dir.mkdir(parents=True, exist_ok=True)
     _log(
         "pointcloud runtime start "
-        f"video={video_path} model={model_path} fps={config.fps} mode=windowed "
+        f"video={video_path} model={model_path} profile={config.profile} fps={config.fps} requested_mode={config.mode} "
         f"window_size={config.window_size} keyframe_interval={config.keyframe_interval} "
         f"overlap_keyframes={config.overlap_keyframes} camera_iterations={config.camera_iterations_fast} "
         f"pixel_stride_fast={config.pixel_stride_fast} pixel_stride_full={config.pixel_stride_full} "
@@ -612,6 +639,7 @@ def run_lingbot_video_pointcloud_fast(
     frame_paths = sorted(frames.frames_dir.glob("*.jpg"))
     if len(frame_paths) < 2:
         raise PreviewFailure("LINGBOT_NOT_ENOUGH_FRAMES", "LingBot-Map preview requires at least 2 sampled frames")
+    config = effective_pointcloud_config(config, len(frame_paths))
     frame_message = (
         f"sampled {frames.count} LingBot frames with official preprocessing path "
         f"target_fps={frames.sampled_fps} size={frames.width}x{frames.height}"
@@ -620,7 +648,10 @@ def run_lingbot_video_pointcloud_fast(
     _log(f"frames ready {frame_message}")
 
     device = torch.device("cuda:0")
-    use_sdpa, flashinfer_found = resolve_lingbot_attention_backend(allow_sdpa_fallback=config.allow_sdpa_fallback)
+    use_sdpa, flashinfer_found = resolve_lingbot_attention_backend(
+        allow_sdpa_fallback=config.allow_sdpa_fallback,
+        use_sdpa=config.use_sdpa,
+    )
     dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
     kv_cache_sliding_window = resolve_kv_cache_sliding_window(config.window_size)
 
@@ -634,6 +665,7 @@ def run_lingbot_video_pointcloud_fast(
     _log(
         "pointcloud official sequence plan "
         f"sampled_frames={frames.count} estimated_internal_windows={estimated_window_count} "
+        f"profile={config.profile} mode={config.mode} "
         f"window_size={config.window_size} keyframe_interval={config.keyframe_interval} "
         f"overlap_keyframes={config.overlap_keyframes} overlap_source_frames={overlap} "
         "input_frames_are_prefiltered=false external_stitching=false"
@@ -644,7 +676,7 @@ def run_lingbot_video_pointcloud_fast(
         target_width=config.target_width,
         target_height=config.target_height,
         max_frames=0,
-        mode="windowed",
+        mode=config.mode,
         keyframe_interval=config.keyframe_interval,
         camera_iterations=config.camera_iterations_fast,
         num_scale_frames=config.num_scale_frames,
@@ -677,6 +709,12 @@ def run_lingbot_video_pointcloud_fast(
         if is_cuda_out_of_memory(exc, torch_module=torch):
             release_cuda_exception(exc, torch_module=torch)
             raise PreviewFailure("LINGBOT_CUDA_OOM", "LingBot-Map official-semantics inference ran out of CUDA memory") from exc
+        if is_cuda_illegal_memory_access(exc):
+            release_cuda_exception(exc, torch_module=torch)
+            raise PreviewFailure(
+                "LINGBOT_CUDA_ILLEGAL_MEMORY_ACCESS",
+                "LingBot-Map CUDA inference hit an illegal memory access; retry with windowed or low_mem preview settings.",
+            ) from exc
         raise PreviewFailure("LINGBOT_INFERENCE_FAILED", f"LingBot-Map official-semantics inference failed: {exc}") from exc
 
     progress("lingbot_predictions", 66, "preparing official LingBot predictions for depth-world point cloud")
@@ -687,7 +725,9 @@ def run_lingbot_video_pointcloud_fast(
         closed_form_inverse_se3_general=closed_form_inverse_se3_general,
         torch_module=torch,
     )
-    attach_depth_world_points(pred_np, unproject_depth_map_to_point_map=unproject_depth_map_to_point_map)
+    if needs_depth_world_points_fallback(pred_np):
+        attach_depth_world_points(pred_np, unproject_depth_map_to_point_map=unproject_depth_map_to_point_map)
+    point_source = choose_lingbot_point_source(pred_np)
     frame_count = prediction_frame_count(pred_np) or frames.count
     if "is_keyframe" not in pred_np:
         pred_np["is_keyframe"] = build_keyframe_mask(
@@ -753,16 +793,20 @@ def run_lingbot_video_pointcloud_fast(
     full_count = voxel_full.write_ply(output_full_ply)
     fast_points, _fast_colors, _fast_conf = voxel_fast.arrays()
     bbox = preview_bounds(fast_points)
+    validate_pointcloud_preview(fast_count=fast_count, bbox=bbox, camera_path=camera_path)
     write_preview_meta_json(
         output_meta_json,
-        point_source="world_points_from_depth",
+        point_source=point_source,
         point_count_raw=voxel_fast.input_points,
         point_count_exported=fast_count,
         bbox=bbox,
         recommended_view=recommended_view,
     )
     output_camera_path_json.parent.mkdir(parents=True, exist_ok=True)
-    output_camera_path_json.write_text(json.dumps({"frames": camera_path}, ensure_ascii=True, indent=2), encoding="utf-8")
+    output_camera_path_json.write_text(
+        json.dumps(camera_path_payload(camera_path, fps=config.fps), ensure_ascii=True, indent=2),
+        encoding="utf-8",
+    )
     metrics = {
         **inference_metrics,
         "adapter": "lingbot_video_pointcloud_fast",
@@ -775,7 +819,7 @@ def run_lingbot_video_pointcloud_fast(
         "lingbot_image_size": int(config.image_size),
         "lingbot_target_width": int(config.target_width),
         "lingbot_target_height": int(config.target_height),
-        "lingbot_inference_mode": "windowed",
+        "lingbot_inference_mode": config.mode,
         "lingbot_official_sequence_semantics": True,
         "lingbot_external_stitching": False,
         "lingbot_keyframe_interval": int(config.keyframe_interval),
@@ -792,9 +836,9 @@ def run_lingbot_video_pointcloud_fast(
         "lingbot_aggregator_dtype": inference_metrics.get("lingbot_aggregator_dtype"),
         "lingbot_compile": bool(inference_metrics.get("lingbot_compile", False)),
         "lingbot_max_frames": 0,
-        "lingbot_point_source": "world_points_from_depth",
-        "point_source": "world_points_from_depth",
-        "lingbot_depth_reprojection_fallback": True,
+        "lingbot_point_source": point_source,
+        "point_source": point_source,
+        "lingbot_depth_reprojection_fallback": bool(point_source == "world_points_from_depth"),
         "lingbot_keyframes_only_points": True,
         "lingbot_save_predictions": False,
         "lingbot_pixel_stride_fast": int(config.pixel_stride_fast),
@@ -824,6 +868,7 @@ def run_lingbot_video_pointcloud_fast(
         "preview_fast_ply_size": output_fast_ply.stat().st_size,
         "preview_full_ply_size": output_full_ply.stat().st_size,
         "camera_path_json_size": output_camera_path_json.stat().st_size,
+        "camera_path_pose_count": len(camera_path),
         "preview_meta_json_size": output_meta_json.stat().st_size,
         "bbox_min": bbox["bbox_min"],
         "bbox_max": bbox["bbox_max"],
@@ -909,7 +954,8 @@ def run_lingbot_rgb_window(
         closed_form_inverse_se3_general=closed_form_inverse_se3_general,
         torch_module=torch_module,
     )
-    attach_depth_world_points(pred_np, unproject_depth_map_to_point_map=unproject_depth_map_to_point_map)
+    if needs_depth_world_points_fallback(pred_np):
+        attach_depth_world_points(pred_np, unproject_depth_map_to_point_map=unproject_depth_map_to_point_map)
     return pred_np, seconds, peak_mb
 
 
@@ -1008,13 +1054,14 @@ def estimate_similarity_transform(src: np.ndarray, dst: np.ndarray) -> np.ndarra
 
 def apply_world_transform(pred_np: dict[str, np.ndarray], transform: np.ndarray) -> None:
     transform = np.asarray(transform, dtype=np.float32).reshape(4, 4)
-    points = pred_np.get("world_points_from_depth")
-    if isinstance(points, np.ndarray):
-        flat = points.reshape(-1, 3)
-        valid = np.isfinite(flat).all(axis=1)
-        transformed = flat.copy()
-        transformed[valid] = (flat[valid] @ transform[:3, :3].T) + transform[:3, 3]
-        pred_np["world_points_from_depth"] = transformed.reshape(points.shape).astype(np.float32, copy=False)
+    for point_key in POINT_KEYS:
+        points = pred_np.get(point_key)
+        if isinstance(points, np.ndarray):
+            flat = points.reshape(-1, 3)
+            valid = np.isfinite(flat).all(axis=1)
+            transformed = flat.copy()
+            transformed[valid] = (flat[valid] @ transform[:3, :3].T) + transform[:3, 3]
+            pred_np[point_key] = transformed.reshape(points.shape).astype(np.float32, copy=False)
     extrinsics = pred_np.get("extrinsic")
     if isinstance(extrinsics, np.ndarray):
         transformed_ext = []
@@ -1154,6 +1201,159 @@ def add_camera_path_entries(
         camera_path.append(entry)
 
 
+def choose_lingbot_point_source(pred_np: dict[str, np.ndarray]) -> str:
+    qualities = {
+        point_key: lingbot_point_array_quality(pred_np.get(point_key))
+        for point_key in POINT_KEYS
+        if point_key in pred_np
+    }
+    native_quality = qualities.get("world_points")
+    depth_quality = qualities.get("world_points_from_depth")
+    if (
+        native_quality is not None
+        and depth_quality is not None
+        and native_quality.valid
+        and depth_quality.valid
+        and should_fallback_from_native_world_points(native_quality, depth_quality)
+    ):
+        return "world_points_from_depth"
+    for point_key in POINT_KEYS:
+        quality = qualities.get(point_key)
+        if quality is not None and quality.valid:
+            return point_key
+    raise PreviewFailure("LINGBOT_POINTS_MISSING", f"LingBot predictions did not contain any supported point source: {POINT_KEYS}")
+
+
+def is_valid_lingbot_point_array(value: Any) -> bool:
+    return lingbot_point_array_quality(value).valid
+
+
+def needs_depth_world_points_fallback(pred_np: dict[str, np.ndarray]) -> bool:
+    if "world_points_from_depth" in pred_np:
+        return False
+    quality = lingbot_point_array_quality(pred_np.get("world_points"))
+    return not quality.valid or quality.radius > SUSPICIOUS_POINT_RADIUS_FOR_DEPTH_COMPARE
+
+
+def should_fallback_from_native_world_points(native: PointArrayQuality, depth: PointArrayQuality) -> bool:
+    if native.radius > MAX_REASONABLE_POINT_RADIUS and depth.radius <= MAX_REASONABLE_POINT_RADIUS:
+        return True
+    if depth.radius > 0 and native.radius > max(depth.radius * POINT_SOURCE_FALLBACK_RADIUS_RATIO, depth.radius + 1.0):
+        return True
+    if native.finite_ratio < 0.25 and depth.finite_ratio > native.finite_ratio:
+        return True
+    return False
+
+
+def lingbot_point_array_quality(value: Any) -> PointArrayQuality:
+    if not isinstance(value, np.ndarray) or value.size <= 0:
+        return PointArrayQuality(False, 0, 0.0, math.inf)
+    array = np.asarray(value)
+    if array.ndim < 3 or array.shape[-1] != 3:
+        return PointArrayQuality(False, 0, 0.0, math.inf)
+    flat = array.reshape(-1, 3)
+    finite_mask = np.isfinite(flat).all(axis=1)
+    finite_count = int(finite_mask.sum())
+    finite_ratio = finite_count / max(1, int(flat.shape[0]))
+    if finite_count <= 0 or finite_ratio < 0.01:
+        return PointArrayQuality(False, finite_count, finite_ratio, math.inf)
+    finite = flat[finite_mask]
+    if finite_count >= 8:
+        bbox_min = np.percentile(finite, 1, axis=0)
+        bbox_max = np.percentile(finite, 99, axis=0)
+    else:
+        bbox_min = np.min(finite, axis=0)
+        bbox_max = np.max(finite, axis=0)
+    radius = float(np.linalg.norm(bbox_max - bbox_min) * 0.5)
+    valid = bool(np.isfinite(radius) and radius <= MAX_REASONABLE_POINT_RADIUS)
+    return PointArrayQuality(valid, finite_count, finite_ratio, radius)
+
+
+def camera_path_payload(camera_path: list[dict[str, Any]], *, fps: float) -> dict[str, Any]:
+    poses = []
+    for entry in camera_path:
+        c2w = entry.get("c2w")
+        pose = np.asarray(c2w, dtype=np.float32) if c2w is not None else None
+        if pose is None or pose.shape != (3, 4):
+            continue
+        item: dict[str, Any] = {
+            "position": [float(value) for value in pose[:3, 3]],
+            "quaternion": [float(value) for value in rotation_matrix_to_quaternion_xyzw(pose[:3, :3])],
+        }
+        fov_y = camera_fov_y_degrees(entry.get("intrinsic"))
+        if fov_y is not None:
+            item["fov_y_deg"] = fov_y
+        poses.append(item)
+    return {"fps": float(fps), "poses": poses, "frames": camera_path}
+
+
+def camera_fov_y_degrees(intrinsic: Any) -> float | None:
+    if intrinsic is None:
+        return None
+    matrix = np.asarray(intrinsic, dtype=np.float32)
+    if matrix.shape != (3, 3):
+        return None
+    fy = float(matrix[1, 1])
+    cy = float(matrix[1, 2])
+    image_height = max(1.0, cy * 2.0)
+    if not np.isfinite(fy) or fy <= 1e-6:
+        return None
+    fov = float(np.degrees(2.0 * np.arctan((image_height / 2.0) / fy)))
+    return fov if np.isfinite(fov) and 5.0 < fov < 170.0 else None
+
+
+def rotation_matrix_to_quaternion_xyzw(matrix: np.ndarray) -> list[float]:
+    m = np.asarray(matrix, dtype=np.float64).reshape(3, 3)
+    trace = float(np.trace(m))
+    if trace > 0.0:
+        s = math.sqrt(trace + 1.0) * 2.0
+        qw = 0.25 * s
+        qx = (m[2, 1] - m[1, 2]) / s
+        qy = (m[0, 2] - m[2, 0]) / s
+        qz = (m[1, 0] - m[0, 1]) / s
+    elif m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
+        s = math.sqrt(1.0 + m[0, 0] - m[1, 1] - m[2, 2]) * 2.0
+        qw = (m[2, 1] - m[1, 2]) / s
+        qx = 0.25 * s
+        qy = (m[0, 1] + m[1, 0]) / s
+        qz = (m[0, 2] + m[2, 0]) / s
+    elif m[1, 1] > m[2, 2]:
+        s = math.sqrt(1.0 + m[1, 1] - m[0, 0] - m[2, 2]) * 2.0
+        qw = (m[0, 2] - m[2, 0]) / s
+        qx = (m[0, 1] + m[1, 0]) / s
+        qy = 0.25 * s
+        qz = (m[1, 2] + m[2, 1]) / s
+    else:
+        s = math.sqrt(1.0 + m[2, 2] - m[0, 0] - m[1, 1]) * 2.0
+        qw = (m[1, 0] - m[0, 1]) / s
+        qx = (m[0, 2] + m[2, 0]) / s
+        qy = (m[1, 2] + m[2, 1]) / s
+        qz = 0.25 * s
+    quat = np.asarray([qx, qy, qz, qw], dtype=np.float64)
+    norm = float(np.linalg.norm(quat))
+    if not np.isfinite(norm) or norm <= 1e-12:
+        return [0.0, 0.0, 0.0, 1.0]
+    return (quat / norm).astype(float).tolist()
+
+
+def validate_pointcloud_preview(*, fast_count: int, bbox: dict[str, Any], camera_path: list[dict[str, Any]]) -> None:
+    if int(fast_count) <= 0:
+        raise PreviewFailure("LINGBOT_EMPTY_POINT_CLOUD", "LingBot-Map produced no valid point cloud")
+    radius = float(bbox.get("radius") or 0.0)
+    vectors = [bbox.get("bbox_min"), bbox.get("bbox_max"), bbox.get("center")]
+    finite_bbox = all(is_vec3(value) for value in vectors) and np.isfinite(radius)
+    if not finite_bbox or radius <= 1e-6 or radius > 1e6:
+        raise PreviewFailure("LINGBOT_INVALID_POINT_CLOUD", "LingBot-Map point cloud bounds are invalid")
+    if len(camera_path) < 2:
+        raise PreviewFailure("LINGBOT_CAMERA_PATH_INVALID", "LingBot-Map produced fewer than 2 camera poses")
+
+
+def is_vec3(value: Any) -> bool:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        return False
+    return all(np.isfinite(float(item)) for item in value)
+
+
 def first_camera_view(pred_np: dict[str, np.ndarray]) -> dict[str, Any] | None:
     for _frame_index, frame in iter_prediction_frames(pred_np, [0]):
         return lingbot_camera_view_from_frame(frame, radius_hint=1.0)
@@ -1266,7 +1466,7 @@ def resolve_mode(value: str, frame_count: int) -> str:
     normalized = (value or "auto").strip().lower()
     if normalized in {"streaming", "windowed"}:
         return normalized
-    return "windowed" if frame_count > 3000 else "streaming"
+    return "windowed" if frame_count > AUTO_WINDOWED_FRAME_THRESHOLD else "streaming"
 
 
 def resolve_keyframe_interval(value: int | None, mode: str, frame_count: int) -> int:
@@ -1397,9 +1597,12 @@ def resolve_kv_cache_sliding_window(window_size: int) -> int:
 def resolve_lingbot_attention_backend(
     *,
     allow_sdpa_fallback: bool,
+    use_sdpa: bool = True,
     flashinfer_probe: Callable[[], bool] = flashinfer_available,
 ) -> tuple[bool, bool]:
     flashinfer_found = flashinfer_probe()
+    if use_sdpa:
+        return True, flashinfer_found
     if not flashinfer_found and not allow_sdpa_fallback:
         raise PreviewFailure(
             "LINGBOT_FLASHINFER_UNAVAILABLE",
@@ -1708,6 +1911,11 @@ def is_cuda_out_of_memory(error: Exception, *, torch_module: Any) -> bool:
     return False
 
 
+def is_cuda_illegal_memory_access(error: Exception) -> bool:
+    message = str(error).lower()
+    return "cuda" in message and "illegal memory access" in message
+
+
 def release_cuda_exception(error: Exception, *, torch_module: Any) -> None:
     error.__traceback__ = None
     error.__context__ = None
@@ -1855,7 +2063,7 @@ def predictions_to_visualization_np(
     pose_encoding_to_extri_intri: Any,
     closed_form_inverse_se3_general: Any,
     torch_module: Any,
-) -> dict[str, np.ndarray]:
+) -> dict[str, Any]:
     if "pose_enc" in predictions:
         extrinsic_w2c, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])
         extrinsic_4x4 = torch_module.zeros(
@@ -1869,12 +2077,16 @@ def predictions_to_visualization_np(
         predictions["extrinsic_w2c"] = extrinsic_w2c
         predictions["extrinsic"] = extrinsic_c2w_4x4[..., :3, :4]
         predictions["intrinsic"] = intrinsic
+        predictions["extrinsic_convention"] = "c2w"
 
     predictions.pop("pose_enc_list", None)
     predictions.pop("images", None)
 
-    visualized: dict[str, np.ndarray] = {}
+    visualized: dict[str, Any] = {}
     for key, value in predictions.items():
+        if key == "extrinsic_convention":
+            visualized[key] = value
+            continue
         array = to_numpy_array(value, torch_module=torch_module)
         if array is not None:
             visualized[key] = squeeze_lingbot_batch(key, array)
@@ -1890,29 +2102,22 @@ def attach_depth_world_points(
     *,
     unproject_depth_map_to_point_map: Any,
 ) -> None:
-    missing = [key for key in ("depth", "intrinsic") if key not in predictions]
-    if missing:
-        raise PreviewFailure(
-            "LINGBOT_DEPTH_WORLD_MISSING",
-            f"Depth-world export needs depth and intrinsic predictions; missing: {', '.join(missing)}",
-        )
-
+    depth = predictions.get("depth")
+    intrinsic = predictions.get("intrinsic")
     extrinsic_w2c = predictions.get("extrinsic_w2c")
-    if extrinsic_w2c is None:
-        raise PreviewFailure(
-            "LINGBOT_EXTRINSIC_W2C_MISSING",
-            "Depth reprojection needs world-to-camera extrinsic, not c2w extrinsic.",
-        )
+    if depth is None or intrinsic is None or extrinsic_w2c is None:
+        return
 
     try:
         depth_points = unproject_depth_map_to_point_map(
-            predictions["depth"],
+            depth,
             extrinsic_w2c,
-            predictions["intrinsic"],
+            intrinsic,
         )
     except Exception as exc:
         raise PreviewFailure("LINGBOT_DEPTH_REPROJECT_FAILED", f"LingBot depth reprojection failed: {exc}") from exc
     predictions["world_points_from_depth"] = np.asarray(depth_points, dtype=np.float32)
+    predictions["world_points_from_depth_convention"] = "world_from_depth_using_w2c"
     if "depth_conf" not in predictions:
         depth = np.asarray(predictions["depth"])
         if depth.ndim == 4 and depth.shape[-1] == 1:
@@ -2682,6 +2887,7 @@ def extract_frame_points_for_export(
         else:
             confidence = None
 
+    mask = apply_spatial_outlier_mask(points, mask)
     filtered_conf = None
     if confidence is not None and confidence.shape[0] == points.shape[0]:
         filtered_conf = confidence[mask].astype(np.float32, copy=False)
@@ -2696,18 +2902,37 @@ def extract_frame_points_for_export(
     )
 
 
+def apply_spatial_outlier_mask(points: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    selected_count = int(mask.sum())
+    if selected_count < 256:
+        return mask
+    selected = points[mask]
+    bbox_min = np.percentile(selected, SPATIAL_TRIM_LOW_PERCENTILE, axis=0)
+    bbox_max = np.percentile(selected, SPATIAL_TRIM_HIGH_PERCENTILE, axis=0)
+    if not np.isfinite(bbox_min).all() or not np.isfinite(bbox_max).all():
+        return mask
+    spatial = np.all((points >= bbox_min) & (points <= bbox_max), axis=1)
+    trimmed = mask & spatial
+    if int(trimmed.sum()) < max(16, int(selected_count * 0.5)):
+        return mask
+    return trimmed
+
+
 def select_lingbot_points(predictions: Any) -> tuple[str, np.ndarray, np.ndarray | None]:
     keys = tuple(predictions.files if hasattr(predictions, "files") else predictions.keys())
     available = set(keys)
     for key in POINT_KEYS:
         if key not in available:
             continue
+        points = np.asarray(predictions[key], dtype=np.float32)
+        if not is_valid_lingbot_point_array(points):
+            continue
         conf = None
         for conf_key in CONF_KEYS_BY_POINT.get(key, ("conf", "world_points_conf", "depth_conf")):
             if conf_key in available:
                 conf = np.asarray(predictions[conf_key], dtype=np.float32)
                 break
-        return key, np.asarray(predictions[key], dtype=np.float32), conf
+        return key, points, conf
     raise PreviewFailure(
         "LINGBOT_POINTS_MISSING",
         f"LingBot predictions did not contain any supported point source: {POINT_KEYS}",

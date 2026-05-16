@@ -13,6 +13,7 @@ import torch
 import numpy as np
 import json
 import os, random, time
+from dataclasses import replace
 from random import randint
 from pathlib import Path
 from lpipsPyTorch import lpips
@@ -31,6 +32,11 @@ from app.fine.fastgs_defaults import (
     FASTGS_LATE_PRUNE_FROM_ITER,
     FASTGS_LATE_PRUNE_INTERVAL,
     FASTGS_LATE_PRUNE_UNTIL_ITER,
+)
+from app.fine.deblur_schedule import (
+    DeblurFastGSSchedule,
+    PROFILES,
+    auto_detect_scene_profile,
 )
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state
@@ -77,6 +83,41 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         f"opacity_reset_until={deblur_schedule['opacity_reset_until']} "
         f"late_prune=({deblur_schedule['late_prune_from']},{deblur_schedule['late_prune_until']})"
     )
+    camera_centers = [
+        cam.camera_center.detach()
+        for cam in scene.getTrainCameras()
+        if hasattr(cam, "camera_center")
+    ]
+    cameras_xyz = torch.stack(camera_centers) if camera_centers else None
+    scene_profile_name = auto_detect_scene_profile(
+        sfm_sparse_points=int(gaussians.get_xyz.shape[0]),
+        sfm_registered_images=len(scene.getTrainCameras()),
+        cameras_xyz=cameras_xyz,
+        scene_extent=float(scene.cameras_extent),
+        frontend_hint=getattr(opt, "scene_type", "auto"),
+    )
+    scene_profile = PROFILES.get(scene_profile_name, PROFILES["indoor_full"])
+    scene_profile = replace(
+        scene_profile,
+        max_prune_fraction_per_step=float(
+            getattr(opt, "fastgs_late_prune_max_fraction", scene_profile.max_prune_fraction_per_step)
+        ),
+    )
+    runtime_schedule = DeblurFastGSSchedule(
+        profile=scene_profile,
+        total_iterations=int(opt.iterations),
+        warmup_end=int(opt.deblur_warmup_iters),
+        deblur_phase_end=int(getattr(opt, "fastgs_late_prune_from_iter", int(opt.iterations * 0.6))),
+        consolidate_end=int(getattr(opt, "deblur_sharp_refine_from_iter", int(opt.iterations * 0.8))),
+        sharp_refine_start=int(getattr(opt, "deblur_sharp_refine_from_iter", int(opt.iterations * 0.8))),
+        num_blurred_frames=sum(
+            1
+            for item in blur_registry.values()
+            if isinstance(item, dict) and item.get("blurred") and not item.get("rejected")
+        ),
+        num_total_frames=len(scene.getTrainCameras()),
+    )
+    print(f"[PROFILE] Using scene profile: {scene_profile.name} ({scene_profile_name})")
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -103,6 +144,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     topology_blur_stats_skipped = 0
     late_prune_steps = 0
     late_prune_removed = 0
+    late_prune_deferred = 0
     late_prune_scale_candidates = 0
     final_prune_metrics = {}
     last_deblur_reg = None
@@ -134,16 +176,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         )
         sharp_refine_active = bool(sharp_refine_enabled and iteration >= sharp_refine_from_iter)
 
-        # Final PLY/SPZ export uses ordinary Gaussians.  Keep GTnet as a
-        # training-time blur renderer, then disable it for the sharp refine pass.
+        # Keep topology-changing prune out of the active Deblur stage.  Once
+        # sharp refine starts, train ordinary Gaussians from clear views only.
         deblur_loss_active = (
             schedule_deblur_loss_active(iteration, deblur_schedule, deblur_state)
             and not sharp_refine_active
         )
-        if deblur_loss_active and base_xyz_lr is not None:
-            set_xyz_learning_rate(gaussians, base_xyz_lr * float(opt.deblur_xyz_lr_scale))
-        elif sharp_refine_active and base_xyz_lr is not None:
+        if iteration == sharp_refine_from_iter and deblur_state.enabled:
+            gaussians.freeze_deblur_mlp()
+            print(f"[ITER {iteration}] Switching to frozen GTnet sharp refine mode")
+        if sharp_refine_active and base_xyz_lr is not None:
             set_xyz_learning_rate(gaussians, base_xyz_lr * 0.2)
+        elif deblur_loss_active and base_xyz_lr is not None:
+            set_xyz_learning_rate(gaussians, base_xyz_lr * float(opt.deblur_xyz_lr_scale))
 
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
@@ -156,6 +201,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         rand_idx = randint(0, len(viewpoint_indices) - 1)
         viewpoint_cam = viewpoint_stack.pop(rand_idx)
         _ = viewpoint_indices.pop(rand_idx)
+        if deblur_state.enabled and not deblur_loss_active:
+            clear_cameras = [
+                cam for cam in scene.getTrainCameras().copy()
+                if is_sharp_score_view(cam, blur_registry)
+            ]
+            if clear_cameras:
+                viewpoint_cam = clear_cameras[randint(0, len(clear_cameras) - 1)]
         if sharp_refine_active and option_bool(
             getattr(opt, "deblur_sharp_refine_clear_only", "true"),
             True,
@@ -185,13 +237,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         Ll1 = l1_loss(image, gt_image)
         ssim_value = fast_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
-        if deblur_view_active:
+        if deblur_view_active and not sharp_refine_active:
             deblur_reg = render_pkg.get("deblur_regularization")
             if deblur_reg is not None and deblur_state.config is not None:
                 loss = loss + deblur_state.config.transform_reg_weight * deblur_reg
                 last_deblur_reg = float(deblur_reg.detach().item())
+        if deblur_view_active:
             deblur_photometric_views += 1
         loss.backward()
+        schedule_ctrl = runtime_schedule.step(iteration, float(loss.detach().item()))
 
         iter_end.record()
 
@@ -323,8 +377,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             late_prune_until_iter = int(getattr(opt, "fastgs_late_prune_until_iter", FASTGS_LATE_PRUNE_UNTIL_ITER))
             if (
                 late_prune_enabled
+                and not deblur_loss_active
+                and iteration >= sharp_refine_from_iter
                 and schedule_late_prune_active(iteration, deblur_schedule)
-                and iteration % late_prune_interval == 0
+                and (iteration - late_prune_from_iter) % late_prune_interval == 0
                 and iteration >= late_prune_from_iter
                 and iteration < late_prune_until_iter
             ):
@@ -337,14 +393,38 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         scene.cameras_extent,
                         getattr(opt, "fastgs_late_prune_max_world_scale_ratio", 0.0),
                     )
-                    late_metrics = gaussians.final_prune_fastgs(
+                    raw_prune_mask, late_metrics = gaussians.final_prune_mask_fastgs(
                         min_opacity = opt.fastgs_late_prune_min_opacity,
                         pruning_score = pruning_score,
                         score_thresh = opt.fastgs_late_prune_score_thresh,
                         max_world_scale = late_max_world_scale,
+                        use_score = scene_profile.name != "indoor",
+                        use_scale = scene_profile.name != "indoor",
                     )
+                    before_prune_count = int(gaussians.get_xyz.shape[0])
+                    safe_prune_mask = runtime_schedule.safe_prune_mask(
+                        iteration,
+                        gaussians,
+                        raw_prune_mask,
+                        schedule_ctrl.get("prune_mode", "adaptive"),
+                    )
+                    raw_removed = int(late_metrics.get("removed", 0))
+                    safe_removed = int(torch.count_nonzero(safe_prune_mask).detach().item())
+                    if safe_removed:
+                        gaussians.prune_points(safe_prune_mask)
+                    gaussians.tmp_radii = None
+                    torch.cuda.empty_cache()
+                    after_prune_count = int(gaussians.get_xyz.shape[0])
+                    remove_fraction = safe_removed / max(before_prune_count, 1)
+                    late_metrics["raw_removed"] = raw_removed
+                    late_metrics["removed"] = safe_removed
+                    late_metrics["deferred"] = max(0, raw_removed - safe_removed)
+                    late_metrics["before_count"] = before_prune_count
+                    late_metrics["after_count"] = after_prune_count
+                    late_metrics["remove_fraction"] = remove_fraction
                     late_prune_steps += 1
                     late_prune_removed += int(late_metrics.get("removed", 0))
+                    late_prune_deferred += int(late_metrics.get("deferred", 0))
                     late_prune_scale_candidates += int(late_metrics.get("scale_candidates", 0))
                     print(f"\n[ITER {iteration}] FastGS late prune {late_metrics}")
                 else:
@@ -388,6 +468,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         topology_blur_stats_skipped,
         late_prune_steps,
         late_prune_removed,
+        late_prune_deferred,
         late_prune_scale_candidates,
         final_prune_metrics,
         last_deblur_reg,
@@ -603,6 +684,7 @@ def write_deblur_metrics(
     topology_blur_stats_skipped,
     late_prune_steps,
     late_prune_removed,
+    late_prune_deferred,
     late_prune_scale_candidates,
     final_prune_metrics,
     last_deblur_reg,
@@ -636,6 +718,7 @@ def write_deblur_metrics(
         "topology_blur_stats_skipped": topology_blur_stats_skipped,
         "late_prune_steps": late_prune_steps,
         "late_prune_removed": late_prune_removed,
+        "late_prune_deferred": late_prune_deferred,
         "late_prune_scale_candidates": late_prune_scale_candidates,
         "deblur_final_prune_uses_sharp_score": True,
         "deblur_final_pruned": deblur_final_pruned,
@@ -644,6 +727,7 @@ def write_deblur_metrics(
         "fastgs_size_prune_max_screen_size": getattr(opt, "fastgs_size_prune_max_screen_size", None),
         "fastgs_size_prune_max_world_scale_ratio": getattr(opt, "fastgs_size_prune_max_world_scale_ratio", None),
         "fastgs_late_prune_max_world_scale_ratio": getattr(opt, "fastgs_late_prune_max_world_scale_ratio", None),
+        "fastgs_late_prune_max_fraction": getattr(opt, "fastgs_late_prune_max_fraction", None),
         "fastgs_final_prune_max_world_scale_ratio": getattr(opt, "fastgs_final_prune_max_world_scale_ratio", None),
         "deblur_last_transform_regularization": last_deblur_reg,
         "deblur_schedule": deblur_schedule or {},

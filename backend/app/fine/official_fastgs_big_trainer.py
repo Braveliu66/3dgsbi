@@ -29,32 +29,18 @@ from app.fine.fastgs_defaults import (
     FASTGS_DEBLUR_SCHEDULE_PROFILE,
     FASTGS_DEBLUR_SHARP_REFINE_CLEAR_ONLY,
     FASTGS_DEBLUR_SHARP_REFINE_ENABLED,
-    FASTGS_DEBLUR_SHARP_REFINE_FROM_ITER,
     FASTGS_DEBLUR_TOPOLOGY_SHARP_ONLY,
     FASTGS_DEBLUR_TRANSFORM_REG_WEIGHT,
-    FASTGS_DEBLUR_WARMUP_ITERS,
     FASTGS_DEBLUR_WIDTH,
     FASTGS_DEBLUR_XYZ_LR_SCALE,
     FASTGS_DENSE,
     FASTGS_DENSIFICATION_INTERVAL,
     FASTGS_DENSIFY_FROM_ITER,
-    FASTGS_DENSIFY_GRAD_THRESHOLD,
-    FASTGS_DENSIFY_UNTIL_ITER,
     FASTGS_FEATURE_LR,
-    FASTGS_FINAL_PRUNE_MAX_WORLD_SCALE_RATIO,
-    FASTGS_FINAL_PRUNE_MIN_OPACITY,
-    FASTGS_FINAL_PRUNE_SCORE_THRESH,
-    FASTGS_GRAD_ABS_THRESH,
     FASTGS_GRAD_THRESH,
     FASTGS_HIGHFEATURE_LR,
     FASTGS_LAMBDA_DSSIM,
     FASTGS_LATE_PRUNE_ENABLED,
-    FASTGS_LATE_PRUNE_FROM_ITER,
-    FASTGS_LATE_PRUNE_INTERVAL,
-    FASTGS_LATE_PRUNE_MAX_WORLD_SCALE_RATIO,
-    FASTGS_LATE_PRUNE_MIN_OPACITY,
-    FASTGS_LATE_PRUNE_SCORE_THRESH,
-    FASTGS_LATE_PRUNE_UNTIL_ITER,
     FASTGS_LOSS_THRESH,
     FASTGS_LOWFEATURE_LR,
     FASTGS_MULT,
@@ -68,12 +54,13 @@ from app.fine.fastgs_defaults import (
     FASTGS_RESOLUTION,
     FASTGS_ROTATION_LR,
     FASTGS_SAMPLE_CAMERAS,
+    FASTGS_SCENE_TYPE,
     FASTGS_SCALING_LR,
     FASTGS_SHFEATURE_LR,
     FASTGS_SIZE_PRUNE_FROM_ITER,
     FASTGS_SIZE_PRUNE_MAX_SCREEN_SIZE,
-    FASTGS_SIZE_PRUNE_MAX_WORLD_SCALE_RATIO,
 )
+from app.fine.deblur_schedule import profile_for_hint
 from app.fine.option_utils import read_float, read_int
 from app.fine.types import FineFailure
 
@@ -101,9 +88,11 @@ def train_official_fastgs_big(
     output_dir.mkdir(parents=True, exist_ok=True)
     settings = get_settings()
 
-    iterations = read_int((options or {}).get("fine_iterations"), iterations, minimum=5_000, maximum=60_000)
     options = options or {}
-    schedule = resolve_fastgs_schedule(iterations)
+    iterations = read_int(options.get("fine_iterations"), iterations, minimum=5_000, maximum=60_000)
+    scene_type = resolve_fastgs_scene_type(options)
+    scene_profile = profile_for_hint(scene_type)
+    schedule = resolve_fastgs_schedule(iterations, scene_type)
     densification_interval = read_int(options.get("fine_densification_interval"), schedule["densification_interval"], minimum=1, maximum=10_000)
     data_device = str(options.get("fine_data_device") or FASTGS_DATA_DEVICE).strip().lower()
     if data_device not in {"cpu", "cuda"}:
@@ -119,8 +108,8 @@ def train_official_fastgs_big(
     rotation_lr = read_float(options.get("fine_rotation_lr"), FASTGS_ROTATION_LR, minimum=1e-7, maximum=1.0)
     percent_dense = read_float(options.get("fine_percent_dense"), FASTGS_PERCENT_DENSE, minimum=0.0, maximum=1.0)
     grad_thresh = read_float(_first_option(options, "fine_grad_thresh", "fine_fastgs_grad_thresh"), FASTGS_GRAD_THRESH, minimum=1e-7, maximum=0.1)
-    grad_abs_thresh = read_float(_first_option(options, "fine_grad_abs_thresh", "fine_fastgs_grad_abs_thresh"), FASTGS_GRAD_ABS_THRESH, minimum=1e-7, maximum=0.1)
-    densify_grad_threshold = read_float(options.get("fine_densify_grad_threshold"), FASTGS_DENSIFY_GRAD_THRESHOLD, minimum=1e-7, maximum=0.1)
+    grad_abs_thresh = read_float(_first_option(options, "fine_grad_abs_thresh", "fine_fastgs_grad_abs_thresh"), scene_profile.densify_abs_grad_threshold, minimum=1e-7, maximum=0.1)
+    densify_grad_threshold = read_float(options.get("fine_densify_grad_threshold"), scene_profile.densify_grad_threshold, minimum=1e-7, maximum=0.1)
     dense = read_float(options.get("fine_dense"), FASTGS_DENSE, minimum=0.0, maximum=1.0)
     mult = read_float(options.get("fine_mult"), FASTGS_MULT, minimum=0.01, maximum=10.0)
     loss_thresh = read_float(options.get("fine_fastgs_loss_thresh"), FASTGS_LOSS_THRESH, minimum=0.0, maximum=1.0)
@@ -134,17 +123,18 @@ def train_official_fastgs_big(
     opacity_reset_interval = read_int(options.get("fine_opacity_reset_interval"), schedule["opacity_reset_interval"], minimum=1, maximum=100_000)
     size_prune_from_iter = read_int(options.get("fine_fastgs_size_prune_from_iter"), FASTGS_SIZE_PRUNE_FROM_ITER, minimum=0, maximum=100_000)
     size_prune_max_screen_size = read_int(options.get("fine_fastgs_size_prune_max_screen_size"), FASTGS_SIZE_PRUNE_MAX_SCREEN_SIZE, minimum=1, maximum=10_000)
-    size_prune_max_world_scale_ratio = read_float(options.get("fine_fastgs_size_prune_max_world_scale_ratio"), FASTGS_SIZE_PRUNE_MAX_WORLD_SCALE_RATIO, minimum=0.0, maximum=1.0)
+    size_prune_max_world_scale_ratio = read_float(options.get("fine_fastgs_size_prune_max_world_scale_ratio"), scene_profile.size_prune_world_scale_ratio, minimum=0.0, maximum=1.0)
     late_prune_enabled = _bool_string(options.get("fine_fastgs_late_prune_enabled"), FASTGS_LATE_PRUNE_ENABLED)
     late_prune_interval = read_int(options.get("fine_fastgs_late_prune_interval"), schedule["late_prune_interval"], minimum=1, maximum=100_000)
     late_prune_from_iter = read_int(options.get("fine_fastgs_late_prune_from_iter"), schedule["late_prune_from_iter"], minimum=0, maximum=100_000)
     late_prune_until_iter = read_int(options.get("fine_fastgs_late_prune_until_iter"), schedule["late_prune_until_iter"], minimum=0, maximum=100_000)
-    late_prune_min_opacity = read_float(options.get("fine_fastgs_late_prune_min_opacity"), FASTGS_LATE_PRUNE_MIN_OPACITY, minimum=0.001, maximum=0.2)
-    late_prune_score_thresh = read_float(options.get("fine_fastgs_late_prune_score_thresh"), FASTGS_LATE_PRUNE_SCORE_THRESH, minimum=0.5, maximum=1.0)
-    late_prune_max_world_scale_ratio = read_float(options.get("fine_fastgs_late_prune_max_world_scale_ratio"), FASTGS_LATE_PRUNE_MAX_WORLD_SCALE_RATIO, minimum=0.0, maximum=1.0)
-    final_prune_min_opacity = read_float(options.get("fine_fastgs_final_prune_min_opacity"), FASTGS_FINAL_PRUNE_MIN_OPACITY, minimum=0.001, maximum=0.2)
-    final_prune_score_thresh = read_float(options.get("fine_fastgs_final_prune_score_thresh"), FASTGS_FINAL_PRUNE_SCORE_THRESH, minimum=0.5, maximum=1.0)
-    final_prune_max_world_scale_ratio = read_float(options.get("fine_fastgs_final_prune_max_world_scale_ratio"), FASTGS_FINAL_PRUNE_MAX_WORLD_SCALE_RATIO, minimum=0.0, maximum=1.0)
+    late_prune_min_opacity = read_float(options.get("fine_fastgs_late_prune_min_opacity"), scene_profile.late_prune_min_opacity, minimum=0.001, maximum=0.2)
+    late_prune_score_thresh = read_float(options.get("fine_fastgs_late_prune_score_thresh"), scene_profile.late_prune_score_thresh, minimum=0.5, maximum=1.0)
+    late_prune_max_world_scale_ratio = read_float(options.get("fine_fastgs_late_prune_max_world_scale_ratio"), scene_profile.late_prune_world_scale_ratio, minimum=0.0, maximum=1.0)
+    late_prune_max_fraction = read_float(options.get("fine_fastgs_late_prune_max_fraction"), scene_profile.max_prune_fraction_per_step, minimum=0.0, maximum=1.0)
+    final_prune_min_opacity = read_float(options.get("fine_fastgs_final_prune_min_opacity"), scene_profile.final_prune_min_opacity, minimum=0.001, maximum=0.2)
+    final_prune_score_thresh = read_float(options.get("fine_fastgs_final_prune_score_thresh"), scene_profile.final_prune_score_thresh, minimum=0.5, maximum=1.0)
+    final_prune_max_world_scale_ratio = read_float(options.get("fine_fastgs_final_prune_max_world_scale_ratio"), scene_profile.final_prune_world_scale_ratio, minimum=0.0, maximum=1.0)
     deblur_enabled = _choice_string(options.get("fine_deblur_enabled"), FASTGS_DEBLUR_ENABLED, {"auto", "true", "false"})
     deblur_mode = _choice_string(options.get("fine_deblur_mode"), FASTGS_DEBLUR_MODE, {"sharp", "defocus", "motion", "mixed"})
     deblur_blur_registry = str(options.get("fine_deblur_blur_registry") or "").strip()
@@ -162,8 +152,8 @@ def train_official_fastgs_big(
     deblur_warmup_iters = read_int(options.get("fine_deblur_warmup_iters"), schedule["deblur_warmup_iters"], minimum=0, maximum=max(0, iterations - 1))
     deblur_extra_points_enabled = _choice_string(options.get("fine_deblur_extra_points_enabled"), FASTGS_DEBLUR_EXTRA_POINTS_ENABLED, {"true", "false"})
     deblur_sharp_refine_enabled = _choice_string(options.get("fine_deblur_sharp_refine_enabled"), FASTGS_DEBLUR_SHARP_REFINE_ENABLED, {"true", "false"})
-    deblur_sharp_refine_from_iter = read_int(options.get("fine_deblur_sharp_refine_from_iter"), FASTGS_DEBLUR_SHARP_REFINE_FROM_ITER, minimum=0, maximum=max(0, iterations - 1))
-    deblur_sharp_refine_clear_only = _choice_string(options.get("fine_deblur_sharp_refine_clear_only"), FASTGS_DEBLUR_SHARP_REFINE_CLEAR_ONLY, {"true", "false"})
+    deblur_sharp_refine_from_iter = read_int(options.get("fine_deblur_sharp_refine_from_iter"), schedule["sharp_refine_from_iter"], minimum=0, maximum=max(0, iterations - 1))
+    deblur_sharp_refine_clear_only = _choice_string(options.get("fine_deblur_sharp_refine_clear_only"), scene_profile.sharp_refine_clear_only, {"true", "false"})
     deblur_topology_sharp_only = _choice_string(options.get("fine_deblur_topology_sharp_only"), FASTGS_DEBLUR_TOPOLOGY_SHARP_ONLY, {"true", "false"})
     deblur_num_moments = read_int(options.get("fine_deblur_num_moments"), FASTGS_DEBLUR_NUM_MOMENTS, minimum=1, maximum=8)
     deblur_gtnet_lr = read_float(options.get("fine_deblur_gtnet_lr"), FASTGS_DEBLUR_GTNET_LR, minimum=1e-6, maximum=0.1)
@@ -312,6 +302,10 @@ def train_official_fastgs_big(
         str(late_prune_score_thresh),
         "--fastgs_late_prune_max_world_scale_ratio",
         str(late_prune_max_world_scale_ratio),
+        "--fastgs_late_prune_max_fraction",
+        str(late_prune_max_fraction),
+        "--scene_type",
+        scene_type,
     ]
     if deblur_blur_registry:
         command.extend(["--deblur_blur_registry", deblur_blur_registry])
@@ -400,6 +394,9 @@ def train_official_fastgs_big(
         "fastgs_late_prune_min_opacity": late_prune_min_opacity,
         "fastgs_late_prune_score_thresh": late_prune_score_thresh,
         "fastgs_late_prune_max_world_scale_ratio": late_prune_max_world_scale_ratio,
+        "fastgs_late_prune_max_fraction": late_prune_max_fraction,
+        "scene_type": scene_type,
+        "scene_parameter_profile": scene_profile.name,
         "deblur_enabled": deblur_enabled,
         "deblur_mode": deblur_mode,
         "deblur_blur_registry": deblur_blur_registry or None,
@@ -449,17 +446,19 @@ def _fastgs_vendor_root() -> Path:
     return Path(__file__).resolve().parent / "vendor" / "fastgs"
 
 
-def resolve_fastgs_schedule(iterations: int) -> dict[str, int]:
+def resolve_fastgs_schedule(iterations: int, scene_type: str = FASTGS_SCENE_TYPE) -> dict[str, int]:
     iterations = max(1, int(iterations))
+    scene_profile = profile_for_hint(scene_type)
     return {
         "densification_interval": FASTGS_DENSIFICATION_INTERVAL,
         "densify_from_iter": min(FASTGS_DENSIFY_FROM_ITER, max(0, iterations - 1)),
-        "densify_until_iter": min(FASTGS_DENSIFY_UNTIL_ITER, iterations),
+        "densify_until_iter": min(scene_profile.densify_until_iter, iterations),
         "opacity_reset_interval": FASTGS_OPACITY_RESET_INTERVAL,
-        "late_prune_interval": FASTGS_LATE_PRUNE_INTERVAL,
-        "late_prune_from_iter": min(FASTGS_LATE_PRUNE_FROM_ITER, iterations),
-        "late_prune_until_iter": min(FASTGS_LATE_PRUNE_UNTIL_ITER, iterations),
-        "deblur_warmup_iters": min(max(0, FASTGS_DEBLUR_WARMUP_ITERS), max(0, iterations - 1)),
+        "late_prune_interval": scene_profile.late_prune_interval,
+        "late_prune_from_iter": min(scene_profile.late_prune_from, iterations),
+        "late_prune_until_iter": min(scene_profile.late_prune_until, iterations),
+        "deblur_warmup_iters": min(max(0, scene_profile.deblur_warmup_iters), max(0, iterations - 1)),
+        "sharp_refine_from_iter": min(scene_profile.sharp_refine_from, max(0, iterations - 1)),
         "position_lr_max_steps": iterations,
     }
 
@@ -477,6 +476,16 @@ def _require_fastgs_vendor(vendor_root: Path) -> None:
     ]
     if missing:
         raise FineFailure("FASTGS_VENDOR_MISSING", f"FastGS vendor source is incomplete: {', '.join(missing)}")
+
+
+def resolve_fastgs_scene_type(options: dict[str, Any]) -> str:
+    raw = _first_option(options, "scene_type", "fine_scene_type", "fine_scene_profile", "preview_scene_profile")
+    normalized = str(raw or FASTGS_SCENE_TYPE).strip().lower()
+    if normalized in {"indoor", "indoor_full", "mixed_balanced"}:
+        return "indoor_full"
+    if normalized in {"outdoor", "outdoor_full", "outdoor_fast_clean"}:
+        return "outdoor_full"
+    return FASTGS_SCENE_TYPE
 
 
 def _optional_float(

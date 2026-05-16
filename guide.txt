@@ -1,0 +1,1 @@
+https://github.com/Battleroid/lingbot-map-studio,根据以上代码仓库修改我的https://github.com/Braveliu66/3dgsbi/代码仓库,我的运行逻辑,转换逻辑,我的单独视频极速预览页面的渲染模块想迁移为他的样子,前端渲染可以单独把视频预览的spark换为他的,因为之前我的代码速度不行并且效果位姿错误全部模糊成一团,可以使用它输入视频后到点云的部分

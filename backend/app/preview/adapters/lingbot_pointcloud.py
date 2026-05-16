@@ -25,22 +25,27 @@ def run(ctx: PreviewContext) -> PreviewResult:
     metrics_json = output_dir / "metrics.json"
     meta_path = output_dir / "preview_meta.json"
 
+    profile = str(ctx.options.get("preview_lingbot_profile") or "stable_fast").strip().lower()
+    defaults = pointcloud_profile_defaults(profile)
     config = PointCloudVideoConfig(
-        fps=read_float(ctx.options.get("preview_lingbot_fps"), 10.0, minimum=0.1, maximum=60.0),
+        profile=profile if profile in {"stable_fast", "low_mem", "long_video"} else "stable_fast",
+        mode=str(ctx.options.get("preview_lingbot_mode") or defaults["mode"]),
+        fps=read_float(ctx.options.get("preview_lingbot_fps"), defaults["fps"], minimum=0.1, maximum=60.0),
         image_size=read_int(ctx.options.get("preview_lingbot_image_size"), 518, minimum=224, maximum=1024),
         target_width=read_int(ctx.options.get("preview_lingbot_target_width"), 518, minimum=14, maximum=2048),
         target_height=read_int(ctx.options.get("preview_lingbot_target_height"), 378, minimum=14, maximum=2048),
-        window_size=read_int(ctx.options.get("preview_lingbot_window_size"), 128, minimum=8, maximum=512),
-        keyframe_interval=read_int(ctx.options.get("preview_lingbot_keyframe_interval"), 13, minimum=1, maximum=100_000),
-        overlap_keyframes=read_int(ctx.options.get("preview_lingbot_overlap_keyframes"), 16, minimum=1, maximum=128),
-        num_scale_frames=read_int(ctx.options.get("preview_lingbot_num_scale_frames"), 8, minimum=1, maximum=64),
-        camera_iterations_fast=read_int(ctx.options.get("preview_lingbot_camera_iterations"), 2, minimum=1, maximum=8),
-        camera_iterations_retry=read_int(ctx.options.get("preview_lingbot_camera_iterations_retry"), 2, minimum=1, maximum=8),
+        window_size=read_int(ctx.options.get("preview_lingbot_window_size"), defaults["window_size"], minimum=8, maximum=512),
+        keyframe_interval=read_int(ctx.options.get("preview_lingbot_keyframe_interval"), defaults["keyframe_interval"], minimum=1, maximum=100_000),
+        overlap_keyframes=read_int(ctx.options.get("preview_lingbot_overlap_keyframes"), defaults["overlap_keyframes"], minimum=1, maximum=128),
+        num_scale_frames=read_int(ctx.options.get("preview_lingbot_num_scale_frames"), defaults["num_scale_frames"], minimum=1, maximum=64),
+        camera_iterations_fast=read_int(ctx.options.get("preview_lingbot_camera_iterations"), defaults["camera_iterations"], minimum=1, maximum=8),
+        camera_iterations_retry=read_int(ctx.options.get("preview_lingbot_camera_iterations_retry"), defaults["camera_iterations"], minimum=1, maximum=8),
         pixel_stride_fast=read_int(ctx.options.get("preview_lingbot_pixel_stride_fast"), 5, minimum=1, maximum=512),
         pixel_stride_full=read_int(ctx.options.get("preview_lingbot_pixel_stride_full"), 3, minimum=1, maximum=512),
-        conf_percentile_fast=read_float(ctx.options.get("preview_lingbot_conf_percentile_fast"), 45.0, minimum=0.0, maximum=100.0),
+        conf_percentile_fast=read_float(ctx.options.get("preview_lingbot_conf_percentile_fast"), defaults["conf_percentile_fast"], minimum=0.0, maximum=100.0),
         conf_percentile_full=read_float(ctx.options.get("preview_lingbot_conf_percentile_full"), 35.0, minimum=0.0, maximum=100.0),
-        min_conf=read_float(ctx.options.get("preview_lingbot_min_conf"), 0.8, minimum=-100.0, maximum=100.0),
+        min_conf=read_float(ctx.options.get("preview_lingbot_min_conf"), 1e-5, minimum=-100.0, maximum=100.0),
+        use_sdpa=read_bool(ctx.options.get("preview_lingbot_use_sdpa"), bool(defaults["use_sdpa"])),
         allow_sdpa_fallback=read_bool(ctx.options.get("preview_lingbot_allow_sdpa_fallback"), False),
         compile_model=read_bool(ctx.options.get("preview_lingbot_compile"), False),
         write_progressive_preview=read_bool(ctx.options.get("preview_lingbot_write_progressive_preview"), True),
@@ -63,7 +68,7 @@ def run(ctx: PreviewContext) -> PreviewResult:
         22,
         (
             "LingBot point cloud params: "
-            f"fps={config.fps:g} max_frames=0 mode=windowed "
+            f"profile={config.profile} fps={config.fps:g} max_frames=0 mode={config.mode} "
             f"window={config.window_size} keyframe_interval={config.keyframe_interval} "
             f"camera_iters={config.camera_iterations_fast}"
         ),
@@ -98,7 +103,7 @@ def run(ctx: PreviewContext) -> PreviewResult:
             "adapter": "lingbot_video_pointcloud_fast",
             "intermediate_ply": str(fast_ply_path),
             "intermediate_ply_size": fast_ply_path.stat().st_size,
-            "point_source": "world_points_from_depth",
+            "point_source": metrics.get("point_source") or metrics.get("lingbot_point_source") or "world_points",
         },
         source_commits={"LingBot-Map": SOURCE_COMMITS["LingBot-Map"]},
         primary_artifact=fast_ply_path,
@@ -118,6 +123,44 @@ def single_video_file(input_dir: Path) -> Path:
     if len(videos) != 1:
         raise PreviewFailure("INVALID_VIDEO_INPUT", "LingBot point-cloud preview requires exactly one video file")
     return videos[0]
+
+
+def pointcloud_profile_defaults(profile: str) -> dict[str, int | float | str | bool]:
+    if profile == "low_mem":
+        return {
+            "mode": "auto",
+            "fps": 8.0,
+            "window_size": 32,
+            "keyframe_interval": 6,
+            "overlap_keyframes": 8,
+            "num_scale_frames": 2,
+            "camera_iterations": 2,
+            "conf_percentile_fast": 65.0,
+            "use_sdpa": True,
+        }
+    if profile == "long_video":
+        return {
+            "mode": "windowed",
+            "fps": 10.0,
+            "window_size": 128,
+            "keyframe_interval": 13,
+            "overlap_keyframes": 8,
+            "num_scale_frames": 4,
+            "camera_iterations": 4,
+            "conf_percentile_fast": 65.0,
+            "use_sdpa": True,
+        }
+    return {
+        "mode": "auto",
+        "fps": 10.0,
+        "window_size": 64,
+        "keyframe_interval": 6,
+        "overlap_keyframes": 8,
+        "num_scale_frames": 4,
+        "camera_iterations": 4,
+        "conf_percentile_fast": 65.0,
+        "use_sdpa": True,
+    }
 
 
 def read_int(value, fallback: int, *, minimum: int, maximum: int) -> int:

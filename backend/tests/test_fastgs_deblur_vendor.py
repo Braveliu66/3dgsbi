@@ -61,9 +61,16 @@ class FastGSDeblurSourceTests(unittest.TestCase):
         self.assertIn("fastgs_late_prune_enabled", source)
         self.assertIn("fastgs_late_prune_min_opacity", source)
         self.assertIn("score_thresh = opt.fastgs_late_prune_score_thresh", source)
+        self.assertIn("and not deblur_loss_active", source)
+        self.assertIn('use_score = scene_profile.name != "indoor"', source)
+        self.assertIn('use_scale = scene_profile.name != "indoor"', source)
         self.assertNotIn("and not deblur_state.enabled", source)
         self.assertNotIn('opt.deblur_blurred_views_only = "false"', source)
         self.assertIn('"deblur_final_prune_uses_sharp_score": True', source)
+
+        schedule_source = (BACKEND_ROOT / "app" / "fine" / "deblur_schedule.py").read_text(encoding="utf-8")
+        self.assertNotIn('if prune_mode == "conservative":\n            return raw_prune_mask', schedule_source)
+        self.assertIn("max_prune_fraction_per_step=0.03", schedule_source)
 
     def test_fastgs_argparse_uses_central_defaults(self) -> None:
         sys.path.insert(0, str(BACKEND_ROOT))

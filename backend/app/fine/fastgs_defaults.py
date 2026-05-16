@@ -22,6 +22,7 @@ FINE_SCENE_PROFILE_MAX_SIDES = {
 # 如果没有手动指定，就用 mixed_balanced。
 # 如果你追求室内小场景质量，建议运行时切到 indoor_full。
 DEFAULT_FINE_SCENE_PROFILE = "mixed_balanced"
+FASTGS_SCENE_TYPE = "auto"
 
 # 精修输入图像最大边长。
 # 1500 质量较好，但比 1080 慢。
@@ -189,7 +190,7 @@ FASTGS_OPACITY_RESET_INTERVAL = 100_000
 # effectively disabled for deblur runs, but large blobs still need pruning.
 FASTGS_SIZE_PRUNE_FROM_ITER = 3_000
 FASTGS_SIZE_PRUNE_MAX_SCREEN_SIZE = 12
-FASTGS_SIZE_PRUNE_MAX_WORLD_SCALE_RATIO = 0.06
+FASTGS_SIZE_PRUNE_MAX_WORLD_SCALE_RATIO = 0.15
 
 # densify 从第几轮开始。
 # 500 是标准设置，让初始点先稳定一点再加密。
@@ -198,7 +199,7 @@ FASTGS_DENSIFY_FROM_ITER = 500
 # densify 到第几轮结束。
 # 15000 对 30000 轮训练是质量优先设置。
 # 点云少/细节不足时可以到 18000 或 20000。
-FASTGS_DENSIFY_UNTIL_ITER = 12_000
+FASTGS_DENSIFY_UNTIL_ITER = 24_000
 
 # VCD/VCP 采样多少个相机计算多视角 score。
 # 12 对你这种少图场景等于基本全采样，比较稳。
@@ -223,11 +224,11 @@ FASTGS_LATE_PRUNE_ENABLED = True
 
 # late prune 间隔。
 # 如果启用，则每 3000 iter 做一次 late prune。
-FASTGS_LATE_PRUNE_INTERVAL = 2_000
+FASTGS_LATE_PRUNE_INTERVAL = 4_000
 
 # late prune 从第几轮开始。
 # 27000 表示只在最后 10% 左右开始轻剪。
-FASTGS_LATE_PRUNE_FROM_ITER = 18_000
+FASTGS_LATE_PRUNE_FROM_ITER = 28_000
 
 # late prune 到第几轮结束。
 
@@ -235,22 +236,23 @@ FASTGS_LATE_PRUNE_UNTIL_ITER = 30_000
 
 # late prune 的 opacity 阈值。
 # 0.005 是轻剪；0.02 以上会更强，可能剪掉远端细节。
-FASTGS_LATE_PRUNE_MIN_OPACITY = 0.04
+FASTGS_LATE_PRUNE_MIN_OPACITY = 0.005
 
 # late prune 的 score 阈值。
 # 1.0 基本最保守；0.95/0.98 会更积极剪。
-FASTGS_LATE_PRUNE_SCORE_THRESH = 0.90
-FASTGS_LATE_PRUNE_MAX_WORLD_SCALE_RATIO = 0.05
+FASTGS_LATE_PRUNE_SCORE_THRESH = 0.95
+FASTGS_LATE_PRUNE_MAX_WORLD_SCALE_RATIO = 0.12
+FASTGS_LATE_PRUNE_MAX_FRACTION = 0.03
 
 # final prune 的 opacity 阈值。
 # 0.001 很轻，质量优先推荐。
 # 如果飞点很多可试 0.003 或 0.005，但可能损失细节。
-FASTGS_FINAL_PRUNE_MIN_OPACITY = 0.03
+FASTGS_FINAL_PRUNE_MIN_OPACITY = 0.005
 # final prune 的 score 阈值。
 # 1.0 最保守，尽量不按 score 剪。
 # 如果后处理飞点很多，可试 0.98 或 0.95。
 FASTGS_FINAL_PRUNE_SCORE_THRESH = 0.90
-FASTGS_FINAL_PRUNE_MAX_WORLD_SCALE_RATIO = 0.04
+FASTGS_FINAL_PRUNE_MAX_WORLD_SCALE_RATIO = 0.10
 
 
 # ============================================================
@@ -346,8 +348,8 @@ FASTGS_DEBLUR_BLURRED_VIEWS_ONLY = "true"
 # Keep GTnet as a training-time blur renderer only.  The final stage disables
 # deblur and fine-tunes ordinary Gaussians from clear frames for PLY/SPZ export.
 FASTGS_DEBLUR_SHARP_REFINE_ENABLED = "true"
-FASTGS_DEBLUR_SHARP_REFINE_FROM_ITER = 20_000
-FASTGS_DEBLUR_SHARP_REFINE_CLEAR_ONLY = "true"
+FASTGS_DEBLUR_SHARP_REFINE_FROM_ITER = 26_000
+FASTGS_DEBLUR_SHARP_REFINE_CLEAR_ONLY = "false"
 
 # Extra points are risky on mixed sharp/blurred captures because they clone from
 # blurred-view gradients without the usual multiview score filter.

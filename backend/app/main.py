@@ -519,6 +519,25 @@ def normalize_fine_scene_profile(value: Any) -> str:
     return profile
 
 
+def normalize_scene_type(value: Any) -> str:
+    scene_type = str(value or "auto").strip().lower()
+    if scene_type in {"auto", "mixed", "mixed_balanced"}:
+        return "auto"
+    if scene_type in {"indoor", "indoor_full"}:
+        return "indoor"
+    if scene_type in {"outdoor", "outdoor_full", "outdoor_fast_clean"}:
+        return "outdoor"
+    raise HTTPException(status_code=400, detail=f"Unsupported scene type: {scene_type}")
+
+
+def fine_scene_profile_from_scene_type(scene_type: str) -> str:
+    if scene_type == "indoor":
+        return "indoor_full"
+    if scene_type == "outdoor":
+        return "outdoor_fast_clean"
+    return DEFAULT_FINE_SCENE_PROFILE
+
+
 def request_worker_cancel(task: Task) -> None:
     try:
         request_task_cancel(get_redis(), task.id, task.type)
@@ -1117,12 +1136,23 @@ def create_fine_task(
     if str(payload_options.get("fine_edgs_enabled", "")).strip().lower() in {"1", "true", "yes", "on"}:
         raise HTTPException(status_code=400, detail="EDGS/RoMA dense initialization has been removed")
 
+    scene_type = normalize_scene_type(
+        payload_options.get("fine_scene_type")
+        or payload_options.get("scene_type")
+        or payload_options.get("fine_scene_profile")
+        or payload_options.get("preview_scene_profile")
+    )
+    fine_scene_profile = normalize_fine_scene_profile(
+        payload_options.get("fine_scene_profile")
+        or payload_options.get("preview_scene_profile")
+        or fine_scene_profile_from_scene_type(scene_type)
+    )
     options = {
         **payload_options,
         "fine_pipeline": fine_pipeline,
-        "fine_scene_profile": normalize_fine_scene_profile(
-            payload_options.get("fine_scene_profile") or payload_options.get("preview_scene_profile")
-        ),
+        "scene_type": scene_type,
+        "fine_scene_type": scene_type,
+        "fine_scene_profile": fine_scene_profile,
         "source_version": project.source_version,
         "fine_iterations": int(payload_options.get("fine_iterations") or settings.fine_iterations),
     }
@@ -1410,7 +1440,7 @@ def fresh_preview_viewer_artifacts(project: Project) -> dict[str, Artifact | Non
     ]
     model = sorted(preview_artifacts, key=lambda item: item.created_at, reverse=True)[0] if preview_artifacts else None
     if not model:
-        return {"model": None, "ply": None, "full_ply": None, "debug_splats": None, "meta": None}
+        return {"model": None, "ply": None, "full_ply": None, "debug_splats": None, "meta": None, "camera_path": None}
     task_artifacts = [item for item in project.artifacts if item.task_id == model.task_id]
     full_ply = next((item for item in task_artifacts if item.kind == "preview_full_ply"), None)
     return {
@@ -1419,6 +1449,7 @@ def fresh_preview_viewer_artifacts(project: Project) -> dict[str, Artifact | Non
         "full_ply": full_ply,
         "debug_splats": next((item for item in task_artifacts if item.kind == "debug_splats_ply"), None),
         "meta": next((item for item in task_artifacts if item.kind == "preview_meta_json"), None),
+        "camera_path": next((item for item in task_artifacts if item.kind == "camera_path_json"), None),
     }
 
 
@@ -1448,6 +1479,7 @@ def project_viewer_payload(project: Project) -> dict[str, Any]:
         preview_ply = preview["ply"]
         preview_full_ply = preview["full_ply"]
         preview_meta = preview["meta"]
+        preview_camera_path = preview["camera_path"]
         if preview_model.kind == "preview_pointcloud_ply":
             point_ply = preview_ply or preview_model
             download_ply = preview_full_ply or point_ply
@@ -1464,6 +1496,7 @@ def project_viewer_payload(project: Project) -> dict[str, Any]:
                 "debug_splats_ply_url": None,
                 "download_ply_url": artifact_url(download_ply, download=True) if download_ply else None,
                 "preview_meta_url": artifact_url(preview_meta) if preview_meta else None,
+                "camera_path_url": artifact_url(preview_camera_path) if preview_camera_path else None,
                 "quality_warning": (preview_model.metadata_json or {}).get("quality_warning"),
                 "point_source": (preview_model.metadata_json or {}).get("point_source")
                 or (preview_model.metadata_json or {}).get("lingbot_point_source"),

@@ -12,73 +12,216 @@ from app.preview.vendor.litevggt_runtime import run_litevggt_pointcloud
 DEFAULT_PREVIEW_SCENE_PROFILE = "mixed_balanced"
 LITEVGGT_SCENE_PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
     "mixed_balanced": {
-        "litevggt_keep_ratio": 0.85,
-        "preview_max_points": 5_000_000,
+        # 点云保留比例；越大点越多，结构更完整，但后处理、SPZ转换、前端加载更慢
+        "litevggt_keep_ratio": 0.45,
+
+        # 最终预览最大点数；直接影响 PLY/SPZ 文件大小、转换速度和浏览器加载速度
+        "preview_max_points": 2_000_000,
+
+        # 最多送入 LiteVGGT 的输入帧数；这是影响推理速度和显存的核心参数之一
+        # 500+ 图片时不建议全量输入，建议把原始图片当候选池，只选关键帧
         "litevggt_max_input_frames": 240,
-        "litevggt_target_size": 476,
+
+        # LiteVGGT 输入目标尺寸；越大细节越好，但 token 数更多，推理更慢、更占显存
+        # 常见档位：336/392 极速，448 均衡，476/518 质量优先
+        "litevggt_target_size": 336,
+
+        # 固定抽帧步长；None 表示不按固定 stride 抽帧，而交给关键帧/场景变化策略
+        # 例如设为 2 表示每隔 2 帧取 1 帧，速度更快但可能漏掉关键视角
         "litevggt_frame_stride": None,
+
+        # 深度置信度阈值；None 表示使用模型/后处理默认逻辑
+        # 设置后会丢弃低置信度深度点，点云更干净，但可能变稀疏
         "litevggt_depth_conf_thresh": None,
+
+        # 图片预处理模式；pad 表示保持完整画面，用 padding 补到目标尺寸
+        # 优点是不裁掉边缘；缺点是有效区域可能变小
         "litevggt_preprocess_mode": "pad",
+
+        # 推理模式；single 表示一次性推理选中的全部帧
+        # 如果支持 chunk/window 模式，长序列可分块推理以降低显存
         "litevggt_inference_mode": "single",
+
+        # 分块推理时每个 chunk 的帧数；single 模式下可能不生效
+        # 越大上下文更完整，但显存和时间更高
         "litevggt_chunk_size": 64,
+
+        # 分块推理时相邻 chunk 的重叠帧数；single 模式下可能不生效
+        # 越大 chunk 之间更连续，但重复计算更多
         "litevggt_overlap": 16,
+
+        # 是否启用回环/首尾一致性处理；有助于闭环场景结构一致
+        # 会增加一些计算和后处理成本
         "litevggt_loop_closure": True,
+
+        # 关键帧目标数量；None 表示不额外限制关键帧目标数
+        # 如果设置为 240，表示场景选帧尽量选到约 240 张关键帧
         "litevggt_keyframe_target": 240,
+
+        # 关键帧之间的最小帧间隔；越大抽帧越稀疏，速度更快但连续性下降
         "litevggt_min_frame_gap": 1,
+
+        # 最小场景变化阈值；变化超过该值才更可能被选为关键帧
+        # 值越大，选帧越少、更激进；值越小，选帧越密
+        # 注意：6.0 这种值通常表示另一种特征/直方图尺度，需和实现里的计算尺度一致
         "litevggt_min_scene_change": 6.0,
+
+        # 分窗口/中间点云体素下采样比例；按场景包围盒对角线计算 voxel size
+        # 1/700 表示 voxel size = scene_diag / 700；值越大，下采样越强，速度越快，细节越少
         "litevggt_window_voxel_diag_ratio": 1 / 700,
+
+        # 最终点云体素下采样比例；用于最终输出前统一降采样
+        # 1/800 比 1/450 保留更多细节，但点数更多
         "litevggt_final_voxel_diag_ratio": 1 / 800,
+
+        # 点选择策略：
+        # scene_coverage：尽量保证不同帧/不同区域都有覆盖，适合结构预览
+        # global_confidence：全局按置信度选点，点更干净但可能局部区域被丢失
+        # per_frame：每帧保留一定点，避免某些帧完全没贡献
         "litevggt_point_selection_strategy": "scene_coverage",
-        "litevggt_axis_trim_low_quantile": 0.005,
-        "litevggt_axis_trim_high_quantile": 0.995,
+
+        # 单轴低分位裁剪；去掉 x/y/z 方向极小端的离群点
+        # 值越大裁剪越狠，室外噪声可适当调大
+        "litevggt_axis_trim_low_quantile": 0.003,
+
+        # 单轴高分位裁剪；去掉 x/y/z 方向极大端的离群点
+        # 0.995 表示保留到 99.5% 分位，去掉最外侧 0.5% 高端离群点
+        "litevggt_axis_trim_high_quantile": 0.990,
+
+        # 空间距离保留分位；按距离中心/主体区域的空间分布去掉远端离群点
+        # 值越小越干净但可能裁掉真实远处结构
         "litevggt_spatial_keep_quantile": 0.985,
     },
+
     "indoor_full": {
-        "litevggt_keep_ratio": 0.95,
-        "preview_max_points": 5_000_000,
+        # 室内完整模式保留更多点；结构更完整，但速度慢于 fast
+        "litevggt_keep_ratio": 0.55,
+
+        # 最终最大点数；室内 full 仍限制在 500 万，避免浏览器压力过大
+        "preview_max_points": 3_000_000,
+
+        # 最多输入帧数；室内细节多，240 帧可以获得更完整覆盖，但速度会明显慢于 64/96 帧
         "litevggt_max_input_frames": 240,
-        "litevggt_target_size": 476,
+
+        # 输入目标尺寸；476 偏质量优先，适合室内结构线条和细节
+        "litevggt_target_size": 240,
+
+        # 固定抽帧步长；None 表示由关键帧选择策略决定
         "litevggt_frame_stride": None,
+
+        # 深度置信度阈值；None 表示不过早裁掉低置信度点
         "litevggt_depth_conf_thresh": None,
+
+        # pad 模式保留完整画面，适合室内避免裁掉墙角、天花、地面边缘
         "litevggt_preprocess_mode": "pad",
+
+        # 单次推理模式；如果 240 帧显存不够，应切到 chunk/window 模式
         "litevggt_inference_mode": "single",
+
+        # chunk 大小；室内 full 用 48，单块显存压力低于 64
         "litevggt_chunk_size": 48,
-        "litevggt_overlap": 24,
+
+        # chunk 重叠帧数；24 表示 50% 重叠，连续性好，但重复计算更多
+        "litevggt_overlap": 8,
+
+        # 室内闭环/回环常见，开启有助于房间结构一致
         "litevggt_loop_closure": True,
+
+        # None 表示不额外指定关键帧目标数量，主要受 max_input_frames 和场景变化控制
         "litevggt_keyframe_target": None,
-        "litevggt_min_frame_gap": 1,
-        "litevggt_min_scene_change": 0.0,
-        "litevggt_window_voxel_diag_ratio": 0.0,
-        "litevggt_final_voxel_diag_ratio": 1 / 1000,
+
+        # 最小帧间隔 1，允许相邻帧都被选中；室内慢速移动时能保留连续性
+        "litevggt_min_frame_gap": 2,
+
+        # 室内场景变化阈值；0.045 适合归一化图像差异/场景变化分数
+        # 值越小，选帧越多；值越大，选帧越少
+        "litevggt_min_scene_change": 0.065,
+
+        # 窗口阶段不做体素下采样；保留更多室内细节，但中间点数会更多
+        "litevggt_window_voxel_diag_ratio": 1 / 700,
+
+        # 最终体素下采样；1/800 保留较多细节
+        "litevggt_final_voxel_diag_ratio": 1 / 700,
+
+        # 室内结构覆盖优先，避免只保留高置信度墙面而丢掉角落/通道
         "litevggt_point_selection_strategy": "scene_coverage",
-        "litevggt_axis_trim_low_quantile": 0.002,
-        "litevggt_axis_trim_high_quantile": 0.998,
+
+        # 低端离群点裁剪；室内噪声相对可控，裁剪不要太狠
+        "litevggt_axis_trim_low_quantile": 0.02,
+
+        # 高端离群点裁剪；去掉最外侧 0.5% 高端离群点
+        "litevggt_axis_trim_high_quantile": 0.90,
+
+        # 空间离群点裁剪；0.985 会去掉较远的异常点，让室内点云更干净
+        "litevggt_spatial_keep_quantile": 0.975,
+    },
+
+    "outdoor_fast_clean": {
+        # 室外快速干净模式保留较少点；速度更快、噪声更少，但细节更稀疏
+        "litevggt_keep_ratio": 0.25,
+
+        # 最终最大点数；虽然 keep_ratio 低，但仍允许最多 500 万点
+        # 若目标是极速网页预览，可以进一步降到 1_500_000 ~ 3_000_000
+        "preview_max_points": 4_000_000,
+
+        # 最多输入帧数；240 对室外大场景覆盖更好，但速度不是最极速
+        # 500+ 图片极速预览建议 64/96/128
+        "litevggt_max_input_frames": 240,
+
+        # 输入目标尺寸；476 质量较好，但室外 fast 若追求速度可降到 392/448
+        "litevggt_target_size": 476,
+
+        # 固定抽帧步长；None 表示用关键帧选择策略
+        "litevggt_frame_stride": None,
+
+        # 深度置信度阈值；None 表示不手动设置
+        # 室外天空/反光/远景多，可以考虑设置阈值过滤低置信度点
+        "litevggt_depth_conf_thresh": None,
+
+        # pad 模式保留完整画面；室外可避免裁掉建筑边缘
+        "litevggt_preprocess_mode": "pad",
+
+        # 单次推理；长序列或显存不足时建议切 chunk/window
+        "litevggt_inference_mode": "single",
+
+        # chunk 大小；48 相对保守，适合降低显存峰值
+        "litevggt_chunk_size": 48,
+
+        # chunk 重叠帧数；8 比室内小，重复计算少，速度更快
+        "litevggt_overlap": 8,
+
+        # 开启回环；室外环绕建筑/街区时有帮助
+        "litevggt_loop_closure": True,
+
+        # 关键帧目标数量；室外 fast 目标 160，比 max_input_frames 240 更激进
+        "litevggt_keyframe_target": 240,
+
+        # 关键帧最小间隔 2，减少相邻重复帧，提升速度和多样性
+        "litevggt_min_frame_gap": 3,
+
+        # 场景变化阈值；8.0 表示更激进地筛选变化明显的帧
+        # 注意要确认实现里的 scene_change 分数是否也是 0~10 这类尺度
+        "litevggt_min_scene_change": 3.0,
+
+        # 窗口阶段体素下采样更强；1/350 比 1/700 voxel 更大，点更少、更干净
+        "litevggt_window_voxel_diag_ratio": 1 / 350,
+
+        # 最终体素下采样较强；1/450 会明显减少室外噪声和点数
+        "litevggt_final_voxel_diag_ratio": 1 / 450,
+
+        # 全局置信度优先；更适合室外去噪，但可能牺牲边缘/远处覆盖
+        "litevggt_point_selection_strategy": "global_confidence",
+
+        # 低端裁剪较强；室外离群点多，0.02 会裁掉更多异常区域
+        "litevggt_axis_trim_low_quantile": 0.001,
+
+        # 高端裁剪较强；0.98 会裁掉最高端 2% 空间分布点，点云更干净但可能损失远景
+        "litevggt_axis_trim_high_quantile": 0.995,
+
+        # 空间裁剪较强；0.98 去掉最远 2% 空间离群点
         "litevggt_spatial_keep_quantile": 0.99,
     },
-    "outdoor_fast_clean": {
-        "litevggt_keep_ratio": 0.25,
-        "preview_max_points": 5_000_000,
-        "litevggt_max_input_frames": 240,
-        "litevggt_target_size": 476,
-        "litevggt_frame_stride": None,
-        "litevggt_depth_conf_thresh": None,
-        "litevggt_preprocess_mode": "pad",
-        "litevggt_inference_mode": "single",
-        "litevggt_chunk_size": 48,
-        "litevggt_overlap": 8,
-        "litevggt_loop_closure": True,
-        "litevggt_keyframe_target": 160,
-        "litevggt_min_frame_gap": 2,
-        "litevggt_min_scene_change": 8.0,
-        "litevggt_window_voxel_diag_ratio": 1 / 350,
-        "litevggt_final_voxel_diag_ratio": 1 / 450,
-        "litevggt_point_selection_strategy": "global_confidence",
-        "litevggt_axis_trim_low_quantile": 0.02,
-        "litevggt_axis_trim_high_quantile": 0.98,
-        "litevggt_spatial_keep_quantile": 0.98,
-    },
 }
-
 
 def run(ctx: PreviewContext) -> PreviewResult:
     timer = StageTimer()

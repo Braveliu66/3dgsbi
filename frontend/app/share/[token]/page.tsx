@@ -70,6 +70,7 @@ export default function SharedProjectPage() {
               viewerMetaUrl={viewer?.status === "ready" ? viewer.viewer_meta_url ?? viewer.preview_meta_url : null}
               gaussianPlyUrl={viewer?.status === "ready" ? viewer.gaussian_ply_url : null}
               debugPointsUrl={viewer?.status === "ready" ? viewer.debug_points_ply_url : null}
+              cameraPathUrl={viewer?.status === "ready" ? viewer.camera_path_url : null}
               defaultViewMode={viewer?.status === "ready" && viewer.point_source ? "points" : "splats"}
             />
           </div>

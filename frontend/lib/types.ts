@@ -120,6 +120,7 @@ export interface ViewerConfig {
   debug_splats_ply_url?: string | null;
   viewer_meta_url?: string | null;
   preview_meta_url?: string | null;
+  camera_path_url?: string | null;
   quality_warning?: string | null;
   point_source?: string | null;
   lods?: ViewerLod[];

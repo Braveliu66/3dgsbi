@@ -245,6 +245,13 @@ class GaussianModel:
         )
         return self.deblur_state
 
+    def freeze_deblur_mlp(self):
+        if not getattr(self.deblur_state, "enabled", False) or self.deblur_state.model is None:
+            return
+        for param in self.deblur_state.model.parameters():
+            param.requires_grad_(False)
+        self._deblur_mlp_frozen = True
+
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
         for param_group in self.optimizer.param_groups:
@@ -594,18 +601,41 @@ class GaussianModel:
         pruning_score = None,
         score_thresh = FASTGS_FINAL_PRUNE_SCORE_THRESH,
         max_world_scale = None,
+        use_score = True,
+        use_scale = True,
     ):
         """Final-stage pruning: remove Gaussians based on opacity and multi-view consistency.
         In the final stage we remove Gaussians that have low opacity or that are flagged by
         our multi-view reconstruction consistency metric (provided as `pruning_score`)."""
+        final_prune, metrics = self.final_prune_mask_fastgs(
+            min_opacity=min_opacity,
+            pruning_score=pruning_score,
+            score_thresh=score_thresh,
+            max_world_scale=max_world_scale,
+            use_score=use_score,
+            use_scale=use_scale,
+        )
+        if metrics["removed"]:
+            self.prune_points(final_prune)
+        return metrics
+
+    def final_prune_mask_fastgs(
+        self,
+        min_opacity,
+        pruning_score = None,
+        score_thresh = FASTGS_FINAL_PRUNE_SCORE_THRESH,
+        max_world_scale = None,
+        use_score = True,
+        use_scale = True,
+    ):
         prune_mask = (self.get_opacity < min_opacity).squeeze() 
-        if pruning_score is None:
+        if pruning_score is None or not use_score:
             scores_mask = torch.zeros_like(prune_mask, dtype=bool, device="cuda")
         else:
             scores_mask = torch.zeros_like(prune_mask, dtype=bool, device="cuda")
             score_values = (pruning_score > score_thresh).reshape(-1)
             scores_mask[:score_values.shape[0]] = score_values
-        if max_world_scale is None or float(max_world_scale) <= 0:
+        if max_world_scale is None or float(max_world_scale) <= 0 or not use_scale:
             scale_mask = torch.zeros_like(prune_mask, dtype=bool, device="cuda")
         else:
             scale_mask = self.get_scaling.max(dim=1).values > float(max_world_scale)
@@ -616,6 +646,4 @@ class GaussianModel:
             "score_candidates": int(torch.count_nonzero(scores_mask).detach().item()),
             "scale_candidates": int(torch.count_nonzero(scale_mask).detach().item()),
         }
-        if metrics["removed"]:
-            self.prune_points(final_prune)
-        return metrics
+        return final_prune, metrics

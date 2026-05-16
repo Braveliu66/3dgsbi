@@ -10,6 +10,11 @@ type ViewerState = "idle" | "loading" | "ready" | "error";
 type ModelFormat = "spz" | "rad" | "ply";
 type ViewMode = "splats" | "ply" | "points";
 type CameraMode = "orbit" | "fly";
+type CameraPathPose = {
+  position: [number, number, number];
+  quaternion: [number, number, number, number];
+  fovYDeg?: number;
+};
 type ViewerMeta = {
   bbox_min: [number, number, number];
   bbox_max: [number, number, number];
@@ -95,6 +100,7 @@ export function SplatViewer({
   viewerMetaUrl,
   gaussianPlyUrl,
   debugPointsUrl,
+  cameraPathUrl,
   defaultViewMode = "splats"
 }: {
   modelUrl?: string | null;
@@ -102,6 +108,7 @@ export function SplatViewer({
   viewerMetaUrl?: string | null;
   gaussianPlyUrl?: string | null;
   debugPointsUrl?: string | null;
+  cameraPathUrl?: string | null;
   defaultViewMode?: ViewMode;
 }) {
   const shellRef = useRef<HTMLElement | null>(null);
@@ -165,6 +172,7 @@ export function SplatViewer({
     let cleanup: (() => void) | undefined;
     let controls: OrbitControlsType | undefined;
     let rawPointGeometry: BufferGeometry | null = null;
+    let cameraPathGroup: Object3D | null = null;
     const modelFormat = activeFormat;
     const qualityRef = { current: qualityIndex };
     const fpsWindow = { startedAt: performance.now(), frames: 0, highStreak: 0, lowStreak: 0 };
@@ -179,6 +187,7 @@ export function SplatViewer({
         setState("loading");
         setMessage(debugMode ? "Loading raw point cloud" : `Loading ${modelFormat.toUpperCase()} model`);
         const viewerMeta = viewerMetaUrl ? await fetchViewerMeta(viewerMetaUrl, abortController.signal).catch(() => null) : null;
+        const cameraPath = debugMode && cameraPathUrl ? await fetchCameraPath(cameraPathUrl, abortController.signal).catch(() => null) : null;
         const loadedModels: LoadedModel[] = [];
         if (!debugMode) {
           for (const url of urls) {
@@ -299,6 +308,10 @@ export function SplatViewer({
           };
           applyPointCloudControlsRef.current();
           splatGroup.add(pointCloud);
+          if (cameraPath?.length) {
+            cameraPathGroup = createCameraPathGroup(THREE, cameraPath, viewerMeta?.radius ?? 1);
+            splatGroup.add(cameraPathGroup);
+          }
         }
 
         resizeObserver = new ResizeObserver(() => {
@@ -317,6 +330,7 @@ export function SplatViewer({
           for (const splat of splats) splat.dispose?.();
           pointCloud?.geometry.dispose();
           rawPointGeometry?.dispose();
+          if (cameraPathGroup) disposeObject3D(cameraPathGroup);
           const pointMaterial = pointCloud?.material;
           if (Array.isArray(pointMaterial)) {
             pointMaterial.forEach((material) => material.dispose());
@@ -421,7 +435,7 @@ export function SplatViewer({
       setViewerReady(false);
       cleanup?.();
     };
-  }, [modelUrl, format, viewerMetaUrl, gaussianPlyUrl, debugPointsUrl, viewMode]);
+  }, [modelUrl, format, viewerMetaUrl, gaussianPlyUrl, debugPointsUrl, cameraPathUrl, viewMode]);
 
   const quality = QUALITY_LEVELS[qualityIndex] ?? QUALITY_LEVELS[0];
   return (
@@ -658,8 +672,165 @@ async function fetchViewerMeta(url: string, signal: AbortSignal): Promise<Viewer
   };
 }
 
+async function fetchCameraPath(url: string, signal: AbortSignal): Promise<CameraPathPose[]> {
+  const response = await fetch(artifactUrl(url), { cache: "no-store", signal });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `${response.status} ${response.statusText}`);
+  }
+  const payload = await response.json() as { poses?: unknown; frames?: unknown };
+  const source = Array.isArray(payload.poses) && payload.poses.length > 0 ? payload.poses : payload.frames;
+  if (!Array.isArray(source)) return [];
+  return source.map(parseCameraPathPose).filter((pose): pose is CameraPathPose => Boolean(pose));
+}
+
+function parseCameraPathPose(value: unknown): CameraPathPose | null {
+  if (!value || typeof value !== "object") return null;
+  const entry = value as { position?: unknown; quaternion?: unknown; c2w?: unknown; intrinsic?: unknown; fov_y_deg?: unknown };
+  const c2w = c2wRows(entry.c2w);
+  const position = isVec3(entry.position) ? entry.position : c2w ? [c2w[0][3], c2w[1][3], c2w[2][3]] as [number, number, number] : null;
+  const quaternion = isQuat(entry.quaternion) ? entry.quaternion : c2w ? quaternionFromRotationRows(c2w) : null;
+  if (!position || !quaternion) return null;
+  const fovYDeg = Number.isFinite(entry.fov_y_deg) ? Number(entry.fov_y_deg) : fovYFromIntrinsic(entry.intrinsic);
+  return { position, quaternion, fovYDeg };
+}
+
+function createCameraPathGroup(THREE: typeof import("three"), poses: CameraPathPose[], radiusHint: number): Object3D {
+  const group = new THREE.Group();
+  const radius = Math.max(Number.isFinite(radiusHint) ? radiusHint : 1, 0.05);
+  const pathPositions = new Float32Array(poses.length * 3);
+  for (let index = 0; index < poses.length; index += 1) {
+    pathPositions[index * 3] = poses[index].position[0];
+    pathPositions[index * 3 + 1] = poses[index].position[1];
+    pathPositions[index * 3 + 2] = poses[index].position[2];
+  }
+
+  const lineGeometry = new THREE.BufferGeometry();
+  lineGeometry.setAttribute("position", new THREE.BufferAttribute(pathPositions, 3));
+  group.add(new THREE.Line(lineGeometry, new THREE.LineBasicMaterial({ color: 0x67e8b7, linewidth: 1 })));
+
+  const pointGeometry = new THREE.BufferGeometry();
+  pointGeometry.setAttribute("position", new THREE.BufferAttribute(pathPositions.slice(), 3));
+  group.add(new THREE.Points(pointGeometry, new THREE.PointsMaterial({ color: 0xffffff, size: Math.max(radius * 0.006, 0.002), sizeAttenuation: true })));
+
+  const frustumStep = Math.max(1, Math.ceil(poses.length / 120));
+  const frustumPositions: number[] = [];
+  const colmapToThree = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI);
+  const baseDepth = Math.max(radius * 0.08, 0.02);
+  for (let index = 0; index < poses.length; index += frustumStep) {
+    appendFrustumSegments(THREE, frustumPositions, poses[index], colmapToThree, baseDepth);
+  }
+  if (frustumPositions.length > 0) {
+    const frustumGeometry = new THREE.BufferGeometry();
+    frustumGeometry.setAttribute("position", new THREE.Float32BufferAttribute(frustumPositions, 3));
+    group.add(new THREE.LineSegments(frustumGeometry, new THREE.LineBasicMaterial({ color: 0xf4c95d, linewidth: 1 })));
+  }
+  return group;
+}
+
+function appendFrustumSegments(
+  THREE: typeof import("three"),
+  output: number[],
+  pose: CameraPathPose,
+  colmapToThree: import("three").Quaternion,
+  depth: number
+) {
+  const origin = new THREE.Vector3(pose.position[0], pose.position[1], pose.position[2]);
+  const rotation = new THREE.Quaternion(pose.quaternion[0], pose.quaternion[1], pose.quaternion[2], pose.quaternion[3]).normalize().multiply(colmapToThree);
+  const fov = (Number.isFinite(pose.fovYDeg) ? pose.fovYDeg ?? 55 : 55) * Math.PI / 180;
+  const halfHeight = Math.tan(Math.max(0.1, Math.min(2.6, fov)) / 2) * depth;
+  const halfWidth = halfHeight * 1.35;
+  const corners = [
+    new THREE.Vector3(-halfWidth, -halfHeight, -depth),
+    new THREE.Vector3(halfWidth, -halfHeight, -depth),
+    new THREE.Vector3(halfWidth, halfHeight, -depth),
+    new THREE.Vector3(-halfWidth, halfHeight, -depth)
+  ].map((corner) => corner.applyQuaternion(rotation).add(origin));
+  for (const corner of corners) pushSegment(output, origin, corner);
+  pushSegment(output, corners[0], corners[1]);
+  pushSegment(output, corners[1], corners[2]);
+  pushSegment(output, corners[2], corners[3]);
+  pushSegment(output, corners[3], corners[0]);
+}
+
+function pushSegment(output: number[], a: Vector3, b: Vector3) {
+  output.push(a.x, a.y, a.z, b.x, b.y, b.z);
+}
+
+function disposeObject3D(object: Object3D) {
+  object.traverse((child) => {
+    const disposable = child as Object3D & {
+      geometry?: { dispose?: () => void };
+      material?: { dispose?: () => void } | Array<{ dispose?: () => void }>;
+    };
+    disposable.geometry?.dispose?.();
+    if (Array.isArray(disposable.material)) {
+      disposable.material.forEach((material) => material.dispose?.());
+    } else {
+      disposable.material?.dispose?.();
+    }
+  });
+}
+
 function isVec3(value: unknown): value is [number, number, number] {
   return Array.isArray(value) && value.length === 3 && value.every((item) => Number.isFinite(item));
+}
+
+function isQuat(value: unknown): value is [number, number, number, number] {
+  return Array.isArray(value) && value.length === 4 && value.every((item) => Number.isFinite(item));
+}
+
+function c2wRows(value: unknown): number[][] | null {
+  if (!Array.isArray(value) || value.length < 3) return null;
+  const rows = value.slice(0, 3);
+  if (!rows.every((row) => Array.isArray(row) && row.length >= 4 && row.slice(0, 4).every((item) => Number.isFinite(item)))) return null;
+  return rows.map((row) => row.slice(0, 4).map(Number));
+}
+
+function quaternionFromRotationRows(rows: number[][]): [number, number, number, number] {
+  const m00 = rows[0][0], m01 = rows[0][1], m02 = rows[0][2];
+  const m10 = rows[1][0], m11 = rows[1][1], m12 = rows[1][2];
+  const m20 = rows[2][0], m21 = rows[2][1], m22 = rows[2][2];
+  const trace = m00 + m11 + m22;
+  let x = 0, y = 0, z = 0, w = 1;
+  if (trace > 0) {
+    const s = Math.sqrt(trace + 1) * 2;
+    w = 0.25 * s;
+    x = (m21 - m12) / s;
+    y = (m02 - m20) / s;
+    z = (m10 - m01) / s;
+  } else if (m00 > m11 && m00 > m22) {
+    const s = Math.sqrt(1 + m00 - m11 - m22) * 2;
+    w = (m21 - m12) / s;
+    x = 0.25 * s;
+    y = (m01 + m10) / s;
+    z = (m02 + m20) / s;
+  } else if (m11 > m22) {
+    const s = Math.sqrt(1 + m11 - m00 - m22) * 2;
+    w = (m02 - m20) / s;
+    x = (m01 + m10) / s;
+    y = 0.25 * s;
+    z = (m12 + m21) / s;
+  } else {
+    const s = Math.sqrt(1 + m22 - m00 - m11) * 2;
+    w = (m10 - m01) / s;
+    x = (m02 + m20) / s;
+    y = (m12 + m21) / s;
+    z = 0.25 * s;
+  }
+  const norm = Math.hypot(x, y, z, w);
+  return norm > 0 ? [x / norm, y / norm, z / norm, w / norm] : [0, 0, 0, 1];
+}
+
+function fovYFromIntrinsic(value: unknown): number | undefined {
+  if (!Array.isArray(value) || value.length < 3) return undefined;
+  const row1 = value[1];
+  if (!Array.isArray(row1) || row1.length < 3) return undefined;
+  const fy = Number(row1[1]);
+  const cy = Number(row1[2]);
+  if (!Number.isFinite(fy) || fy <= 0 || !Number.isFinite(cy) || cy <= 0) return undefined;
+  const fov = 2 * Math.atan(cy / fy) * 180 / Math.PI;
+  return Number.isFinite(fov) && fov > 5 && fov < 170 ? fov : undefined;
 }
 
 function modelProgress(loadedBytes: number, totalBytes: number): ModelLoadProgress {

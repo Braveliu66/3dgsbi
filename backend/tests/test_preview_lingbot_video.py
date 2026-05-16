@@ -70,7 +70,7 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             )
 
             def fake_runtime(**kwargs):
-                self.assertEqual(kwargs["fps"], 3)
+                self.assertEqual(kwargs["fps"], 10)
                 self.assertEqual(kwargs["max_frames"], 0)
                 self.assertEqual(kwargs["image_size"], 518)
                 self.assertEqual(kwargs["target_width"], 518)
@@ -91,6 +91,7 @@ class LingBotVideoPreviewTests(unittest.TestCase):
                 self.assertFalse(kwargs["compile_model"])
                 self.assertTrue(kwargs["save_predictions"])
                 self.assertFalse(kwargs["keyframes_only_points"])
+                self.assertTrue(kwargs["use_sdpa"])
                 self.assertFalse(kwargs["allow_sdpa_fallback"])
                 self.assertEqual(kwargs["min_inference_fps"], 3.0)
                 from app.preview.io.ply import write_point_cloud_ply
@@ -174,19 +175,23 @@ class LingBotVideoPreviewTests(unittest.TestCase):
 
             def fake_runtime(**kwargs):
                 config = kwargs["config"]
+                self.assertEqual(config.profile, "stable_fast")
+                self.assertEqual(config.mode, "auto")
                 self.assertEqual(config.fps, 10.0)
                 self.assertEqual(config.target_width, 518)
                 self.assertEqual(config.target_height, 378)
-                self.assertEqual(config.window_size, 128)
-                self.assertEqual(config.keyframe_interval, 13)
-                self.assertEqual(config.overlap_keyframes, 16)
-                self.assertEqual(config.camera_iterations_fast, 2)
-                self.assertEqual(config.num_scale_frames, 8)
+                self.assertEqual(config.window_size, 64)
+                self.assertEqual(config.keyframe_interval, 6)
+                self.assertEqual(config.overlap_keyframes, 8)
+                self.assertEqual(config.camera_iterations_fast, 4)
+                self.assertEqual(config.camera_iterations_retry, 4)
+                self.assertEqual(config.num_scale_frames, 4)
                 self.assertEqual(config.pixel_stride_fast, 5)
                 self.assertEqual(config.pixel_stride_full, 3)
-                self.assertEqual(config.conf_percentile_fast, 45.0)
+                self.assertEqual(config.conf_percentile_fast, 65.0)
                 self.assertEqual(config.conf_percentile_full, 35.0)
-                self.assertEqual(config.min_conf, 0.8)
+                self.assertEqual(config.min_conf, 1e-5)
+                self.assertTrue(config.use_sdpa)
                 self.assertEqual(config.voxel_target_fast, 3000)
                 self.assertEqual(config.voxel_target_full, 5200)
                 self.assertFalse(config.allow_sdpa_fallback)
@@ -242,20 +247,34 @@ class LingBotVideoPreviewTests(unittest.TestCase):
         self.assertEqual(infer_lingbot_model_image_size_from_state_dict(small_checkpoint), 448)
         self.assertEqual(infer_lingbot_model_image_size_from_state_dict({}), 518)
 
-    def test_lingbot_flashinfer_missing_requires_explicit_sdpa_fallback(self) -> None:
+    def test_lingbot_attention_defaults_to_official_sdpa_without_flashinfer(self) -> None:
         from app.preview.types import PreviewFailure
         from app.preview.vendor.lingbot_runtime import resolve_lingbot_attention_backend
 
-        with self.assertRaises(PreviewFailure) as raised:
-            resolve_lingbot_attention_backend(allow_sdpa_fallback=False, flashinfer_probe=lambda: False)
-
-        self.assertEqual(raised.exception.code, "LINGBOT_FLASHINFER_UNAVAILABLE")
         use_sdpa, flashinfer_found = resolve_lingbot_attention_backend(
-            allow_sdpa_fallback=True,
+            allow_sdpa_fallback=False,
             flashinfer_probe=lambda: False,
         )
         self.assertTrue(use_sdpa)
         self.assertFalse(flashinfer_found)
+
+        with self.assertRaises(PreviewFailure) as raised:
+            resolve_lingbot_attention_backend(allow_sdpa_fallback=False, use_sdpa=False, flashinfer_probe=lambda: False)
+
+        self.assertEqual(raised.exception.code, "LINGBOT_FLASHINFER_UNAVAILABLE")
+        use_sdpa, flashinfer_found = resolve_lingbot_attention_backend(
+            allow_sdpa_fallback=True,
+            use_sdpa=False,
+            flashinfer_probe=lambda: False,
+        )
+        self.assertTrue(use_sdpa)
+        self.assertFalse(flashinfer_found)
+
+    def test_lingbot_cuda_illegal_memory_access_is_classified(self) -> None:
+        from app.preview.vendor.lingbot_runtime import is_cuda_illegal_memory_access
+
+        self.assertTrue(is_cuda_illegal_memory_access(RuntimeError("CUDA error: an illegal memory access was encountered")))
+        self.assertFalse(is_cuda_illegal_memory_access(RuntimeError("CUDA error: out of memory")))
 
     def test_lingbot_runtime_no_longer_exposes_experimental_fallback_helpers(self) -> None:
         from app.preview.vendor import lingbot_runtime
@@ -265,14 +284,28 @@ class LingBotVideoPreviewTests(unittest.TestCase):
         self.assertEqual(lingbot_runtime.resolve_kv_cache_sliding_window(64), 16)
         self.assertEqual(lingbot_runtime.resolve_kv_cache_sliding_window(8), 8)
 
-    def test_lingbot_auto_mode_uses_keyframes_before_very_long_windowed(self) -> None:
-        from app.preview.vendor.lingbot_runtime import resolve_keyframe_interval, resolve_mode
+    def test_lingbot_auto_mode_switches_to_windowed_before_streaming_cache_gets_large(self) -> None:
+        from app.preview.vendor.lingbot_runtime import PointCloudVideoConfig, effective_pointcloud_config, resolve_keyframe_interval, resolve_mode
 
         self.assertEqual(resolve_mode("auto", 320), "streaming")
-        self.assertEqual(resolve_mode("auto", 321), "streaming")
-        self.assertEqual(resolve_mode("auto", 807), "streaming")
-        self.assertEqual(resolve_mode("auto", 3000), "streaming")
+        self.assertEqual(resolve_mode("auto", 321), "windowed")
+        self.assertEqual(resolve_mode("auto", 577), "windowed")
+        self.assertEqual(resolve_mode("auto", 3000), "windowed")
         self.assertEqual(resolve_mode("auto", 3001), "windowed")
+        streaming = effective_pointcloud_config(PointCloudVideoConfig(), 320)
+        self.assertEqual(streaming.mode, "streaming")
+        self.assertEqual(streaming.window_size, 64)
+        self.assertEqual(streaming.keyframe_interval, 6)
+        self.assertEqual(streaming.overlap_keyframes, 8)
+        windowed = effective_pointcloud_config(PointCloudVideoConfig(), 577)
+        self.assertEqual(windowed.mode, "windowed")
+        self.assertEqual(windowed.window_size, 128)
+        self.assertEqual(windowed.keyframe_interval, 13)
+        self.assertEqual(windowed.overlap_keyframes, 8)
+        low_mem = effective_pointcloud_config(PointCloudVideoConfig(profile="low_mem", window_size=32, keyframe_interval=6), 577)
+        self.assertEqual(low_mem.mode, "windowed")
+        self.assertEqual(low_mem.window_size, 32)
+        self.assertEqual(low_mem.keyframe_interval, 6)
         self.assertEqual(resolve_keyframe_interval(None, "streaming", 800), 3)
         self.assertEqual(resolve_keyframe_interval(None, "streaming", 807), 3)
         self.assertEqual(resolve_keyframe_interval(None, "windowed", 800), 3)
@@ -284,6 +317,47 @@ class LingBotVideoPreviewTests(unittest.TestCase):
         self.assertEqual(resolve_preprocess_mode("auto", 1280, 720), "crop")
         self.assertEqual(resolve_preprocess_mode("crop", 720, 1280), "crop")
         self.assertEqual(resolve_preprocess_mode("pad", 1280, 720), "pad")
+
+    def test_lingbot_camera_path_payload_keeps_new_and_legacy_shapes(self) -> None:
+        from app.preview.vendor.lingbot_runtime import camera_path_payload
+
+        path = [
+            {
+                "source_frame_index": 0,
+                "position": [0.0, 0.0, 0.0],
+                "c2w": [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]],
+                "intrinsic": [[100.0, 0.0, 50.0], [0.0, 100.0, 40.0], [0.0, 0.0, 1.0]],
+            },
+            {
+                "source_frame_index": 1,
+                "position": [1.0, 0.0, 0.0],
+                "c2w": [[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]],
+                "intrinsic": [[100.0, 0.0, 50.0], [0.0, 100.0, 40.0], [0.0, 0.0, 1.0]],
+            },
+        ]
+
+        payload = camera_path_payload(path, fps=10.0)
+
+        self.assertEqual(payload["fps"], 10.0)
+        self.assertEqual(len(payload["poses"]), 2)
+        self.assertEqual(len(payload["frames"]), 2)
+        self.assertEqual(payload["poses"][1]["position"], [1.0, 0.0, 0.0])
+        self.assertEqual(len(payload["poses"][0]["quaternion"]), 4)
+        self.assertIn("fov_y_deg", payload["poses"][0])
+
+    def test_lingbot_preview_validation_rejects_bad_pointcloud_outputs(self) -> None:
+        from app.preview.types import PreviewFailure
+        from app.preview.vendor.lingbot_runtime import validate_pointcloud_preview
+
+        camera_path = [{"position": [0, 0, 0]}, {"position": [1, 0, 0]}]
+        bbox = {"bbox_min": [0, 0, 0], "bbox_max": [1, 1, 1], "center": [0.5, 0.5, 0.5], "radius": 1.0}
+
+        with self.assertRaises(PreviewFailure):
+            validate_pointcloud_preview(fast_count=0, bbox=bbox, camera_path=camera_path)
+        with self.assertRaises(PreviewFailure):
+            validate_pointcloud_preview(fast_count=1, bbox={**bbox, "radius": 1e9}, camera_path=camera_path)
+        with self.assertRaises(PreviewFailure):
+            validate_pointcloud_preview(fast_count=1, bbox=bbox, camera_path=[camera_path[0]])
 
     def test_lingbot_crop_preprocess_uses_official_loader(self) -> None:
         source = (BACKEND_ROOT / "app" / "preview" / "vendor" / "lingbot_runtime.py").read_text(encoding="utf-8")
@@ -299,7 +373,7 @@ class LingBotVideoPreviewTests(unittest.TestCase):
         self.assertIn("run_lingbot_inference_profile(", source)
         self.assertIn("input_frames_are_prefiltered=false external_stitching=false", source)
         self.assertNotIn("upstream_keyframe_interval=1", source)
-        self.assertNotIn("keyframe_interval=1", source)
+        self.assertNotIn("keyframe_interval=1,", source)
         self.assertEqual(source.count("estimate_window_to_global_transform("), 1)
         self.assertEqual(source.count("apply_world_transform("), 1)
 
@@ -521,6 +595,7 @@ class LingBotVideoPreviewTests(unittest.TestCase):
         )
 
         self.assertEqual(predictions["world_points_from_depth"].shape, (1, 2, 2, 3))
+        self.assertEqual(predictions["world_points_from_depth_convention"], "world_from_depth_using_w2c")
         self.assertEqual(predictions["depth_conf"].shape, (1, 2, 2))
         np.testing.assert_allclose(predictions["depth_conf"], 1.0)
 
@@ -569,8 +644,7 @@ class LingBotVideoPreviewTests(unittest.TestCase):
 
         np.testing.assert_allclose(predictions["world_points_from_depth"], 5.0)
 
-    def test_lingbot_depth_reprojection_requires_w2c_extrinsic(self) -> None:
-        from app.preview.types import PreviewFailure
+    def test_lingbot_depth_reprojection_returns_without_w2c_extrinsic(self) -> None:
         from app.preview.vendor.lingbot_runtime import attach_depth_world_points
 
         predictions = {
@@ -579,13 +653,12 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             "intrinsic": np.eye(3, dtype=np.float32)[None],
         }
 
-        with self.assertRaises(PreviewFailure) as raised:
-            attach_depth_world_points(
-                predictions,
-                unproject_depth_map_to_point_map=lambda *_: np.zeros((1, 1, 1, 3), dtype=np.float32),
-            )
+        attach_depth_world_points(
+            predictions,
+            unproject_depth_map_to_point_map=lambda *_: np.zeros((1, 1, 1, 3), dtype=np.float32),
+        )
 
-        self.assertEqual(raised.exception.code, "LINGBOT_EXTRINSIC_W2C_MISSING")
+        self.assertNotIn("world_points_from_depth", predictions)
 
     def test_lingbot_visualization_preserves_w2c_and_uses_c2w_for_viewer(self) -> None:
         from app.preview.vendor.lingbot_runtime import predictions_to_visualization_np
@@ -646,6 +719,7 @@ class LingBotVideoPreviewTests(unittest.TestCase):
 
         np.testing.assert_allclose(visualized["extrinsic_w2c"], extrinsic_w2c.array)
         np.testing.assert_allclose(visualized["extrinsic"][..., 3], np.array([[2.0, 3.0, 4.0]], dtype=np.float32))
+        self.assertEqual(visualized["extrinsic_convention"], "c2w")
 
     def test_lingbot_camera_view_uses_c2w_position(self) -> None:
         from app.preview.vendor.lingbot_runtime import lingbot_camera_view_from_frame
@@ -720,7 +794,7 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             self.assertEqual(metrics["lingbot_point_frame_count"], 2)
             self.assertEqual(metrics["lingbot_point_skipped_frames"], 0)
 
-    def test_lingbot_npz_to_pointcloud_ply_uses_depth_world_points(self) -> None:
+    def test_lingbot_npz_to_pointcloud_ply_prefers_native_world_points(self) -> None:
         from app.preview.io.ply import POINT_CLOUD_PLY_DTYPE
         from app.preview.vendor.lingbot_runtime import write_spark_plain_ply_from_npz
 
@@ -772,14 +846,90 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             self.assertNotIn(b"property float scale_2", header)
             self.assertEqual(metrics["point_count"], 2)
             self.assertEqual(metrics["lingbot_ply_format"], "rgb_point_cloud")
-            self.assertEqual(metrics["lingbot_point_source"], "world_points_from_depth")
+            self.assertEqual(metrics["lingbot_point_source"], "world_points")
 
             records = np.frombuffer(
                 body,
                 dtype=POINT_CLOUD_PLY_DTYPE,
             )
             self.assertEqual(records.shape[0], 2)
-            np.testing.assert_allclose(records["x"], np.array([3, 4], dtype=np.float32))
+            np.testing.assert_allclose(records["x"], np.array([99, 99], dtype=np.float32))
+
+    def test_lingbot_npz_to_pointcloud_ply_falls_back_when_world_points_invalid(self) -> None:
+        from app.preview.io.ply import POINT_CLOUD_PLY_DTYPE
+        from app.preview.vendor.lingbot_runtime import write_spark_plain_ply_from_npz
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            predictions = root / "predictions"
+            predictions.mkdir()
+            np.savez(
+                predictions / "frame_000000.npz",
+                world_points=np.full((2, 2), 99, dtype=np.float32),
+                world_points_from_depth=np.ones((2, 2, 3), dtype=np.float32),
+                images=np.full((3, 2, 2), 255, dtype=np.uint8),
+                depth_conf=np.ones((2, 2), dtype=np.float32),
+            )
+
+            output_ply = root / "preview_points.ply"
+            metrics = write_spark_plain_ply_from_npz(
+                predictions,
+                output_ply,
+                frame_stride=1,
+                pixel_stride=1,
+                conf_percentile=0,
+                min_conf=0,
+                max_points=0,
+            )
+
+            header, body = output_ply.read_bytes().split(b"end_header\n", 1)
+            self.assertIn(b"element vertex 4", header)
+            self.assertEqual(metrics["lingbot_point_source"], "world_points_from_depth")
+            records = np.frombuffer(body, dtype=POINT_CLOUD_PLY_DTYPE)
+            np.testing.assert_allclose(records["x"], np.ones(4, dtype=np.float32))
+
+    def test_lingbot_npz_to_pointcloud_ply_falls_back_when_native_points_scatter(self) -> None:
+        from app.preview.io.ply import POINT_CLOUD_PLY_DTYPE
+        from app.preview.vendor.lingbot_runtime import write_spark_plain_ply_from_npz
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            predictions = root / "predictions"
+            predictions.mkdir()
+            scattered_world = np.zeros((20, 20, 3), dtype=np.float32)
+            scattered_world[..., 0] = np.linspace(0, 10_000, 400, dtype=np.float32).reshape(20, 20)
+            np.savez(
+                predictions / "frame_000000.npz",
+                world_points=scattered_world,
+                world_points_from_depth=np.ones((20, 20, 3), dtype=np.float32),
+                images=np.full((3, 20, 20), 255, dtype=np.uint8),
+                world_points_conf=np.ones((20, 20), dtype=np.float32),
+                depth_conf=np.ones((20, 20), dtype=np.float32),
+            )
+
+            output_ply = root / "preview_points.ply"
+            metrics = write_spark_plain_ply_from_npz(
+                predictions,
+                output_ply,
+                frame_stride=1,
+                pixel_stride=1,
+                conf_percentile=0,
+                min_conf=0,
+                max_points=0,
+            )
+
+            _header, body = output_ply.read_bytes().split(b"end_header\n", 1)
+            self.assertEqual(metrics["lingbot_point_source"], "world_points_from_depth")
+            records = np.frombuffer(body, dtype=POINT_CLOUD_PLY_DTYPE)
+            np.testing.assert_allclose(records["x"], np.ones(records.shape[0], dtype=np.float32))
+
+    def test_lingbot_depth_fallback_is_requested_for_scattered_native_points(self) -> None:
+        from app.preview.vendor.lingbot_runtime import needs_depth_world_points_fallback
+
+        scattered_world = np.zeros((20, 20, 3), dtype=np.float32)
+        scattered_world[..., 0] = np.linspace(0, 10_000, 400, dtype=np.float32).reshape(20, 20)
+
+        self.assertTrue(needs_depth_world_points_fallback({"world_points": scattered_world}))
 
     def test_lingbot_depth_points_are_supported_as_export_source(self) -> None:
         from app.preview.io.ply import POINT_CLOUD_PLY_DTYPE
@@ -897,8 +1047,20 @@ class LingBotVideoPreviewTests(unittest.TestCase):
         points, colors, conf = voxels.arrays()
         self.assertEqual(points.shape[0], 2)
         self.assertEqual(voxels.input_points, 3)
-        self.assertIn(0.9, conf.tolist())
+        self.assertTrue(any(abs(value - 0.9) < 1e-6 for value in conf.tolist()))
         self.assertIn([20, 0, 0], colors.tolist())
+
+    def test_lingbot_export_trims_extreme_spatial_outliers(self) -> None:
+        from app.preview.vendor.lingbot_runtime import apply_spatial_outlier_mask
+
+        points = np.zeros((1_000, 3), dtype=np.float32)
+        points[:, 0] = np.linspace(0.0, 1.0, 1_000, dtype=np.float32)
+        points[-1] = np.array([10_000.0, 0.0, 0.0], dtype=np.float32)
+
+        mask = apply_spatial_outlier_mask(points, np.ones(1_000, dtype=np.bool_))
+
+        self.assertFalse(bool(mask[-1]))
+        self.assertGreater(int(mask.sum()), 900)
 
     def test_lingbot_coverage_keyframes_export_by_motion(self) -> None:
         from app.preview.vendor.lingbot_runtime import should_export_point_frame

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { AlertTriangle, CheckCircle2, Eye, FileUp, Film, FolderOpen, Images, Loader2, Play, RefreshCw, Trash2, Wand2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, formatBytes, mediaFileUrl, mediaThumbnailUrl } from "@/lib/api";
+import { detectSceneType } from "@/lib/sceneDetection";
 import type { TransferProgress } from "@/lib/api";
 import { formatDateTime, inputTypeLabel, isActiveTask, projectStatusLabel } from "@/lib/labels";
 import { rememberTaskId } from "@/lib/taskTracking";
@@ -16,11 +17,18 @@ const MIN_FINE_INPUT_FRAMES = 3;
 const MAX_INPUT_FRAMES = 800;
 const UPLOAD_FILE_CONCURRENCY = 6;
 type PreviewSceneProfile = "mixed_balanced" | "indoor_full" | "outdoor_fast_clean";
+type SceneType = "auto" | "indoor" | "outdoor";
 const PREVIEW_SCENE_PROFILE_OPTIONS: Array<{ value: PreviewSceneProfile; label: string }> = [
   { value: "mixed_balanced", label: "均衡" },
   { value: "indoor_full", label: "室内" },
   { value: "outdoor_fast_clean", label: "室外" }
 ];
+
+function sceneTypeForProfile(profile: PreviewSceneProfile): SceneType {
+  if (profile === "indoor_full") return "indoor";
+  if (profile === "outdoor_fast_clean") return "outdoor";
+  return "auto";
+}
 
 export default function UploadPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -102,6 +110,14 @@ export default function UploadPage() {
     setError(null);
     const fileList = Array.from(files);
     try {
+      if (inputType === "images" && previewSceneProfile === "mixed_balanced") {
+        const detection = await detectSceneType(fileList);
+        if (detection.sceneType === "indoor") {
+          setPreviewSceneProfile("indoor_full");
+        } else if (detection.sceneType === "outdoor") {
+          setPreviewSceneProfile("outdoor_fast_clean");
+        }
+      }
       const active = await ensureProject();
       const existingMedia = active.id === project?.id ? media : active.media ?? [];
       const uploadBaseOrder = Math.max(-1, ...existingMedia.map((item, index) => item.client_order ?? index)) + 1;
@@ -166,6 +182,7 @@ export default function UploadPage() {
       };
       if (project.input_type === "images") {
         options.preview_scene_profile = previewSceneProfile;
+        options.scene_type = sceneTypeForProfile(previewSceneProfile);
       }
       const next = await api.startPreview(project.id, options);
       rememberTaskId(next.id);
@@ -206,6 +223,8 @@ export default function UploadPage() {
       const options: Record<string, unknown> = {};
       if (project.input_type === "images") {
         options.fine_scene_profile = previewSceneProfile;
+        options.fine_scene_type = sceneTypeForProfile(previewSceneProfile);
+        options.scene_type = sceneTypeForProfile(previewSceneProfile);
       }
       const next = await api.startFine(project.id, options);
       rememberTaskId(next.id);
@@ -397,6 +416,7 @@ export default function UploadPage() {
                 viewerMetaUrl={viewer.viewer_meta_url ?? viewer.preview_meta_url}
                 gaussianPlyUrl={viewer.gaussian_ply_url}
                 debugPointsUrl={viewer.debug_points_ply_url}
+                cameraPathUrl={viewer.camera_path_url}
                 defaultViewMode={viewer.point_source ? "points" : "splats"}
               />
             ) : (
