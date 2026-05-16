@@ -437,19 +437,23 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
                 flush=True,
             )
             result = run_preview_pipeline(ctx)
+            primary_artifact = result.primary_artifact or output_spz
+            primary_kind = result.primary_artifact_kind or "preview_spz"
+            primary_file_name = result.primary_artifact_file_name or "preview.spz"
+            primary_format = result.primary_artifact_format or ("spz" if primary_file_name.lower().endswith(".spz") else Path(primary_file_name).suffix.lstrip("."))
             print(
                 "[preview-worker] adapter returned "
-                f"task_id={task.id} pipeline={pipeline} output_spz={output_spz} "
+                f"task_id={task.id} pipeline={pipeline} primary_artifact={primary_artifact} "
                 f"intermediate_ply={result.intermediate_ply} splat_count={result.splat_count} "
                 f"metrics={format_options(result.metrics)} source_commits={format_options(result.source_commits)}",
                 flush=True,
             )
 
-            if not output_spz.exists() or output_spz.stat().st_size <= 0:
-                raise PreviewFailure("ARTIFACT_NOT_FOUND", f"Algorithm finished but did not create non-empty SPZ: {output_spz}")
+            if not primary_artifact.exists() or primary_artifact.stat().st_size <= 0:
+                raise PreviewFailure("ARTIFACT_NOT_FOUND", f"Algorithm finished but did not create non-empty artifact: {primary_artifact}")
             print(
                 "[preview-worker] validated preview output "
-                f"path={output_spz} bytes={output_spz.stat().st_size} sha256_pending=true",
+                f"path={primary_artifact} bytes={primary_artifact.stat().st_size} kind={primary_kind} sha256_pending=true",
                 flush=True,
             )
 
@@ -462,18 +466,18 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
                     .where(Project.id == task.project_id)
                     .options(selectinload(Project.media), selectinload(Project.artifacts))
                 )
-                update_task(upload_db, task, project, "uploading_artifact", 92, started, "validated non-empty preview.spz")
-                preview_file_name = "preview.spz"
+                update_task(upload_db, task, project, "uploading_artifact", 92, started, f"validated non-empty {primary_file_name}")
+                preview_file_name = primary_file_name
                 key = storage_key("users", project.owner_id, "projects", project.id, "preview", preview_file_name)
-                checksum = sha256_path(output_spz)
-                uri = storage.upload_path(output_spz, key)
+                checksum = sha256_path(primary_artifact)
+                uri = storage.upload_path(primary_artifact, key)
                 artifact = Artifact(
                     project_id=project.id,
                     task_id=task.id,
-                    kind="preview_spz",
+                    kind=primary_kind,
                     object_uri=uri,
                     file_name=preview_file_name,
-                    file_size=output_spz.stat().st_size,
+                    file_size=primary_artifact.stat().st_size,
                     checksum=checksum,
                     source_version=source_version,
                     metadata_json={
@@ -484,6 +488,7 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
                         "input_mode": project.input_type,
                         "source_commits": result.source_commits,
                         "splat_count": result.splat_count,
+                        "format": primary_format,
                         "intermediate_ply": str(result.intermediate_ply) if result.intermediate_ply else None,
                         "intermediate_ply_size": result.metrics.get("intermediate_ply_size"),
                         **preview_artifact_metrics(result.metrics),
@@ -540,6 +545,29 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
                             },
                         )
                     )
+                for extra in result.extra_artifacts:
+                    if not extra.path.exists() or extra.path.stat().st_size <= 0:
+                        continue
+                    artifact_key = storage_key("users", project.owner_id, "projects", project.id, "preview", task.id, extra.file_name)
+                    artifact_uri = storage.upload_path(extra.path, artifact_key)
+                    upload_db.add(
+                        Artifact(
+                            project_id=project.id,
+                            task_id=task.id,
+                            kind=extra.kind,
+                            object_uri=artifact_uri,
+                            file_name=extra.file_name,
+                            file_size=extra.path.stat().st_size,
+                            checksum=sha256_path(extra.path),
+                            source_version=source_version,
+                            metadata_json={
+                                "pipeline": pipeline,
+                                "source_version": source_version,
+                                "generated_by": worker_id,
+                                "source_commits": result.source_commits,
+                            },
+                        )
+                    )
                 task.status = "succeeded"
                 task.progress = 100
                 task.current_stage = "preview_ready"
@@ -548,8 +576,11 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
                 task.metrics = {
                     **(task.metrics or {}),
                     "duration_seconds": round(time.monotonic() - started, 2),
-                    "output_bytes": output_spz.stat().st_size,
+                    "output_bytes": primary_artifact.stat().st_size,
                     "pipeline": pipeline,
+                    "primary_artifact": str(primary_artifact),
+                    "primary_artifact_kind": primary_kind,
+                    "primary_artifact_format": primary_format,
                     "splat_count": result.splat_count,
                     "source_commits": result.source_commits,
                     **input_metrics,
@@ -788,7 +819,11 @@ def preview_artifact_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "lingbot_inference_fps",
         "lingbot_frame_stride",
         "lingbot_pixel_stride",
+        "lingbot_pixel_stride_fast",
+        "lingbot_pixel_stride_full",
         "lingbot_conf_percentile",
+        "lingbot_conf_percentile_fast",
+        "lingbot_conf_percentile_full",
         "lingbot_min_conf",
         "lingbot_max_points",
         "lingbot_save_predictions",
@@ -806,6 +841,17 @@ def preview_artifact_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "lingbot_points_after_downsample",
         "lingbot_points_removed_by_limit",
         "lingbot_point_frame_count",
+        "lingbot_window_count",
+        "lingbot_retry_window_count",
+        "lingbot_bad_window_count",
+        "preview_fast_voxel_size",
+        "preview_fast_input_points",
+        "preview_fast_voxel_points",
+        "preview_fast_points_removed_by_voxel",
+        "preview_full_voxel_size",
+        "preview_full_input_points",
+        "preview_full_voxel_points",
+        "preview_full_points_removed_by_voxel",
         "preview_scene_profile",
         "point_source",
         "point_count_raw",
@@ -817,6 +863,10 @@ def preview_artifact_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "bbox_radius",
         "quality_warning",
         "intermediate_points_ply_size",
+        "preview_fast_ply_size",
+        "preview_full_ply_size",
+        "camera_path_json_size",
+        "metrics_json_size",
         "intermediate_splats_ply_size",
         "preview_meta_json_size",
         "lingbot_official_predictions_npz_size",
@@ -959,6 +1009,8 @@ def expected_seconds_for_pipeline(pipeline: str | None) -> int:
         return settings.preview_expected_seconds_litevggt_spz
     if pipeline == "lingbot_map_spz":
         return settings.preview_expected_seconds_lingbot_map_spz
+    if pipeline == "lingbot_video_pointcloud_fast":
+        return settings.preview_expected_seconds_lingbot_map_spz
     return settings.preview_expected_seconds_litevggt_spz
 
 
@@ -967,6 +1019,8 @@ def stage_for_pipeline(pipeline: str) -> str:
         return "litevggt_direct_spz"
     if pipeline == "lingbot_map_spz":
         return "lingbot_map_spz"
+    if pipeline == "lingbot_video_pointcloud_fast":
+        return "lingbot_video_pointcloud_fast"
     return "unknown_preview_pipeline"
 
 

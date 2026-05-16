@@ -1053,7 +1053,7 @@ def create_preview_task(
         video_count = sum(1 for item in project.media if item.kind == "video")
         if video_count != 1 or len(project.media) != 1:
             raise HTTPException(status_code=400, detail="Video preview requires exactly one video file")
-        if pipeline != "lingbot_map_spz":
+        if pipeline not in {"lingbot_video_pointcloud_fast", "lingbot_map_spz"}:
             raise HTTPException(status_code=400, detail=f"Unsupported preview pipeline for video input: {pipeline}")
         options.pop("preview_scene_profile", None)
     else:
@@ -1406,15 +1406,17 @@ def fresh_preview_viewer_artifacts(project: Project) -> dict[str, Artifact | Non
     preview_artifacts = [
         item
         for item in project.artifacts
-        if item.kind == "preview_spz" and item.source_version == project.source_version
+        if item.kind in {"preview_spz", "preview_pointcloud_ply"} and item.source_version == project.source_version
     ]
     model = sorted(preview_artifacts, key=lambda item: item.created_at, reverse=True)[0] if preview_artifacts else None
     if not model:
-        return {"model": None, "ply": None, "debug_splats": None, "meta": None}
+        return {"model": None, "ply": None, "full_ply": None, "debug_splats": None, "meta": None}
     task_artifacts = [item for item in project.artifacts if item.task_id == model.task_id]
+    full_ply = next((item for item in task_artifacts if item.kind == "preview_full_ply"), None)
     return {
         "model": model,
         "ply": next((item for item in task_artifacts if item.kind == "original_ply"), None),
+        "full_ply": full_ply,
         "debug_splats": next((item for item in task_artifacts if item.kind == "debug_splats_ply"), None),
         "meta": next((item for item in task_artifacts if item.kind == "preview_meta_json"), None),
     }
@@ -1444,7 +1446,28 @@ def project_viewer_payload(project: Project) -> dict[str, Any]:
     preview_model = preview["model"]
     if preview_model:
         preview_ply = preview["ply"]
+        preview_full_ply = preview["full_ply"]
         preview_meta = preview["meta"]
+        if preview_model.kind == "preview_pointcloud_ply":
+            point_ply = preview_ply or preview_model
+            download_ply = preview_full_ply or point_ply
+            return {
+                "status": "ready",
+                "mode": "single",
+                "source": "preview",
+                "artifact_id": preview_model.id,
+                "model_url": None,
+                "download_spz_url": None,
+                "file_size": preview_model.file_size,
+                "format": "ply",
+                "debug_points_ply_url": artifact_url(point_ply) if point_ply else None,
+                "debug_splats_ply_url": None,
+                "download_ply_url": artifact_url(download_ply, download=True) if download_ply else None,
+                "preview_meta_url": artifact_url(preview_meta) if preview_meta else None,
+                "quality_warning": (preview_model.metadata_json or {}).get("quality_warning"),
+                "point_source": (preview_model.metadata_json or {}).get("point_source")
+                or (preview_model.metadata_json or {}).get("lingbot_point_source"),
+            }
         return {
             "status": "ready",
             "mode": "single",
@@ -1464,7 +1487,7 @@ def project_viewer_payload(project: Project) -> dict[str, Any]:
         }
 
     final_artifacts = [item for item in project.artifacts if item.kind in {"final_spz", "lod_rad"}]
-    preview_artifacts = [item for item in project.artifacts if item.kind == "preview_spz"]
+    preview_artifacts = [item for item in project.artifacts if item.kind in {"preview_spz", "preview_pointcloud_ply"}]
     if final_artifacts:
         return {
             "status": "unavailable",
@@ -1477,7 +1500,7 @@ def project_viewer_payload(project: Project) -> dict[str, Any]:
             "message": "Preview artifact is stale because source media changed; start preview again.",
             "stale": True,
         }
-    return {"status": "unavailable", "message": "No preview or final SPZ artifact is available."}
+    return {"status": "unavailable", "message": "No preview or final 3D artifact is available."}
 
 
 @app.get("/api/projects/{project_id}/viewer-config")

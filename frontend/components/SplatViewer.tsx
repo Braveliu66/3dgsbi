@@ -108,7 +108,7 @@ export function SplatViewer({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewerApiRef = useRef<ViewerControlApi | null>(null);
   const applyPointCloudControlsRef = useRef<(() => void) | null>(null);
-  const debugControlsRef = useRef({ pointSizeScale: 1, confidenceThreshold: 0, downsampleFactor: 10 });
+  const debugControlsRef = useRef({ pointSizeScale: 1, confidenceThreshold: 0, downsampleFactor: 1 });
   const [state, setState] = useState<ViewerState>("idle");
   const [viewerReady, setViewerReady] = useState(false);
   const [message, setMessage] = useState("Waiting for a 3D asset.");
@@ -122,7 +122,7 @@ export function SplatViewer({
   const [zoomSensitivity, setZoomSensitivity] = useState(0.9);
   const [debugPointSizeScale, setDebugPointSizeScale] = useState(1);
   const [debugConfidenceThreshold, setDebugConfidenceThreshold] = useState(0);
-  const [debugDownsampleFactor, setDebugDownsampleFactor] = useState(10);
+  const [debugDownsampleFactor, setDebugDownsampleFactor] = useState(1);
   const [pointStats, setPointStats] = useState<{ shown: number; total: number; hasConfidence: boolean } | null>(null);
 
   debugControlsRef.current = {
@@ -135,7 +135,7 @@ export function SplatViewer({
   cameraSettingsRef.current = { mode: cameraMode, panSensitivity, zoomSensitivity };
 
   useEffect(() => {
-    setViewMode(defaultViewMode);
+    setViewMode(!modelUrl && debugPointsUrl ? "points" : defaultViewMode);
   }, [defaultViewMode, modelUrl, gaussianPlyUrl, debugPointsUrl]);
 
   useEffect(() => {
@@ -506,9 +506,11 @@ export function SplatViewer({
         </button>
         {gaussianPlyUrl || debugPointsUrl ? (
           <div className="viewer-mode-buttons" aria-label="Viewer mode">
-            <button className={`axis-button ${viewMode === "splats" ? "active" : ""}`} type="button" onClick={() => setViewMode("splats")} disabled={!modelUrl}>
-              {format === "rad" ? "RAD" : "SPZ"}
-            </button>
+            {modelUrl ? (
+              <button className={`axis-button ${viewMode === "splats" ? "active" : ""}`} type="button" onClick={() => setViewMode("splats")}>
+                {format === "rad" ? "RAD" : format === "ply" ? "PLY" : "SPZ"}
+              </button>
+            ) : null}
             {gaussianPlyUrl ? (
               <button className={`axis-button ${viewMode === "ply" ? "active" : ""}`} type="button" onClick={() => setViewMode("ply")}>
                 PLY

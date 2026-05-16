@@ -419,7 +419,7 @@ class StorageResponseTests(unittest.TestCase):
 
             self.assertEqual(payload["type"], "preview")
             self.assertEqual(payload["status"], "queued")
-            self.assertEqual(payload["options"]["preview_pipeline"], "lingbot_map_spz")
+            self.assertEqual(payload["options"]["preview_pipeline"], "lingbot_video_pointcloud_fast")
             self.assertEqual(payload["options"]["source_version"], 1)
             self.assertIn(payload["id"], fake_redis.lists["preview_tasks"])
 
@@ -607,6 +607,67 @@ class StorageResponseTests(unittest.TestCase):
             self.assertIn("/api/artifacts/", payload["viewer_meta_url"])
             self.assertIn("/api/artifacts/", payload["download_spz_url"])
             self.assertIn("/api/artifacts/", payload["download_ply_url"])
+
+    def test_viewer_config_supports_ply_only_preview(self) -> None:
+        with TestClient(app) as client:
+            headers = auth_headers(client)
+            project_id = create_video_project(client, headers, "ply preview viewer")
+            fast_uri = storage.write_bytes("tests/preview-fast.ply", b"fast")
+            full_uri = storage.write_bytes("tests/preview-full.ply", b"full")
+            meta_uri = storage.write_bytes("tests/preview-meta.json", b"{}")
+            with SessionLocal() as db:
+                task = Task(project_id=project_id, type="preview", status="succeeded", current_stage="done")
+                db.add(task)
+                db.flush()
+                db.add(
+                    Artifact(
+                        project_id=project_id,
+                        task_id=task.id,
+                        kind="preview_pointcloud_ply",
+                        object_uri=fast_uri,
+                        file_name="preview_fast.ply",
+                        file_size=4,
+                        source_version=0,
+                        metadata_json={"point_source": "world_points_from_depth", "format": "ply"},
+                    )
+                )
+                db.add(
+                    Artifact(
+                        project_id=project_id,
+                        task_id=task.id,
+                        kind="preview_full_ply",
+                        object_uri=full_uri,
+                        file_name="preview_full.ply",
+                        file_size=4,
+                        source_version=0,
+                    )
+                )
+                db.add(
+                    Artifact(
+                        project_id=project_id,
+                        task_id=task.id,
+                        kind="preview_meta_json",
+                        object_uri=meta_uri,
+                        file_name="preview_meta.json",
+                        file_size=2,
+                        source_version=0,
+                    )
+                )
+                db.commit()
+
+            response = client.get(f"/api/projects/{project_id}/viewer-config", headers=headers)
+            response.raise_for_status()
+            payload = response.json()
+
+            self.assertEqual(payload["status"], "ready")
+            self.assertEqual(payload["source"], "preview")
+            self.assertEqual(payload["format"], "ply")
+            self.assertIsNone(payload["model_url"])
+            self.assertIsNone(payload["download_spz_url"])
+            self.assertEqual(payload["point_source"], "world_points_from_depth")
+            self.assertIn("/api/artifacts/", payload["debug_points_ply_url"])
+            self.assertIn("/api/artifacts/", payload["download_ply_url"])
+            self.assertIn("/api/artifacts/", payload["preview_meta_url"])
 
     def test_project_share_returns_public_viewer_downloads_and_revokes(self) -> None:
         with TestClient(app) as client:

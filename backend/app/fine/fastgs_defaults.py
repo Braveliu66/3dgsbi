@@ -50,7 +50,7 @@ COLMAP_MAX_IMAGE_SIZE = FINE_IMAGE_MAX_SIDE
 
 # COLMAP 使用线程数。
 # 8 是比较稳的默认值，机器 CPU 多可以提高。
-COLMAP_THREADS = 8
+COLMAP_THREADS = 16
 
 # COLMAP 匹配器。
 # auto: 根据图片数量/场景自动选择。
@@ -166,7 +166,7 @@ FASTGS_LOSS_THRESH = 0.1
 
 # clone 类型 densify 梯度阈值。
 # 越低越容易 clone/加密，点更多，细节可能更好但更慢/更易飞点。
-FASTGS_GRAD_THRESH = 0.0002
+FASTGS_GRAD_THRESH = 0.0008
 
 # split 类型 densify 的绝对梯度阈值。
 # 越低越容易 split；0.00035 是较常用平衡值。
@@ -185,6 +185,11 @@ FASTGS_DENSIFICATION_INTERVAL = 100
 # Deblur 场景建议禁用中后期 reset，避免 loss 暴涨或模型变糊。
 FASTGS_OPACITY_RESET_INTERVAL = 100_000
 
+# Decouple large-splat size pruning from opacity reset.  Opacity reset stays
+# effectively disabled for deblur runs, but large blobs still need pruning.
+FASTGS_SIZE_PRUNE_FROM_ITER = 3_000
+FASTGS_SIZE_PRUNE_MAX_SCREEN_SIZE = 12
+
 # densify 从第几轮开始。
 # 500 是标准设置，让初始点先稳定一点再加密。
 FASTGS_DENSIFY_FROM_ITER = 500
@@ -192,11 +197,11 @@ FASTGS_DENSIFY_FROM_ITER = 500
 # densify 到第几轮结束。
 # 15000 对 30000 轮训练是质量优先设置。
 # 点云少/细节不足时可以到 18000 或 20000。
-FASTGS_DENSIFY_UNTIL_ITER = 15_000
+FASTGS_DENSIFY_UNTIL_ITER = 12_000
 
 # VCD/VCP 采样多少个相机计算多视角 score。
 # 12 对你这种少图场景等于基本全采样，比较稳。
-FASTGS_SAMPLE_CAMERAS = 12
+FASTGS_SAMPLE_CAMERAS = 10
 
 # VCD 使用的误差百分位。
 # 0.60 表示以较高误差区域作为加密判断依据。
@@ -213,36 +218,36 @@ FASTGS_COMPACT_BOX_MULT = FASTGS_MULT
 
 # 是否启用训练后期 late prune。
 # Deblur 质量优先建议先 False，避免把细节剪掉。
-FASTGS_LATE_PRUNE_ENABLED = False
+FASTGS_LATE_PRUNE_ENABLED = True
 
 # late prune 间隔。
 # 如果启用，则每 3000 iter 做一次 late prune。
-FASTGS_LATE_PRUNE_INTERVAL = 3_000
+FASTGS_LATE_PRUNE_INTERVAL = 2_000
 
 # late prune 从第几轮开始。
 # 27000 表示只在最后 10% 左右开始轻剪。
-FASTGS_LATE_PRUNE_FROM_ITER = 27_000
+FASTGS_LATE_PRUNE_FROM_ITER = 18_000
 
 # late prune 到第几轮结束。
+
 FASTGS_LATE_PRUNE_UNTIL_ITER = 30_000
 
 # late prune 的 opacity 阈值。
 # 0.005 是轻剪；0.02 以上会更强，可能剪掉远端细节。
-FASTGS_LATE_PRUNE_MIN_OPACITY = 0.005
+FASTGS_LATE_PRUNE_MIN_OPACITY = 0.04
 
 # late prune 的 score 阈值。
 # 1.0 基本最保守；0.95/0.98 会更积极剪。
-FASTGS_LATE_PRUNE_SCORE_THRESH = 1.0
+FASTGS_LATE_PRUNE_SCORE_THRESH = 0.90
 
 # final prune 的 opacity 阈值。
 # 0.001 很轻，质量优先推荐。
 # 如果飞点很多可试 0.003 或 0.005，但可能损失细节。
-FASTGS_FINAL_PRUNE_MIN_OPACITY = 0.001
-
+FASTGS_FINAL_PRUNE_MIN_OPACITY = 0.03
 # final prune 的 score 阈值。
 # 1.0 最保守，尽量不按 score 剪。
 # 如果后处理飞点很多，可试 0.98 或 0.95。
-FASTGS_FINAL_PRUNE_SCORE_THRESH = 1.0
+FASTGS_FINAL_PRUNE_SCORE_THRESH = 0.90
 
 
 # ============================================================
@@ -259,7 +264,7 @@ FASTGS_DEBLUR_ENABLED = "auto"
 # motion: 运动模糊/拖影，使用位置扰动。
 # mixed: defocus + motion 都开，最强但最容易软/飞点。
 # 如果检测结果是 defocus，建议改成 "defocus"，不要默认 mixed。
-FASTGS_DEBLUR_MODE = "mixed"
+FASTGS_DEBLUR_MODE = "defocus"
 
 # blur registry 路径。
 # 空字符串表示由 pipeline 自动生成/传入。
@@ -279,7 +284,7 @@ FASTGS_DEBLUR_SCHEDULE_PROFILE = "quality"
 # Deblur warmup 轮数。
 # 7000 表示前 7000 轮不走 Deblur，先用普通 FastGS 稳定几何和加密。
 # 对 30000 轮来说 7000 偏保守但稳定；想更早去模糊可用 3000~5000。
-FASTGS_DEBLUR_WARMUP_ITERS = 7_000
+FASTGS_DEBLUR_WARMUP_ITERS = 5_000
 
 # Deblur motion/mixed 的 moments 数量。
 # motion/mixed 模式下通常会多次 rasterize，5 质量高但慢。
@@ -301,39 +306,49 @@ FASTGS_DEBLUR_WIDTH = 64
 # scale/covariance blur 强度。
 # 0.01 是官方常用值。
 # defocus 主要靠这个。
-FASTGS_DEBLUR_LAMBDA_S = 0.01
+FASTGS_DEBLUR_LAMBDA_S = 0.015
 
 # position/motion blur 强度。
 # motion/mixed 用 0.01。
 # defocus 模式建议设 0.0。
-FASTGS_DEBLUR_LAMBDA_P = 0.01
+FASTGS_DEBLUR_LAMBDA_P = 0.0
 
 # GTnet 对 scale/rotation delta 的最大 clamp。
 # 1.1 表示训练时最多把 Gaussian 扩到 1.1 倍左右。
 # 太大会变糊/飞点，太小去模糊能力弱。
-FASTGS_DEBLUR_MAX_CLAMP = 1.1
+FASTGS_DEBLUR_MAX_CLAMP = 1.08
 
 # position delta 最大位移。
 # motion/mixed 用 0.02。
 # defocus 模式建议设 0.0。
-FASTGS_DEBLUR_MAX_POSITION_DELTA = 0.02
+FASTGS_DEBLUR_MAX_POSITION_DELTA = 0.0
 
 # GTnet transform 正则权重。
 # 0.0: GTnet 自由度最大，去模糊强，但可能更容易飞点。
 # 1e-6: 稍微约束 GTnet，通常更稳。
 # 你现在设 1e-6，适合减少外部彩色长条/飞点。
-FASTGS_DEBLUR_TRANSFORM_REG_WEIGHT = 0.000001
+FASTGS_DEBLUR_TRANSFORM_REG_WEIGHT = 0.003
 
 # Deblur 阶段 xyz 学习率缩放。
 # 0.5 表示位置更新减半，减少点被 Deblur 拉飞。
 # 飞点多可试 0.3；细节长不出来可试 0.7。
-FASTGS_DEBLUR_XYZ_LR_SCALE = 0.5
+FASTGS_DEBLUR_XYZ_LR_SCALE = 0.1
 
 # 是否只有 blurred 图像走 Deblur。
 # true: 只有 registry 中 blurred=true 的图片走 Deblur，清晰图走普通 FastGS。
 # false: 所有图片都走 Deblur，适合官方那种全模糊数据集。
 # 你的业务数据通常建议 true。
 FASTGS_DEBLUR_BLURRED_VIEWS_ONLY = "true"
+
+# Keep GTnet as a training-time blur renderer only.  The final stage disables
+# deblur and fine-tunes ordinary Gaussians from clear frames for PLY/SPZ export.
+FASTGS_DEBLUR_SHARP_REFINE_ENABLED = "true"
+FASTGS_DEBLUR_SHARP_REFINE_FROM_ITER = 21_000
+FASTGS_DEBLUR_SHARP_REFINE_CLEAR_ONLY = "true"
+
+# Extra points are risky on mixed sharp/blurred captures because they clone from
+# blurred-view gradients without the usual multiview score filter.
+FASTGS_DEBLUR_EXTRA_POINTS_ENABLED = "false"
 
 # 是否启用 Deblur 后期二次 densify。
 # false: 中后期不再额外加密，更稳，飞点更少。

@@ -24,6 +24,7 @@ from app.fine.fastgs_defaults import (
     FASTGS_DEBLUR_BLURRED_VIEWS_ONLY,
     FASTGS_DEBLUR_BLUR_REGISTRY,
     FASTGS_DEBLUR_ENABLED,
+    FASTGS_DEBLUR_EXTRA_POINTS_ENABLED,
     FASTGS_DEBLUR_GTNET_LR,
     FASTGS_DEBLUR_HIDDEN,
     FASTGS_DEBLUR_LAMBDA_P,
@@ -34,6 +35,9 @@ from app.fine.fastgs_defaults import (
     FASTGS_DEBLUR_MODE,
     FASTGS_DEBLUR_NUM_MOMENTS,
     FASTGS_DEBLUR_SCHEDULE_PROFILE,
+    FASTGS_DEBLUR_SHARP_REFINE_CLEAR_ONLY,
+    FASTGS_DEBLUR_SHARP_REFINE_ENABLED,
+    FASTGS_DEBLUR_SHARP_REFINE_FROM_ITER,
     FASTGS_DEBLUR_TRANSFORM_REG_WEIGHT,
     FASTGS_DEBLUR_WARMUP_ITERS,
     FASTGS_DEBLUR_WIDTH,
@@ -75,6 +79,8 @@ from app.fine.fastgs_defaults import (
     FASTGS_SCALING_LR,
     FASTGS_SH_DEGREE,
     FASTGS_SHFEATURE_LR,
+    FASTGS_SIZE_PRUNE_FROM_ITER,
+    FASTGS_SIZE_PRUNE_MAX_SCREEN_SIZE,
 )
 
 class GroupParams:
@@ -150,6 +156,8 @@ class OptimizationParams(ParamGroup):
         self.lambda_dssim = FASTGS_LAMBDA_DSSIM
         self.densification_interval = FASTGS_DENSIFICATION_INTERVAL
         self.opacity_reset_interval = FASTGS_OPACITY_RESET_INTERVAL
+        self.fastgs_size_prune_from_iter = FASTGS_SIZE_PRUNE_FROM_ITER
+        self.fastgs_size_prune_max_screen_size = FASTGS_SIZE_PRUNE_MAX_SCREEN_SIZE
         self.densify_from_iter = FASTGS_DENSIFY_FROM_ITER
         self.densify_until_iter = FASTGS_DENSIFY_UNTIL_ITER
         self.densify_grad_threshold = FASTGS_DENSIFY_GRAD_THRESHOLD
@@ -172,6 +180,10 @@ class OptimizationParams(ParamGroup):
         self.deblur_schedule_profile = FASTGS_DEBLUR_SCHEDULE_PROFILE
         self.deblur_late_densify_enabled = FASTGS_DEBLUR_LATE_DENSIFY_ENABLED
         self.deblur_warmup_iters = FASTGS_DEBLUR_WARMUP_ITERS
+        self.deblur_extra_points_enabled = FASTGS_DEBLUR_EXTRA_POINTS_ENABLED
+        self.deblur_sharp_refine_enabled = FASTGS_DEBLUR_SHARP_REFINE_ENABLED
+        self.deblur_sharp_refine_from_iter = FASTGS_DEBLUR_SHARP_REFINE_FROM_ITER
+        self.deblur_sharp_refine_clear_only = FASTGS_DEBLUR_SHARP_REFINE_CLEAR_ONLY
         self.deblur_num_moments = FASTGS_DEBLUR_NUM_MOMENTS
         self.deblur_gtnet_lr = FASTGS_DEBLUR_GTNET_LR
         self.deblur_hidden = FASTGS_DEBLUR_HIDDEN

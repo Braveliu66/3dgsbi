@@ -5,6 +5,7 @@ import json
 import math
 import shutil
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,7 +19,7 @@ from app.preview.types import PreviewFailure
 
 Progress = Callable[[str, int, str], None]
 LINGBOT_MAP_COMMIT = "4cd986009b9adeded8a4e740919221940dedeffe"
-POINT_KEYS = ("world_points", "world_points_from_depth", "points")
+POINT_KEYS = ("world_points_from_depth",)
 COLOR_KEYS = ("images", "image", "rgb", "colors")
 CONF_KEYS_BY_POINT = {
     "world_points": ("world_points_conf", "conf"),
@@ -96,6 +97,283 @@ class PreparedPreviewPoints:
     input_count: int
     valid_count: int
     final_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class PointCloudVideoConfig:
+    fps: float = 10.0
+    image_size: int = 518
+    target_width: int = 518
+    target_height: int = 378
+    window_size: int = 96
+    keyframe_interval: int = 13
+    overlap_keyframes: int = 8
+    num_scale_frames: int = 8
+    camera_iterations_fast: int = 1
+    camera_iterations_retry: int = 2
+    pixel_stride_fast: int = 5
+    pixel_stride_full: int = 3
+    conf_percentile_fast: float = 45.0
+    conf_percentile_full: float = 35.0
+    min_conf: float = 0.8
+    allow_sdpa_fallback: bool = False
+    compile_model: bool = False
+    write_progressive_preview: bool = True
+    voxel_target_fast: int = 3000
+    voxel_target_full: int = 5200
+    coverage_keyframes: bool = True
+    coverage_rotation_degrees: float = 12.0
+    coverage_translation: float = 0.35
+    retry_overlap_pose_jump: float = 2.0
+
+
+@dataclass(frozen=True, slots=True)
+class LingBotVideoWindow:
+    index: int
+    frame_indices: tuple[int, ...]
+    frames: tuple[np.ndarray, ...]
+
+
+class StreamingVoxelMap:
+    def __init__(self, *, voxel_target: int) -> None:
+        self.voxel_target = max(1, int(voxel_target))
+        self.voxel_size: float | None = None
+        self.voxels: dict[tuple[int, int, int], tuple[np.ndarray, np.ndarray, float]] = {}
+        self.input_points = 0
+
+    def add_points(self, points: np.ndarray, colors: np.ndarray, confidence: np.ndarray | None) -> None:
+        points = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+        colors = np.asarray(colors, dtype=np.uint8).reshape(-1, 3)
+        if points.shape[0] == 0:
+            return
+        if confidence is None or np.asarray(confidence).reshape(-1).shape[0] != points.shape[0]:
+            conf = np.ones(points.shape[0], dtype=np.float32)
+        else:
+            conf = np.asarray(confidence, dtype=np.float32).reshape(-1)
+        valid = np.isfinite(points).all(axis=1) & np.isfinite(conf)
+        points = points[valid]
+        colors = colors[valid]
+        conf = conf[valid]
+        if points.shape[0] == 0:
+            return
+        self.input_points += int(points.shape[0])
+        if self.voxel_size is None:
+            self.voxel_size = auto_voxel_size(points, self.voxel_target)
+        keys = np.floor(points / float(self.voxel_size)).astype(np.int64)
+        for key_array, point, color, quality in zip(keys, points, colors, conf):
+            key = (int(key_array[0]), int(key_array[1]), int(key_array[2]))
+            old = self.voxels.get(key)
+            if old is None or float(quality) > old[2]:
+                self.voxels[key] = (
+                    point.astype(np.float32, copy=True),
+                    color.astype(np.uint8, copy=True),
+                    float(quality),
+                )
+
+    def arrays(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if not self.voxels:
+            return (
+                np.empty((0, 3), dtype=np.float32),
+                np.empty((0, 3), dtype=np.uint8),
+                np.empty((0,), dtype=np.float32),
+            )
+        values = list(self.voxels.values())
+        return (
+            np.stack([value[0] for value in values]).astype(np.float32, copy=False),
+            np.stack([value[1] for value in values]).astype(np.uint8, copy=False),
+            np.asarray([value[2] for value in values], dtype=np.float32),
+        )
+
+    def write_ply(self, output_ply: Path) -> int:
+        points, colors, confidence = self.arrays()
+        if points.shape[0] <= 0:
+            raise PreviewFailure("LINGBOT_EMPTY_POINT_CLOUD", "LingBot-Map produced no valid voxelized points")
+        return write_point_cloud_ply(points, colors, output_ply, confidence=confidence, max_points=0, include_confidence=False)
+
+    def metrics(self, prefix: str) -> dict[str, Any]:
+        return {
+            f"{prefix}_voxel_size": self.voxel_size,
+            f"{prefix}_input_points": int(self.input_points),
+            f"{prefix}_voxel_points": int(len(self.voxels)),
+            f"{prefix}_points_removed_by_voxel": int(max(0, self.input_points - len(self.voxels))),
+        }
+
+
+def auto_voxel_size(points: np.ndarray, voxel_target: int) -> float:
+    bbox_min = np.nanmin(points, axis=0)
+    bbox_max = np.nanmax(points, axis=0)
+    diag = float(np.linalg.norm(bbox_max - bbox_min))
+    if not np.isfinite(diag) or diag <= 0:
+        return 0.01
+    return max(diag / max(1, int(voxel_target)), 1e-6)
+
+
+def lingbot_window_frame_span(*, window_size: int, num_scale_frames: int, keyframe_interval: int) -> int:
+    return int(num_scale_frames) + max(0, int(window_size) - int(num_scale_frames)) * max(1, int(keyframe_interval))
+
+
+def lingbot_window_overlap_span(*, overlap_keyframes: int, keyframe_interval: int) -> int:
+    return max(0, int(overlap_keyframes)) * max(1, int(keyframe_interval))
+
+
+def should_select_window_input_frame(offset: int, *, num_scale_frames: int, keyframe_interval: int) -> bool:
+    if offset < 0:
+        return False
+    if offset < int(num_scale_frames):
+        return True
+    return ((offset - int(num_scale_frames)) % max(1, int(keyframe_interval))) == 0
+
+
+def iter_lingbot_video_windows(
+    frame_iter: Iterator[tuple[int, np.ndarray]],
+    *,
+    window_size: int,
+    num_scale_frames: int,
+    keyframe_interval: int,
+    overlap_keyframes: int,
+) -> Iterator[LingBotVideoWindow]:
+    span = lingbot_window_frame_span(
+        window_size=window_size,
+        num_scale_frames=num_scale_frames,
+        keyframe_interval=keyframe_interval,
+    )
+    overlap = lingbot_window_overlap_span(overlap_keyframes=overlap_keyframes, keyframe_interval=keyframe_interval)
+    step = max(1, span - overlap)
+    window_start = 0
+    selected: list[tuple[int, np.ndarray]] = []
+    window_index = 0
+
+    def emit_ready() -> LingBotVideoWindow:
+        return LingBotVideoWindow(
+            index=window_index,
+            frame_indices=tuple(index for index, _frame in selected),
+            frames=tuple(frame for _index, frame in selected),
+        )
+
+    for frame_index, frame in frame_iter:
+        while frame_index >= window_start + span and len(selected) >= 2:
+            yield emit_ready()
+            window_index += 1
+            window_start += step
+            selected = [(index, old_frame) for index, old_frame in selected if index >= window_start]
+        offset = frame_index - window_start
+        if should_select_window_input_frame(offset, num_scale_frames=num_scale_frames, keyframe_interval=keyframe_interval):
+            selected.append((frame_index, frame))
+            if len(selected) >= int(window_size):
+                yield emit_ready()
+                window_index += 1
+                window_start += step
+                selected = [(index, old_frame) for index, old_frame in selected if index >= window_start]
+    if len(selected) >= 2:
+        yield emit_ready()
+
+
+def iter_video_frames_ffmpeg(
+    video_path: Path,
+    *,
+    fps: float = 10.0,
+    width: int = 518,
+    height: int = 378,
+) -> Iterator[tuple[int, np.ndarray]]:
+    if not video_path.exists() or video_path.stat().st_size <= 0:
+        raise PreviewFailure("VIDEO_INPUT_MISSING", f"Missing non-empty input video: {video_path}")
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise PreviewFailure("VIDEO_RUNTIME_UNAVAILABLE", "ffmpeg is required for phone-video streaming decode")
+    vf = f"fps={float(fps):g},scale={int(width)}:{int(height)}:force_original_aspect_ratio=increase,crop={int(width)}:{int(height)}"
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(video_path),
+        "-vf",
+        vf,
+        "-pix_fmt",
+        "rgb24",
+        "-f",
+        "rawvideo",
+        "pipe:1",
+    ]
+    _log(f"video stream decode path={video_path} fps={fps} size={width}x{height} autorotate=true")
+    proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert proc.stdout is not None
+    frame_size = int(width) * int(height) * 3
+    index = 0
+    try:
+        while True:
+            buf = proc.stdout.read(frame_size)
+            if not buf:
+                break
+            if len(buf) < frame_size:
+                break
+            frame = np.frombuffer(buf, dtype=np.uint8).reshape(int(height), int(width), 3)
+            yield index, frame
+            index += 1
+    finally:
+        try:
+            proc.stdout.close()
+        except Exception:
+            pass
+        stderr = b""
+        if proc.stderr is not None:
+            stderr = proc.stderr.read()
+            proc.stderr.close()
+        return_code = proc.wait()
+    if return_code != 0:
+        message = stderr.decode("utf-8", errors="replace").strip()
+        raise PreviewFailure("VIDEO_DECODE_FAILED", f"ffmpeg streaming decode failed: {message or return_code}")
+
+
+def estimate_video_sampled_frames(video_path: Path, *, fps: float) -> int | None:
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        return None
+    command = [
+        ffprobe,
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(video_path),
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=10)
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        duration = float(result.stdout.strip())
+    except ValueError:
+        return None
+    if not np.isfinite(duration) or duration <= 0:
+        return None
+    return max(1, int(math.ceil(duration * float(fps))))
+
+
+def estimate_lingbot_window_count(sampled_frames: int | None, *, span: int, overlap: int) -> int | None:
+    if sampled_frames is None or sampled_frames <= 0:
+        return None
+    step = max(1, int(span) - int(overlap))
+    if sampled_frames <= span:
+        return 1
+    return 1 + int(math.ceil((sampled_frames - span) / step))
+
+
+def preprocess_rgb_frames(frames: tuple[np.ndarray, ...] | list[np.ndarray], *, torch_module: Any) -> Any:
+    if len(frames) < 2:
+        raise PreviewFailure("LINGBOT_NOT_ENOUGH_FRAMES", "LingBot-Map preview requires at least 2 sampled frames")
+    arrays = []
+    for frame in frames:
+        rgb = np.asarray(frame, dtype=np.uint8)
+        if rgb.ndim != 3 or rgb.shape[-1] != 3:
+            raise PreviewFailure("LINGBOT_PREPROCESS_FAILED", f"RGB frame has invalid shape: {rgb.shape}")
+        arrays.append(np.transpose(rgb.astype(np.float32) / 255.0, (2, 0, 1)))
+    return torch_module.from_numpy(np.stack(arrays, axis=0)).contiguous()
 
 
 def run_lingbot_video_preview(
@@ -227,11 +505,10 @@ def run_lingbot_video_preview(
     )
     if output_official_predictions_npz is not None:
         save_official_predictions_npz(pred_np, output_official_predictions_npz)
-    if "world_points" not in pred_np:
-        attach_depth_world_points(
-            pred_np,
-            unproject_depth_map_to_point_map=unproject_depth_map_to_point_map,
-        )
+    attach_depth_world_points(
+        pred_np,
+        unproject_depth_map_to_point_map=unproject_depth_map_to_point_map,
+    )
     _log(
         "prediction keys "
         f"depth={'depth' in pred_np} extrinsic={'extrinsic' in pred_np} intrinsic={'intrinsic' in pred_np} "
@@ -304,6 +581,664 @@ def run_lingbot_video_preview(
         "lingbot_duration_seconds": round(time.monotonic() - started, 3),
         **point_metrics,
     }
+
+
+def run_lingbot_video_pointcloud_fast(
+    *,
+    video_path: Path,
+    model_path: Path,
+    work_dir: Path,
+    output_fast_ply: Path,
+    output_full_ply: Path,
+    output_camera_path_json: Path,
+    output_metrics_json: Path,
+    output_meta_json: Path,
+    config: PointCloudVideoConfig,
+    progress: Progress,
+) -> dict[str, Any]:
+    if not model_path.exists() or model_path.stat().st_size <= 0:
+        raise PreviewFailure("LINGBOT_WEIGHT_MISSING", f"LingBot-Map weight not found: {model_path}")
+
+    started = time.monotonic()
+    work_dir.mkdir(parents=True, exist_ok=True)
+    _log(
+        "pointcloud runtime start "
+        f"video={video_path} model={model_path} fps={config.fps} mode=windowed "
+        f"window_size={config.window_size} keyframe_interval={config.keyframe_interval} "
+        f"overlap_keyframes={config.overlap_keyframes} camera_iterations={config.camera_iterations_fast} "
+        f"pixel_stride_fast={config.pixel_stride_fast} pixel_stride_full={config.pixel_stride_full} "
+        f"conf_fast={config.conf_percentile_fast} conf_full={config.conf_percentile_full} "
+        f"min_conf={config.min_conf} allow_sdpa_fallback={config.allow_sdpa_fallback}"
+    )
+
+    try:
+        import torch
+        from lingbot_map.utils.geometry import closed_form_inverse_se3_general, unproject_depth_map_to_point_map
+        from lingbot_map.utils.pose_enc import pose_encoding_to_extri_intri
+    except Exception as exc:
+        raise PreviewFailure("LINGBOT_RUNTIME_UNAVAILABLE", f"LingBot-Map runtime import failed: {exc}") from exc
+
+    if not torch.cuda.is_available():
+        raise PreviewFailure("GPU_RESOURCE_UNAVAILABLE", "LingBot-Map video preview requires CUDA")
+
+    device = torch.device("cuda:0")
+    use_sdpa, flashinfer_found = resolve_lingbot_attention_backend(allow_sdpa_fallback=config.allow_sdpa_fallback)
+    dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+    kv_cache_sliding_window = resolve_kv_cache_sliding_window(config.window_size)
+    model = load_lingbot_model(
+        model_path,
+        device,
+        mode="windowed",
+        image_size=config.image_size,
+        use_sdpa=use_sdpa,
+        camera_iterations=config.camera_iterations_fast,
+        num_scale_frames=config.num_scale_frames,
+        window_size=config.window_size,
+        kv_cache_sliding_window=kv_cache_sliding_window,
+    )
+    aggregator_dtype = cast_lingbot_aggregator_for_inference(model, dtype)
+    retry_model = None
+
+    voxel_fast = StreamingVoxelMap(voxel_target=config.voxel_target_fast)
+    voxel_full = StreamingVoxelMap(voxel_target=config.voxel_target_full)
+    camera_path: list[dict[str, Any]] = []
+    seen_camera_indices: set[int] = set()
+    previous_export_pose: np.ndarray | None = None
+    global_pose_by_source: dict[int, np.ndarray] = {}
+    window_metrics: list[dict[str, Any]] = []
+    retry_count = 0
+    bad_window_count = 0
+    sampled_frame_count = 0
+    inference_seconds_total = 0.0
+    peak_mb = 0.0
+    recommended_view = None
+
+    span = lingbot_window_frame_span(
+        window_size=config.window_size,
+        num_scale_frames=config.num_scale_frames,
+        keyframe_interval=config.keyframe_interval,
+    )
+    overlap = lingbot_window_overlap_span(overlap_keyframes=config.overlap_keyframes, keyframe_interval=config.keyframe_interval)
+    estimated_sampled_frames = estimate_video_sampled_frames(video_path, fps=config.fps)
+    estimated_window_count = estimate_lingbot_window_count(estimated_sampled_frames, span=span, overlap=overlap)
+    _log(
+        "pointcloud window plan "
+        f"estimated_sampled_frames={estimated_sampled_frames} estimated_windows={estimated_window_count} "
+        f"macro_span_source_frames={span} macro_overlap_source_frames={overlap} "
+        f"upstream_keyframe_interval=1 input_keyframe_interval={config.keyframe_interval}"
+    )
+
+    frame_iter = iter_video_frames_ffmpeg(
+        video_path,
+        fps=config.fps,
+        width=config.target_width,
+        height=config.target_height,
+    )
+    windows = iter_lingbot_video_windows(
+        frame_iter,
+        window_size=config.window_size,
+        num_scale_frames=config.num_scale_frames,
+        keyframe_interval=config.keyframe_interval,
+        overlap_keyframes=config.overlap_keyframes,
+    )
+
+    progress(
+        "lingbot_frames_streaming",
+        28,
+        (
+            "streaming video frames into LingBot windows "
+            f"(estimated_windows={estimated_window_count or 'unknown'}, span={span}, overlap={overlap})"
+        ),
+    )
+    for window in windows:
+        sampled_frame_count = max(sampled_frame_count, max(window.frame_indices) + 1)
+        progress_value = window_progress_percent(window.index, window.frame_indices[-1], estimated_window_count, estimated_sampled_frames)
+        window_label = format_window_label(window.index, estimated_window_count)
+        _log(
+            "window start "
+            f"{window_label} source_frames={window.frame_indices[0]}..{window.frame_indices[-1]} "
+            f"lingbot_input_frames={len(window.frames)} fast_voxels={len(voxel_fast.voxels)} full_voxels={len(voxel_full.voxels)}"
+        )
+        progress(
+            "lingbot_window_inference",
+            progress_value,
+            (
+                f"running LingBot {window_label}: source_frames={window.frame_indices[0]}..{window.frame_indices[-1]}, "
+                f"input_frames={len(window.frames)}, fast_points={len(voxel_fast.voxels)}"
+            ),
+        )
+        pred_np, seconds, window_peak_mb = run_lingbot_rgb_window(
+            model,
+            window,
+            config=config,
+            dtype=dtype,
+            device=device,
+            torch_module=torch,
+            pose_encoding_to_extri_intri=pose_encoding_to_extri_intri,
+            closed_form_inverse_se3_general=closed_form_inverse_se3_general,
+            unproject_depth_map_to_point_map=unproject_depth_map_to_point_map,
+            progress=progress,
+            progress_value=progress_value,
+            window_label=window_label,
+        )
+        inference_seconds_total += seconds
+        peak_mb = max(peak_mb, window_peak_mb)
+        _log(
+            "window inference done "
+            f"{window_label} seconds={seconds:.3f} fps={len(window.frames) / max(seconds, 1e-6):.3f} "
+            f"cuda_peak_mb={window_peak_mb:.2f}"
+        )
+        transform = estimate_window_to_global_transform(pred_np, window.frame_indices, global_pose_by_source)
+        apply_world_transform(pred_np, transform)
+        bad_window, bad_reasons = window_alignment_bad(pred_np, window.frame_indices, global_pose_by_source, config=config)
+        if bad_window:
+            bad_window_count += 1
+            retry_count += 1
+            if retry_model is None:
+                clear_cuda_cache(torch)
+                retry_model = load_lingbot_model(
+                    model_path,
+                    device,
+                    mode="windowed",
+                    image_size=config.image_size,
+                    use_sdpa=use_sdpa,
+                    camera_iterations=config.camera_iterations_retry,
+                    num_scale_frames=config.num_scale_frames,
+                    window_size=config.window_size,
+                    kv_cache_sliding_window=kv_cache_sliding_window,
+                )
+                cast_lingbot_aggregator_for_inference(retry_model, dtype)
+            _log(f"window retry {window_label} reasons={bad_reasons} camera_iterations={config.camera_iterations_retry}")
+            progress("lingbot_window_retry", progress_value, f"retrying LingBot {window_label}: reasons={','.join(bad_reasons)}")
+            pred_np, retry_seconds, retry_peak_mb = run_lingbot_rgb_window(
+                retry_model,
+                window,
+                config=config,
+                dtype=dtype,
+                device=device,
+                torch_module=torch,
+                pose_encoding_to_extri_intri=pose_encoding_to_extri_intri,
+                closed_form_inverse_se3_general=closed_form_inverse_se3_general,
+                unproject_depth_map_to_point_map=unproject_depth_map_to_point_map,
+                overlap_keyframes=16,
+                progress=progress,
+                progress_value=progress_value,
+                window_label=window_label,
+            )
+            inference_seconds_total += retry_seconds
+            peak_mb = max(peak_mb, retry_peak_mb)
+            transform = estimate_window_to_global_transform(pred_np, window.frame_indices, global_pose_by_source)
+            apply_world_transform(pred_np, transform)
+
+        pred_np["is_keyframe"] = build_keyframe_mask(
+            prediction_frame_count(pred_np) or len(window.frame_indices),
+            num_scale_frames=config.num_scale_frames,
+            keyframe_interval=1,
+        )
+        previous_export_pose, used_frames, raw_points, filtered_points = add_window_points_to_voxels(
+            pred_np,
+            window.frame_indices,
+            voxel_fast=voxel_fast,
+            voxel_full=voxel_full,
+            previous_export_pose=previous_export_pose,
+            config=config,
+        )
+        recommended_view = recommended_view or first_camera_view(pred_np)
+        add_camera_path_entries(pred_np, window.frame_indices, camera_path, seen_camera_indices, global_pose_by_source)
+        if config.write_progressive_preview and len(voxel_fast.voxels) > 0:
+            voxel_fast.write_ply(output_fast_ply)
+        _log(
+            "window points done "
+            f"{window_label} used_point_frames={used_frames} raw_points={raw_points} filtered_points={filtered_points} "
+            f"fast_voxels={len(voxel_fast.voxels)} full_voxels={len(voxel_full.voxels)} "
+            f"fast_voxel_size={voxel_fast.voxel_size} full_voxel_size={voxel_full.voxel_size}"
+        )
+        progress(
+            "lingbot_window_points",
+            min(71, progress_value + 1),
+            (
+                f"finished {window_label}: used_frames={used_frames}, "
+                f"fast_points={len(voxel_fast.voxels)}, full_points={len(voxel_full.voxels)}, "
+                f"inference={seconds:.1f}s"
+            ),
+        )
+
+        window_metrics.append(
+            {
+                "window_index": window.index,
+                "frame_start": int(window.frame_indices[0]),
+                "frame_end": int(window.frame_indices[-1]),
+                "inference_frames": len(window.frame_indices),
+                "used_point_frames": used_frames,
+                "raw_points": raw_points,
+                "filtered_points": filtered_points,
+                "retried": bool(bad_window),
+                "bad_reasons": bad_reasons,
+            }
+        )
+        del pred_np
+        clear_cuda_cache(torch)
+
+    if len(voxel_fast.voxels) <= 0 or len(voxel_full.voxels) <= 0:
+        raise PreviewFailure("LINGBOT_EMPTY_POINT_CLOUD", "LingBot-Map produced no valid point cloud")
+
+    progress("lingbot_pointcloud", 72, "writing LingBot point-cloud LODs")
+    fast_count = voxel_fast.write_ply(output_fast_ply)
+    full_count = voxel_full.write_ply(output_full_ply)
+    fast_points, _fast_colors, _fast_conf = voxel_fast.arrays()
+    bbox = preview_bounds(fast_points)
+    write_preview_meta_json(
+        output_meta_json,
+        point_source="world_points_from_depth",
+        point_count_raw=voxel_fast.input_points,
+        point_count_exported=fast_count,
+        bbox=bbox,
+        recommended_view=recommended_view,
+    )
+    output_camera_path_json.parent.mkdir(parents=True, exist_ok=True)
+    output_camera_path_json.write_text(json.dumps({"frames": camera_path}, ensure_ascii=True, indent=2), encoding="utf-8")
+    metrics = {
+        "adapter": "lingbot_video_pointcloud_fast",
+        "lingbot_commit": LINGBOT_MAP_COMMIT,
+        "lingbot_model": model_path.name,
+        "lingbot_sampled_frames": int(sampled_frame_count),
+        "lingbot_sampled_fps": float(config.fps),
+        "lingbot_frame_width": int(config.target_width),
+        "lingbot_frame_height": int(config.target_height),
+        "lingbot_image_size": int(config.image_size),
+        "lingbot_target_width": int(config.target_width),
+        "lingbot_target_height": int(config.target_height),
+        "lingbot_inference_mode": "windowed",
+        "lingbot_keyframe_interval": int(config.keyframe_interval),
+        "lingbot_camera_iterations": int(config.camera_iterations_fast),
+        "lingbot_camera_iterations_retry": int(config.camera_iterations_retry),
+        "lingbot_num_scale_frames": int(config.num_scale_frames),
+        "lingbot_window_size": int(config.window_size),
+        "lingbot_kv_cache_sliding_window": int(kv_cache_sliding_window),
+        "lingbot_overlap_keyframes": int(config.overlap_keyframes),
+        "lingbot_use_sdpa": bool(use_sdpa),
+        "lingbot_flashinfer_available": bool(flashinfer_found),
+        "lingbot_allow_sdpa_fallback": bool(config.allow_sdpa_fallback),
+        "lingbot_sdpa_fallback_active": bool(use_sdpa),
+        "lingbot_aggregator_dtype": str(aggregator_dtype).replace("torch.", ""),
+        "lingbot_compile": False,
+        "lingbot_max_frames": 0,
+        "lingbot_point_source": "world_points_from_depth",
+        "point_source": "world_points_from_depth",
+        "lingbot_depth_reprojection_fallback": True,
+        "lingbot_keyframes_only_points": True,
+        "lingbot_save_predictions": False,
+        "lingbot_pixel_stride_fast": int(config.pixel_stride_fast),
+        "lingbot_pixel_stride_full": int(config.pixel_stride_full),
+        "lingbot_conf_percentile_fast": float(config.conf_percentile_fast),
+        "lingbot_conf_percentile_full": float(config.conf_percentile_full),
+        "lingbot_min_conf": float(config.min_conf),
+        "lingbot_window_count": len(window_metrics),
+        "lingbot_retry_window_count": int(retry_count),
+        "lingbot_bad_window_count": int(bad_window_count),
+        "lingbot_inference_seconds": round(inference_seconds_total, 3),
+        "lingbot_duration_seconds": round(time.monotonic() - started, 3),
+        "cuda_memory_peak_mb": round(peak_mb, 2),
+        "point_count": int(fast_count),
+        "point_count_raw": int(voxel_fast.input_points),
+        "point_count_exported": int(fast_count),
+        "preview_full_point_count": int(full_count),
+        "preview_fast_ply": str(output_fast_ply),
+        "preview_full_ply": str(output_full_ply),
+        "camera_path_json": str(output_camera_path_json),
+        "metrics_json": str(output_metrics_json),
+        "preview_meta_json": str(output_meta_json),
+        "intermediate_ply_size": output_fast_ply.stat().st_size,
+        "preview_fast_ply_size": output_fast_ply.stat().st_size,
+        "preview_full_ply_size": output_full_ply.stat().st_size,
+        "camera_path_json_size": output_camera_path_json.stat().st_size,
+        "preview_meta_json_size": output_meta_json.stat().st_size,
+        "bbox_min": bbox["bbox_min"],
+        "bbox_max": bbox["bbox_max"],
+        "bbox_center": bbox["center"],
+        "bbox_radius": bbox["radius"],
+        "quality_warning": None,
+        "lingbot_window_metrics": window_metrics,
+        **voxel_fast.metrics("preview_fast"),
+        **voxel_full.metrics("preview_full"),
+    }
+    output_metrics_json.parent.mkdir(parents=True, exist_ok=True)
+    output_metrics_json.write_text(json.dumps(metrics, ensure_ascii=True, indent=2, default=json_default), encoding="utf-8")
+    metrics["metrics_json_size"] = output_metrics_json.stat().st_size
+    progress("lingbot_pointcloud_ready", 88, f"wrote fast={fast_count} full={full_count} depth-world points")
+    return metrics
+
+
+def run_lingbot_rgb_window(
+    model: Any,
+    window: LingBotVideoWindow,
+    *,
+    config: PointCloudVideoConfig,
+    dtype: Any,
+    device: Any,
+    torch_module: Any,
+    pose_encoding_to_extri_intri: Any,
+    closed_form_inverse_se3_general: Any,
+    unproject_depth_map_to_point_map: Any,
+    overlap_keyframes: int | None = None,
+    progress: Progress | None = None,
+    progress_value: int = 42,
+    window_label: str | None = None,
+) -> tuple[dict[str, np.ndarray], float, float]:
+    images = preprocess_rgb_frames(window.frames, torch_module=torch_module)
+    if hasattr(images, "to"):
+        images = images.to(device)
+    label = window_label or f"window {window.index + 1}"
+    _log(
+        "upstream inference start "
+        f"{label} input_frames={len(window.frames)} source_frames={window.frame_indices[0]}..{window.frame_indices[-1]} "
+        f"window_size={config.window_size} upstream_keyframe_interval=1 overlap_keyframes={overlap_keyframes or config.overlap_keyframes}"
+    )
+    output_device = torch_module.device("cpu")
+    torch_module.cuda.reset_peak_memory_stats()
+    inference_started = time.perf_counter()
+    stop_heartbeat = threading.Event()
+    heartbeat = threading.Thread(
+        target=log_inference_heartbeat,
+        args=(stop_heartbeat, label, inference_started, progress, progress_value),
+        name=f"lingbot-inference-heartbeat-{window.index}",
+        daemon=True,
+    )
+    heartbeat.start()
+    try:
+        with torch_module.no_grad(), torch_module.amp.autocast("cuda", dtype=dtype):
+            predictions = run_lingbot_inference(
+                model,
+                images,
+                resolved_mode="windowed",
+                window_size=config.window_size,
+                overlap_size=lingbot_window_overlap_span(
+                    overlap_keyframes=overlap_keyframes or config.overlap_keyframes,
+                    keyframe_interval=1,
+                ),
+                overlap_keyframes=overlap_keyframes or config.overlap_keyframes,
+                num_scale_frames=config.num_scale_frames,
+                keyframe_interval=1,
+                output_device=output_device,
+                torch_module=torch_module,
+            )
+    finally:
+        stop_heartbeat.set()
+        heartbeat.join(timeout=1.0)
+    if torch_module.cuda.is_available():
+        torch_module.cuda.synchronize()
+    seconds = time.perf_counter() - inference_started
+    peak_mb = float(torch_module.cuda.max_memory_allocated() / 1024 / 1024) if torch_module.cuda.is_available() else 0.0
+    pred_np = predictions_to_visualization_np(
+        predictions,
+        images,
+        pose_encoding_to_extri_intri=pose_encoding_to_extri_intri,
+        closed_form_inverse_se3_general=closed_form_inverse_se3_general,
+        torch_module=torch_module,
+    )
+    attach_depth_world_points(pred_np, unproject_depth_map_to_point_map=unproject_depth_map_to_point_map)
+    return pred_np, seconds, peak_mb
+
+
+def log_inference_heartbeat(
+    stop_event: threading.Event,
+    window_label: str,
+    started: float,
+    progress: Progress | None,
+    progress_value: int,
+) -> None:
+    while not stop_event.wait(15.0):
+        elapsed = time.perf_counter() - started
+        message = f"LingBot inference still running: {window_label}, elapsed={elapsed:.0f}s"
+        _log(message)
+        if progress is not None:
+            try:
+                progress("lingbot_window_inference", progress_value, message)
+            except Exception:
+                pass
+
+
+def format_window_label(index: int, total: int | None) -> str:
+    if total is None:
+        return f"window {index + 1}"
+    return f"window {index + 1}/{total}"
+
+
+def window_progress_percent(
+    window_index: int,
+    source_frame_end: int,
+    estimated_window_count: int | None,
+    estimated_sampled_frames: int | None,
+) -> int:
+    if estimated_window_count and estimated_window_count > 0:
+        fraction = min(1.0, max(0.0, float(window_index) / float(estimated_window_count)))
+    elif estimated_sampled_frames and estimated_sampled_frames > 0:
+        fraction = min(1.0, max(0.0, float(source_frame_end) / float(estimated_sampled_frames)))
+    else:
+        fraction = min(0.9, float(window_index) * 0.05)
+    return int(min(70, max(34, round(34 + fraction * 36))))
+
+
+def estimate_window_to_global_transform(
+    pred_np: dict[str, np.ndarray],
+    frame_indices: tuple[int, ...],
+    global_pose_by_source: dict[int, np.ndarray],
+) -> np.ndarray:
+    frame_count = prediction_frame_count(pred_np) or 0
+    src_positions = []
+    dst_positions = []
+    extrinsics = pred_np.get("extrinsic")
+    if not isinstance(extrinsics, np.ndarray):
+        return np.eye(4, dtype=np.float32)
+    for local_index in range(min(frame_count, len(frame_indices))):
+        source_index = int(frame_indices[local_index])
+        previous_pose = global_pose_by_source.get(source_index)
+        if previous_pose is None:
+            continue
+        pose = c2w_4x4(extrinsics[local_index])
+        src_positions.append(pose[:3, 3])
+        dst_positions.append(previous_pose[:3, 3])
+    if not src_positions:
+        return np.eye(4, dtype=np.float32)
+    return estimate_similarity_transform(np.stack(src_positions), np.stack(dst_positions))
+
+
+def estimate_similarity_transform(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
+    src = np.asarray(src, dtype=np.float32).reshape(-1, 3)
+    dst = np.asarray(dst, dtype=np.float32).reshape(-1, 3)
+    transform = np.eye(4, dtype=np.float32)
+    if src.shape[0] == 0 or dst.shape[0] != src.shape[0]:
+        return transform
+    if src.shape[0] < 3:
+        transform[:3, 3] = np.mean(dst - src, axis=0)
+        return transform
+    src_mean = np.mean(src, axis=0)
+    dst_mean = np.mean(dst, axis=0)
+    src_centered = src - src_mean
+    dst_centered = dst - dst_mean
+    covariance = (dst_centered.T @ src_centered) / src.shape[0]
+    try:
+        u, singular_values, vh = np.linalg.svd(covariance)
+    except np.linalg.LinAlgError:
+        transform[:3, 3] = dst_mean - src_mean
+        return transform
+    sign = np.sign(np.linalg.det(u @ vh))
+    correction = np.diag([1.0, 1.0, sign]).astype(np.float32)
+    rotation = u @ correction @ vh
+    variance = float(np.mean(np.sum(src_centered * src_centered, axis=1)))
+    scale = float(np.sum(singular_values * np.diag(correction)) / max(variance, 1e-8))
+    transform[:3, :3] = (scale * rotation).astype(np.float32)
+    transform[:3, 3] = (dst_mean - scale * rotation @ src_mean).astype(np.float32)
+    return transform
+
+
+def apply_world_transform(pred_np: dict[str, np.ndarray], transform: np.ndarray) -> None:
+    transform = np.asarray(transform, dtype=np.float32).reshape(4, 4)
+    points = pred_np.get("world_points_from_depth")
+    if isinstance(points, np.ndarray):
+        flat = points.reshape(-1, 3)
+        valid = np.isfinite(flat).all(axis=1)
+        transformed = flat.copy()
+        transformed[valid] = (flat[valid] @ transform[:3, :3].T) + transform[:3, 3]
+        pred_np["world_points_from_depth"] = transformed.reshape(points.shape).astype(np.float32, copy=False)
+    extrinsics = pred_np.get("extrinsic")
+    if isinstance(extrinsics, np.ndarray):
+        transformed_ext = []
+        for extrinsic in extrinsics:
+            pose = transform @ c2w_4x4(extrinsic)
+            transformed_ext.append(pose[:3, :4])
+        pred_np["extrinsic"] = np.asarray(transformed_ext, dtype=np.float32)
+
+
+def window_alignment_bad(
+    pred_np: dict[str, np.ndarray],
+    frame_indices: tuple[int, ...],
+    global_pose_by_source: dict[int, np.ndarray],
+    *,
+    config: PointCloudVideoConfig,
+) -> tuple[bool, list[str]]:
+    reasons = []
+    extrinsics = pred_np.get("extrinsic")
+    if not isinstance(extrinsics, np.ndarray):
+        return False, reasons
+    jumps = []
+    for local_index in range(min(len(frame_indices), extrinsics.shape[0])):
+        previous_pose = global_pose_by_source.get(int(frame_indices[local_index]))
+        if previous_pose is None:
+            continue
+        pose = c2w_4x4(extrinsics[local_index])
+        jumps.append(float(np.linalg.norm(pose[:3, 3] - previous_pose[:3, 3])))
+    if jumps and float(np.median(jumps)) > float(config.retry_overlap_pose_jump):
+        reasons.append("overlap_pose_jump")
+    return bool(reasons), reasons
+
+
+def add_window_points_to_voxels(
+    pred_np: dict[str, np.ndarray],
+    frame_indices: tuple[int, ...],
+    *,
+    voxel_fast: StreamingVoxelMap,
+    voxel_full: StreamingVoxelMap,
+    previous_export_pose: np.ndarray | None,
+    config: PointCloudVideoConfig,
+) -> tuple[np.ndarray | None, int, int, int]:
+    used_frames = 0
+    raw_points = 0
+    filtered_points = 0
+    for frame_index, frame in iter_prediction_frames(pred_np, strided_frame_indices(prediction_frame_count(pred_np), 1)):
+        source_index = int(frame_indices[frame_index]) if frame_index < len(frame_indices) else frame_index
+        pose = c2w_4x4(frame["extrinsic"]) if "extrinsic" in frame else None
+        if not should_export_point_frame(
+            frame,
+            source_index=source_index,
+            pose=pose,
+            previous_export_pose=previous_export_pose,
+            keyframe_interval=config.keyframe_interval,
+            coverage_keyframes=config.coverage_keyframes,
+            rotation_threshold_degrees=config.coverage_rotation_degrees,
+            translation_threshold=config.coverage_translation,
+        ):
+            continue
+        fast = extract_frame_points_for_export(
+            frame,
+            pixel_stride=config.pixel_stride_fast,
+            conf_percentile=config.conf_percentile_fast,
+            min_conf=config.min_conf,
+            source_name=f"window frame {source_index}",
+        )
+        full = extract_frame_points_for_export(
+            frame,
+            pixel_stride=config.pixel_stride_full,
+            conf_percentile=config.conf_percentile_full,
+            min_conf=config.min_conf,
+            source_name=f"window frame {source_index}",
+        )
+        voxel_fast.add_points(fast.points, fast.colors, fast.confidence)
+        voxel_full.add_points(full.points, full.colors, full.confidence)
+        raw_points += fast.raw_count
+        filtered_points += fast.filtered_count
+        used_frames += 1
+        if pose is not None:
+            previous_export_pose = pose
+    return previous_export_pose, used_frames, raw_points, filtered_points
+
+
+def should_export_point_frame(
+    frame: Any,
+    *,
+    source_index: int,
+    pose: np.ndarray | None,
+    previous_export_pose: np.ndarray | None,
+    keyframe_interval: int,
+    coverage_keyframes: bool,
+    rotation_threshold_degrees: float,
+    translation_threshold: float,
+) -> bool:
+    if prediction_frame_is_keyframe(frame):
+        return True
+    if source_index % max(1, int(keyframe_interval)) == 0:
+        return True
+    if not coverage_keyframes or pose is None or previous_export_pose is None:
+        return False
+    translation = float(np.linalg.norm(pose[:3, 3] - previous_export_pose[:3, 3]))
+    rotation = rotation_angle_degrees(pose[:3, :3], previous_export_pose[:3, :3])
+    return rotation > float(rotation_threshold_degrees) or translation > float(translation_threshold)
+
+
+def rotation_angle_degrees(a: np.ndarray, b: np.ndarray) -> float:
+    relative = np.asarray(a, dtype=np.float32) @ np.asarray(b, dtype=np.float32).T
+    trace = float(np.trace(relative))
+    cos_theta = np.clip((trace - 1.0) / 2.0, -1.0, 1.0)
+    return float(np.degrees(np.arccos(cos_theta)))
+
+
+def add_camera_path_entries(
+    pred_np: dict[str, np.ndarray],
+    frame_indices: tuple[int, ...],
+    camera_path: list[dict[str, Any]],
+    seen_camera_indices: set[int],
+    global_pose_by_source: dict[int, np.ndarray],
+) -> None:
+    extrinsics = pred_np.get("extrinsic")
+    intrinsics = pred_np.get("intrinsic")
+    if not isinstance(extrinsics, np.ndarray):
+        return
+    for local_index in range(min(extrinsics.shape[0], len(frame_indices))):
+        source_index = int(frame_indices[local_index])
+        pose = c2w_4x4(extrinsics[local_index])
+        global_pose_by_source[source_index] = pose
+        if source_index in seen_camera_indices:
+            continue
+        seen_camera_indices.add(source_index)
+        entry = {
+            "source_frame_index": source_index,
+            "position": [float(value) for value in pose[:3, 3]],
+            "c2w": pose[:3, :4].astype(float).tolist(),
+        }
+        if isinstance(intrinsics, np.ndarray) and local_index < intrinsics.shape[0]:
+            entry["intrinsic"] = np.asarray(intrinsics[local_index], dtype=float).tolist()
+        camera_path.append(entry)
+
+
+def first_camera_view(pred_np: dict[str, np.ndarray]) -> dict[str, Any] | None:
+    for _frame_index, frame in iter_prediction_frames(pred_np, [0]):
+        return lingbot_camera_view_from_frame(frame, radius_hint=1.0)
+    return None
+
+
+def c2w_4x4(extrinsic: np.ndarray) -> np.ndarray:
+    matrix = np.eye(4, dtype=np.float32)
+    ext = np.asarray(extrinsic, dtype=np.float32)
+    matrix[:3, :4] = ext[:3, :4]
+    return matrix
+
+
+def json_default(value: Any) -> Any:
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    return str(value)
 
 
 def extract_video_frames(video_path: Path, output_dir: Path, *, fps: int, max_frames: int) -> ExtractedLingBotFrames:
@@ -1006,12 +1941,12 @@ def attach_depth_world_points(
     *,
     unproject_depth_map_to_point_map: Any,
 ) -> None:
-    if "world_points_from_depth" in predictions:
-        return
-    if "world_points" in predictions:
-        return
-    if not all(key in predictions for key in ("depth", "intrinsic")):
-        return
+    missing = [key for key in ("depth", "intrinsic") if key not in predictions]
+    if missing:
+        raise PreviewFailure(
+            "LINGBOT_DEPTH_WORLD_MISSING",
+            f"Depth-world export needs depth and intrinsic predictions; missing: {', '.join(missing)}",
+        )
 
     extrinsic_w2c = predictions.get("extrinsic_w2c")
     if extrinsic_w2c is None:

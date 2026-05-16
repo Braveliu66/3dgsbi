@@ -19,9 +19,10 @@ from app.preview.types import PreviewContext  # noqa: E402
 
 class LingBotVideoPreviewTests(unittest.TestCase):
     def test_video_preview_defaults_to_lingbot_and_image_preview_stays_litevggt(self) -> None:
-        self.assertEqual(normalize_preview_pipeline(None, "video"), "lingbot_map_spz")
-        self.assertEqual(normalize_preview_pipeline("", "video"), "lingbot_map_spz")
-        self.assertEqual(normalize_preview_pipeline("lingbot", "video"), "lingbot_map_spz")
+        self.assertEqual(normalize_preview_pipeline(None, "video"), "lingbot_video_pointcloud_fast")
+        self.assertEqual(normalize_preview_pipeline("", "video"), "lingbot_video_pointcloud_fast")
+        self.assertEqual(normalize_preview_pipeline("lingbot", "video"), "lingbot_video_pointcloud_fast")
+        self.assertEqual(normalize_preview_pipeline("lingbot_map", "video"), "lingbot_map_spz")
         self.assertEqual(normalize_preview_pipeline(None, "images"), "litevggt_spz")
 
     def test_lingbot_algorithm_registration_excludes_heavy_render_dependencies(self) -> None:
@@ -34,6 +35,14 @@ class LingBotVideoPreviewTests(unittest.TestCase):
         self.assertEqual(entry["source_type"], "pinned_runtime_package")
         self.assertEqual(entry["commands"], {})
         self.assertIn("excludes optional rendering", entry["license_notice"])
+
+    def test_lingbot_pointcloud_algorithm_registration_is_ply_first(self) -> None:
+        entry = next(item for item in ALGORITHMS if item["name"] == "LingBot Video Point Cloud Fast")
+
+        self.assertEqual(entry["repo_url"], "https://github.com/Robbyant/lingbot-map")
+        self.assertEqual(entry["weight_paths"], ["lingbot/lingbot-map-long.pt"])
+        self.assertEqual(entry["source_type"], "pinned_runtime_package")
+        self.assertIn("without Spark SPZ conversion", entry["license_notice"])
 
     def test_lingbot_adapter_mock_output_becomes_preview_artifacts(self) -> None:
         from app.preview.adapters import lingbot
@@ -137,6 +146,91 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             self.assertTrue(Path(result.metrics["lingbot_official_predictions_npz"]).exists())
             self.assertGreater(result.metrics["lingbot_official_predictions_npz_size"], 0)
             self.assertEqual(result.source_commits["LingBot-Map"], "4cd986009b9adeded8a4e740919221940dedeffe")
+
+    def test_lingbot_pointcloud_adapter_defaults_to_ply_outputs(self) -> None:
+        from app.preview.adapters import lingbot_pointcloud
+        from app.preview.io.ply import write_point_cloud_ply
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            (input_dir / "clip.mp4").write_bytes(b"video")
+            weight = root / "model-cache" / "lingbot" / "lingbot-map-long.pt"
+            weight.parent.mkdir(parents=True)
+            weight.write_bytes(b"weight")
+            ctx = PreviewContext(
+                task_id="task",
+                project_id="project",
+                pipeline="lingbot_video_pointcloud_fast",
+                input_dir=input_dir,
+                work_dir=root / "work",
+                output_spz=root / "work" / "preview.spz",
+                model_cache_dir=root / "model-cache",
+                source_version=3,
+                options={},
+                progress=lambda *_: None,
+            )
+
+            def fake_runtime(**kwargs):
+                config = kwargs["config"]
+                self.assertEqual(config.fps, 10.0)
+                self.assertEqual(config.target_width, 518)
+                self.assertEqual(config.target_height, 378)
+                self.assertEqual(config.window_size, 96)
+                self.assertEqual(config.keyframe_interval, 13)
+                self.assertEqual(config.overlap_keyframes, 8)
+                self.assertEqual(config.camera_iterations_fast, 1)
+                self.assertEqual(config.num_scale_frames, 8)
+                self.assertEqual(config.pixel_stride_fast, 5)
+                self.assertEqual(config.pixel_stride_full, 3)
+                self.assertEqual(config.conf_percentile_fast, 45.0)
+                self.assertEqual(config.conf_percentile_full, 35.0)
+                self.assertEqual(config.min_conf, 0.8)
+                self.assertEqual(config.voxel_target_fast, 3000)
+                self.assertEqual(config.voxel_target_full, 5200)
+                self.assertFalse(config.allow_sdpa_fallback)
+                write_point_cloud_ply(
+                    np.array([[1.0, 2.0, 3.0]], dtype=np.float32),
+                    np.array([[10, 20, 30]], dtype=np.uint8),
+                    kwargs["output_fast_ply"],
+                    confidence=np.array([1.0], dtype=np.float32),
+                    max_points=0,
+                    include_confidence=False,
+                )
+                write_point_cloud_ply(
+                    np.array([[1.0, 2.0, 3.0]], dtype=np.float32),
+                    np.array([[10, 20, 30]], dtype=np.uint8),
+                    kwargs["output_full_ply"],
+                    confidence=np.array([1.0], dtype=np.float32),
+                    max_points=0,
+                    include_confidence=False,
+                )
+                kwargs["output_camera_path_json"].write_text('{"frames":[]}', encoding="utf-8")
+                kwargs["output_metrics_json"].write_text("{}", encoding="utf-8")
+                kwargs["output_meta_json"].write_text("{}", encoding="utf-8")
+                return {
+                    "adapter": "lingbot_video_pointcloud_fast",
+                    "point_source": "world_points_from_depth",
+                    "lingbot_point_source": "world_points_from_depth",
+                    "point_count": 1,
+                    "preview_fast_ply_size": kwargs["output_fast_ply"].stat().st_size,
+                    "preview_full_ply_size": kwargs["output_full_ply"].stat().st_size,
+                    "camera_path_json_size": kwargs["output_camera_path_json"].stat().st_size,
+                    "metrics_json_size": kwargs["output_metrics_json"].stat().st_size,
+                    "preview_meta_json": str(kwargs["output_meta_json"]),
+                }
+
+            with patch.object(lingbot_pointcloud, "run_lingbot_video_pointcloud_fast", side_effect=fake_runtime):
+                result = lingbot_pointcloud.run(ctx)
+
+            self.assertEqual(result.primary_artifact_kind, "preview_pointcloud_ply")
+            self.assertEqual(result.primary_artifact_file_name, "preview_fast.ply")
+            self.assertEqual(result.primary_artifact_format, "ply")
+            self.assertIsNone(result.splat_count)
+            self.assertFalse(ctx.output_spz.exists())
+            self.assertEqual({item.kind for item in result.extra_artifacts}, {"preview_full_ply", "camera_path_json", "preview_metrics_json"})
+            self.assertEqual(result.metrics["point_source"], "world_points_from_depth")
 
     def test_lingbot_checkpoint_pos_embed_infers_model_image_size(self) -> None:
         from app.preview.vendor.lingbot_runtime import infer_lingbot_model_image_size_from_state_dict
@@ -448,21 +542,22 @@ class LingBotVideoPreviewTests(unittest.TestCase):
         np.testing.assert_allclose(captured["extrinsic"], predictions["extrinsic_w2c"])
         np.testing.assert_allclose(predictions["world_points_from_depth"], 7.0)
 
-    def test_lingbot_depth_reprojection_skips_when_world_points_exist(self) -> None:
+    def test_lingbot_depth_reprojection_overwrites_even_when_world_points_exist(self) -> None:
         from app.preview.vendor.lingbot_runtime import attach_depth_world_points
 
         predictions = {
             "world_points": np.zeros((1, 1, 1, 3), dtype=np.float32),
             "depth": np.ones((1, 1, 1, 1), dtype=np.float32),
+            "extrinsic_w2c": np.eye(4, dtype=np.float32)[None, :3, :4],
             "intrinsic": np.eye(3, dtype=np.float32)[None],
         }
 
         attach_depth_world_points(
             predictions,
-            unproject_depth_map_to_point_map=lambda *_: (_ for _ in ()).throw(AssertionError("unexpected depth fallback")),
+            unproject_depth_map_to_point_map=lambda *_: np.full((1, 1, 1, 3), 5.0, dtype=np.float32),
         )
 
-        self.assertNotIn("world_points_from_depth", predictions)
+        np.testing.assert_allclose(predictions["world_points_from_depth"], 5.0)
 
     def test_lingbot_depth_reprojection_requires_w2c_extrinsic(self) -> None:
         from app.preview.types import PreviewFailure
@@ -615,7 +710,7 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             self.assertEqual(metrics["lingbot_point_frame_count"], 2)
             self.assertEqual(metrics["lingbot_point_skipped_frames"], 0)
 
-    def test_lingbot_npz_to_pointcloud_ply_prefers_model_world_points(self) -> None:
+    def test_lingbot_npz_to_pointcloud_ply_uses_depth_world_points(self) -> None:
         from app.preview.io.ply import POINT_CLOUD_PLY_DTYPE
         from app.preview.vendor.lingbot_runtime import write_spark_plain_ply_from_npz
 
@@ -667,14 +762,14 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             self.assertNotIn(b"property float scale_2", header)
             self.assertEqual(metrics["point_count"], 2)
             self.assertEqual(metrics["lingbot_ply_format"], "rgb_point_cloud")
-            self.assertEqual(metrics["lingbot_point_source"], "world_points")
+            self.assertEqual(metrics["lingbot_point_source"], "world_points_from_depth")
 
             records = np.frombuffer(
                 body,
                 dtype=POINT_CLOUD_PLY_DTYPE,
             )
             self.assertEqual(records.shape[0], 2)
-            np.testing.assert_allclose(records["x"], np.array([99, 99], dtype=np.float32))
+            np.testing.assert_allclose(records["x"], np.array([3, 4], dtype=np.float32))
 
     def test_lingbot_depth_points_are_supported_as_export_source(self) -> None:
         from app.preview.io.ply import POINT_CLOUD_PLY_DTYPE
@@ -710,6 +805,121 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             self.assertTrue(metrics["lingbot_depth_reprojection_fallback"])
             records = np.frombuffer(body, dtype=POINT_CLOUD_PLY_DTYPE)
             self.assertEqual(records.shape[0], 4)
+
+    def test_lingbot_ffmpeg_pipe_streams_raw_rgb(self) -> None:
+        from app.preview.vendor import lingbot_runtime
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "clip.mp4"
+            video.write_bytes(b"video")
+            frame = bytes([1, 2, 3] * 4)
+
+            class FakeProc:
+                def __init__(self, command, stdout, stderr):
+                    self.command = command
+                    self.stdout = SimpleNamespace(
+                        read=self.read,
+                        close=lambda: None,
+                    )
+                    self.stderr = SimpleNamespace(read=lambda: b"", close=lambda: None)
+                    self._payloads = [frame, b""]
+
+                def read(self, _size):
+                    return self._payloads.pop(0)
+
+                def wait(self):
+                    return 0
+
+            captured = {}
+
+            def fake_popen(command, stdout, stderr):
+                captured["command"] = command
+                return FakeProc(command, stdout, stderr)
+
+            with patch.object(lingbot_runtime.shutil, "which", return_value="ffmpeg"), patch.object(
+                lingbot_runtime.subprocess,
+                "Popen",
+                side_effect=fake_popen,
+            ):
+                frames = list(lingbot_runtime.iter_video_frames_ffmpeg(video, fps=10, width=2, height=2))
+
+            self.assertEqual(len(frames), 1)
+            self.assertEqual(frames[0][1].shape, (2, 2, 3))
+            command = captured["command"]
+            self.assertIn("-vf", command)
+            self.assertIn("fps=10,scale=2:2:force_original_aspect_ratio=increase,crop=2:2", command)
+            self.assertIn("rgb24", command)
+            self.assertEqual(command[-1], "pipe:1")
+
+    def test_lingbot_window_builder_uses_macro_span_overlap_and_tail(self) -> None:
+        from app.preview.vendor.lingbot_runtime import iter_lingbot_video_windows, lingbot_window_frame_span, lingbot_window_overlap_span
+
+        frame_iter = ((index, np.zeros((1, 1, 3), dtype=np.uint8)) for index in range(25))
+        windows = list(
+            iter_lingbot_video_windows(
+                frame_iter,
+                window_size=4,
+                num_scale_frames=1,
+                keyframe_interval=3,
+                overlap_keyframes=1,
+            )
+        )
+
+        self.assertEqual(lingbot_window_frame_span(window_size=4, num_scale_frames=1, keyframe_interval=3), 10)
+        self.assertEqual(lingbot_window_overlap_span(overlap_keyframes=1, keyframe_interval=3), 3)
+        self.assertGreaterEqual(len(windows), 3)
+        self.assertEqual(windows[0].frame_indices, (0, 1, 4, 7))
+        self.assertGreaterEqual(windows[-1].frame_indices[-1], 21)
+
+    def test_lingbot_streaming_voxel_map_keeps_highest_confidence(self) -> None:
+        from app.preview.vendor.lingbot_runtime import StreamingVoxelMap
+
+        voxels = StreamingVoxelMap(voxel_target=1)
+        voxels.voxel_size = 1.0
+        voxels.add_points(
+            np.array([[0.1, 0.1, 0.1], [0.2, 0.2, 0.2], [1.2, 0.0, 0.0]], dtype=np.float32),
+            np.array([[10, 0, 0], [20, 0, 0], [30, 0, 0]], dtype=np.uint8),
+            np.array([0.1, 0.9, 0.5], dtype=np.float32),
+        )
+
+        points, colors, conf = voxels.arrays()
+        self.assertEqual(points.shape[0], 2)
+        self.assertEqual(voxels.input_points, 3)
+        self.assertIn(0.9, conf.tolist())
+        self.assertIn([20, 0, 0], colors.tolist())
+
+    def test_lingbot_coverage_keyframes_export_by_motion(self) -> None:
+        from app.preview.vendor.lingbot_runtime import should_export_point_frame
+
+        previous = np.eye(4, dtype=np.float32)
+        moved = np.eye(4, dtype=np.float32)
+        moved[:3, 3] = np.array([0.4, 0.0, 0.0], dtype=np.float32)
+
+        self.assertTrue(
+            should_export_point_frame(
+                {"is_keyframe": np.array(False)},
+                source_index=5,
+                pose=moved,
+                previous_export_pose=previous,
+                keyframe_interval=13,
+                coverage_keyframes=True,
+                rotation_threshold_degrees=12.0,
+                translation_threshold=0.35,
+            )
+        )
+        self.assertFalse(
+            should_export_point_frame(
+                {"is_keyframe": np.array(False)},
+                source_index=5,
+                pose=previous,
+                previous_export_pose=previous,
+                keyframe_interval=13,
+                coverage_keyframes=True,
+                rotation_threshold_degrees=12.0,
+                translation_threshold=0.35,
+            )
+        )
 
     def test_pointcloud_ply_converts_to_fixed_splat_ply_with_log_scale(self) -> None:
         from app.preview.io.ply import (

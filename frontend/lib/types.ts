@@ -123,7 +123,7 @@ export interface ViewerConfig {
   quality_warning?: string | null;
   point_source?: string | null;
   lods?: ViewerLod[];
-  format?: "spz" | "rad";
+  format?: "spz" | "rad" | "ply";
   message?: string;
   stale?: boolean;
 }

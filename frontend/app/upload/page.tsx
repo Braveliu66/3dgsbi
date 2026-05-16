@@ -162,7 +162,7 @@ export default function UploadPage() {
     setError(null);
     try {
       const options: Record<string, unknown> = {
-        preview_pipeline: project.input_type === "video" ? "lingbot_map_spz" : "litevggt_spz"
+        preview_pipeline: project.input_type === "video" ? "lingbot_video_pointcloud_fast" : "litevggt_spz"
       };
       if (project.input_type === "images") {
         options.preview_scene_profile = previewSceneProfile;

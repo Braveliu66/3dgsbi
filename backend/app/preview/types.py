@@ -38,12 +38,24 @@ class PreviewContext:
 
 
 @dataclass(slots=True)
+class PreviewArtifactResult:
+    path: Path
+    kind: str
+    file_name: str
+
+
+@dataclass(slots=True)
 class PreviewResult:
     output_spz: Path
     intermediate_ply: Path | None
     splat_count: int | None
     metrics: dict[str, Any] = field(default_factory=dict)
     source_commits: dict[str, str] = field(default_factory=dict)
+    primary_artifact: Path | None = None
+    primary_artifact_kind: str = "preview_spz"
+    primary_artifact_file_name: str = "preview.spz"
+    primary_artifact_format: str = "spz"
+    extra_artifacts: tuple[PreviewArtifactResult, ...] = ()
 
 
 SOURCE_COMMITS: dict[str, str] = {

@@ -45,7 +45,20 @@ ALGORITHMS: list[dict[str, Any]] = [
         "commands": {},
         "source_type": "pinned_runtime_package",
         "license_notice": "Apache-2.0; worker installs the LingBot-Map core package at a pinned commit and excludes optional rendering/visualization dependencies.",
-        "notes": "Video fast preview pipeline: sampled video frames -> LingBot-Map windowed RGB-D reconstruction -> per-frame NPZ -> Spark plain PLY -> Spark SPZ. It does not use LingBot offline rendering, Kaolin, Open3D, viser, sky segmentation, or custom render CUDA extensions.",
+        "notes": "Legacy video preview pipeline: sampled video frames -> LingBot-Map windowed RGB-D reconstruction -> per-frame NPZ -> Spark plain PLY -> Spark SPZ. It does not use LingBot offline rendering, Kaolin, Open3D, viser, sky segmentation, or custom render CUDA extensions.",
+    },
+    {
+        "name": "LingBot Video Point Cloud Fast",
+        "repo_url": "https://github.com/Robbyant/lingbot-map",
+        "license": "Apache-2.0",
+        "commit_hash_setting": "lingbot_map_repo_commit",
+        "local_path": Path(__file__).resolve().parent / "preview" / "adapters" / "lingbot_pointcloud.py",
+        "enabled": True,
+        "weight_paths": ["lingbot/lingbot-map-long.pt"],
+        "commands": {},
+        "source_type": "pinned_runtime_package",
+        "license_notice": "Apache-2.0; worker installs the LingBot-Map core package at a pinned commit and exports depth-reprojected PLY point clouds without Spark SPZ conversion.",
+        "notes": "Default video preview pipeline: ffmpeg raw frame stream -> windowed LingBot-Map inference -> depth-world point export -> streaming voxel PLY LODs.",
     },
     {
         "name": "Spark SPZ",
@@ -143,16 +156,18 @@ def seed_algorithm_registry(db: Session, settings: Settings | None = None) -> No
 
 
 def normalize_preview_pipeline(value: str | None, input_type: str) -> str:
-    default = "lingbot_map_spz" if input_type == "video" else "litevggt_spz"
+    default = "lingbot_video_pointcloud_fast" if input_type == "video" else "litevggt_spz"
     normalized = (value or default).strip().lower()
     aliases = {
         "litevggt_spark": "litevggt_spz",
         "litevggt_spz": "litevggt_spz",
         "direct": "litevggt_spz",
-        "lingbot": "lingbot_map_spz",
+        "lingbot": "lingbot_video_pointcloud_fast",
         "lingbot_map": "lingbot_map_spz",
         "lingbot_map_spz": "lingbot_map_spz",
-        "video_lingbot": "lingbot_map_spz",
+        "video_lingbot": "lingbot_video_pointcloud_fast",
+        "lingbot_video_pointcloud_fast": "lingbot_video_pointcloud_fast",
+        "lingbot_pointcloud": "lingbot_video_pointcloud_fast",
     }
     return aliases.get(normalized, normalized)
 
@@ -186,7 +201,7 @@ def runtime_preflight(db: Session, settings: Settings | None = None) -> dict[str
                 extensions_ready = bool(fine_runtime["available"] or fine_workers["available"])
                 if not extensions_ready:
                     issues.append("worker-fine heartbeat missing and backend fine CUDA runtime unavailable")
-            if item.name == "LingBot-Map Video Preview":
+            if item.name in {"LingBot-Map Video Preview", "LingBot Video Point Cloud Fast"}:
                 lingbot_runtime = lingbot_preview_runtime_status()
                 extensions_ready = bool(lingbot_runtime["available"] or preview_worker_status(db)["available"])
                 if not extensions_ready:
@@ -311,6 +326,7 @@ def bundled_module_status(name: str) -> dict[str, Any]:
     modules = {
         "LiteVGGT": "app.preview.vendor.litevggt_runtime",
         "LingBot-Map Video Preview": "app.preview.adapters.lingbot",
+        "LingBot Video Point Cloud Fast": "app.preview.adapters.lingbot_pointcloud",
         "Image Fine (Official FastGS-Big)": "app.fine.runner",
         "Deblurring-3DGS GTnet": "app.fine.official_fastgs_big_trainer",
         "Spark SPZ": "app.preview.io.spz",
@@ -376,7 +392,6 @@ def lingbot_preview_runtime_status() -> dict[str, Any]:
     available = bool(
         torch_status.get("available")
         and torch_status.get("cuda_available")
-        and spark_status.get("available")
         and not unavailable_required
     )
     return {
@@ -387,7 +402,7 @@ def lingbot_preview_runtime_status() -> dict[str, Any]:
         "flashinfer_required": True,
         "sdpa_fallback_requires_option": True,
         "sdpa_fallback": not modules["flashinfer"].get("available"),
-        "error": None if available else "CUDA torch/Spark SPZ/LingBot-Map core runtime check failed",
+        "error": None if available else "CUDA torch/LingBot-Map core runtime check failed",
     }
 
 

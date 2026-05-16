@@ -120,9 +120,25 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         iter_start.record()
         
         base_xyz_lr = gaussians.update_learning_rate(iteration)
-        deblur_loss_active = schedule_deblur_loss_active(iteration, deblur_schedule, deblur_state)
+        sharp_refine_enabled = option_bool(
+            getattr(opt, "deblur_sharp_refine_enabled", "true"),
+            True,
+        )
+        sharp_refine_from_iter = int(
+            getattr(opt, "deblur_sharp_refine_from_iter", int(opt.iterations * 0.8))
+        )
+        sharp_refine_active = bool(sharp_refine_enabled and iteration >= sharp_refine_from_iter)
+
+        # Final PLY/SPZ export uses ordinary Gaussians.  Keep GTnet as a
+        # training-time blur renderer, then disable it for the sharp refine pass.
+        deblur_loss_active = (
+            schedule_deblur_loss_active(iteration, deblur_schedule, deblur_state)
+            and not sharp_refine_active
+        )
         if deblur_loss_active and base_xyz_lr is not None:
             set_xyz_learning_rate(gaussians, base_xyz_lr * float(opt.deblur_xyz_lr_scale))
+        elif sharp_refine_active and base_xyz_lr is not None:
+            set_xyz_learning_rate(gaussians, base_xyz_lr * 0.2)
 
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
@@ -135,6 +151,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         rand_idx = randint(0, len(viewpoint_indices) - 1)
         viewpoint_cam = viewpoint_stack.pop(rand_idx)
         _ = viewpoint_indices.pop(rand_idx)
+        if sharp_refine_active and option_bool(
+            getattr(opt, "deblur_sharp_refine_clear_only", "true"),
+            True,
+        ):
+            clear_cameras = [
+                cam for cam in scene.getTrainCameras().copy()
+                if is_sharp_score_view(cam, blur_registry)
+            ]
+            if clear_cameras:
+                viewpoint_cam = clear_cameras[randint(0, len(clear_cameras) - 1)]
 
         # Render
         if (iteration - 1) == debug_from:
@@ -210,15 +236,37 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
                 deblur_extra_densified = False
-                if deblur_view_active and iteration > opt.deblur_warmup_iters and iteration % opt.densification_interval == 0:
-                    added = gaussians.densify_deblur_extra_points(extent=scene.cameras_extent, radii=radii, args=opt)
+                enable_deblur_extra_points = option_bool(
+                    getattr(opt, "deblur_extra_points_enabled", "false"),
+                    False,
+                )
+                if (
+                    enable_deblur_extra_points
+                    and deblur_view_active
+                    and not sharp_refine_active
+                    and iteration > opt.deblur_warmup_iters
+                    and iteration < min(int(opt.densify_until_iter), 15_000)
+                    and iteration % opt.densification_interval == 0
+                ):
+                    added = gaussians.densify_deblur_extra_points(
+                        extent=scene.cameras_extent,
+                        radii=radii,
+                        args=opt,
+                    )
                     if added:
                         deblur_extra_points_added += int(added)
                         deblur_extra_densify_steps += 1
                         deblur_extra_densified = True
 
-                if not deblur_extra_densified and iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                if (
+                    not sharp_refine_active
+                    and not deblur_extra_densified
+                    and iteration > opt.densify_from_iter
+                    and iteration % opt.densification_interval == 0
+                ):
+                    size_prune_from_iter = int(getattr(opt, "fastgs_size_prune_from_iter", 3000))
+                    size_prune_max_screen_size = int(getattr(opt, "fastgs_size_prune_max_screen_size", 12))
+                    size_threshold = size_prune_max_screen_size if iteration > size_prune_from_iter else None
                     camlist = sample_sharp_score_cameras(scene, blur_registry, opt)
 
                     # The multiview consistent densification of fastgs
@@ -418,7 +466,7 @@ def build_deblur_training_schedule(opt, deblur_state):
             "deblur_loss_from": warmup,
             "deblur_loss_until": total,
             "densify_a_from": 0,
-            "densify_a_until": int(getattr(opt, "densify_until_iter", total)),
+            "densify_a_until": min(int(getattr(opt, "densify_until_iter", total)), total),
             "densify_b_from": -1,
             "densify_b_until": -1,
             "opacity_reset_until": total + 1,
@@ -432,8 +480,10 @@ def build_deblur_training_schedule(opt, deblur_state):
     deblur_loss_from = warmup
     deblur_loss_until = total
     densify_a_from = int(getattr(opt, "densify_from_iter", 500))
-    densify_a_until = warmup if enabled and auto else int(getattr(opt, "densify_until_iter", total))
-
+    densify_a_until = min(
+        int(getattr(opt, "densify_until_iter", total)),
+        total,
+    )
     enable_late_densify = option_bool(getattr(opt, "deblur_late_densify_enabled", "false"), False)
     if enabled and auto and enable_late_densify:
         densify_b_from = clamp_int(round(total * 0.60), warmup + 1, total)
@@ -442,16 +492,24 @@ def build_deblur_training_schedule(opt, deblur_state):
         densify_b_from = -1
         densify_b_until = -1
 
-    late_prune_from = clamp_int(round(total * 0.90), warmup + 1, total)
-    late_prune_until = total
+    late_prune_from = clamp_int(
+        int(getattr(opt, "fastgs_late_prune_from_iter", round(total * 0.70))),
+        warmup + 1,
+        total,
+    )
+    late_prune_until = clamp_int(
+        int(getattr(opt, "fastgs_late_prune_until_iter", total)),
+        late_prune_from + 1,
+        total,
+    )
     opacity_reset_until = warmup if enabled and auto else total
 
     opt.deblur_warmup_iters = warmup
     opt.densify_from_iter = densify_a_from
     opt.densify_until_iter = densify_b_until if densify_b_until > 0 else densify_a_until
     opt.fastgs_late_prune_from_iter = late_prune_from
-    opt.fastgs_late_prune_until_iter = total
-
+    opt.fastgs_late_prune_until_iter = late_prune_until
+    
     return {
         "enabled": enabled and auto,
         "profile": str(getattr(opt, "deblur_schedule_profile", "quality")).strip().lower(),
