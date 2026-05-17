@@ -46,6 +46,7 @@ from app.security import (
     create_access_token,
     create_artifact_token,
     get_current_user,
+    get_current_user_from_token,
     hash_password,
     require_admin,
     verify_artifact_token,
@@ -1284,6 +1285,7 @@ def cancel_task(task_id: str, user: User = Depends(get_current_user), db: Sessio
         task.finished_at = utc_now()
         task.current_stage = "canceled"
         task.error_message = "用户取消任务"
+        task.worker_id = None
         project.status = "CANCELED"
         emit_event(db, project.id, "task_failed", task_dict(task, project.name), task.id)
         db.commit()
@@ -1970,8 +1972,13 @@ def admin_workers(_: User = Depends(require_admin), db: Session = Depends(get_db
 
 
 @app.get("/api/projects/{project_id}/events")
-async def project_events(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    owned_project(db, project_id, user)
+async def project_events(project_id: str, request: Request):
+    auth_header = request.headers.get("authorization")
+    token = auth_header[7:].strip() if auth_header and auth_header.lower().startswith("bearer ") else request.query_params.get("token")
+
+    with SessionLocal() as db:
+        user = get_current_user_from_token(token, db)
+        owned_project(db, project_id, user)
 
     async def stream():
         with SessionLocal() as snapshot_db:

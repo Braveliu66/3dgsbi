@@ -47,6 +47,7 @@ class FastGSDeblurSourceTests(unittest.TestCase):
         self.assertIn("get_flag=get_flag", source)
         self.assertIn("scales=scales * scale_delta", source)
         self.assertIn("scales=scales * scale_delta[..., transform_index]", source)
+        self.assertIn("metric_counts_accum + accum_metric_counts", source)
 
     def test_train_loop_routes_deblur_and_samples_score_views(self) -> None:
         source = (FASTGS_ROOT / "train.py").read_text(encoding="utf-8")
@@ -56,7 +57,15 @@ class FastGSDeblurSourceTests(unittest.TestCase):
         self.assertIn("compute_blur_indicator", source)
         self.assertIn("sample_sharp_score_cameras(scene, blur_registry, opt)", source)
         self.assertIn("cameras = scene.getTrainCameras().copy()", source)
-        self.assertIn("compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, opt", source)
+        self.assertIn("compute_gaussian_score_fastgs(", source)
+        self.assertIn("deblur_loss_active = schedule_deblur_loss_active", source)
+        self.assertIn("vcd_score_renderer = (", source)
+        self.assertIn('score_renderer=vcd_score_renderer', source)
+        self.assertIn('score_purpose="vcd"', source)
+        self.assertIn('deblur_state=deblur_state if vcd_score_renderer == "deblur" else None', source)
+        self.assertIn('if vcd_score_renderer == "deblur":', source)
+        self.assertIn('score_renderer="sharp"', source)
+        self.assertIn('score_purpose="vcp"', source)
         self.assertIn("sharp_score_skipped_steps", source)
         self.assertIn("densify_deblur_extra_points", source)
         self.assertIn("fastgs_final_prune_min_opacity", source)
@@ -84,6 +93,17 @@ class FastGSDeblurSourceTests(unittest.TestCase):
         schedule_source = (BACKEND_ROOT / "app" / "fine" / "deblur_schedule.py").read_text(encoding="utf-8")
         self.assertNotIn('if prune_mode == "conservative":\n            return raw_prune_mask', schedule_source)
         self.assertIn("max_prune_fraction_per_step=0.02", schedule_source)
+
+    def test_fastgs_score_supports_deblur_renderer_for_vcd(self) -> None:
+        source = (FASTGS_ROOT / "utils" / "fast_utils.py").read_text(encoding="utf-8")
+
+        self.assertIn("from gaussian_renderer.deblur import render_fastgs_deblur", source)
+        self.assertIn("def _render_score_image", source)
+        self.assertIn('if score_renderer == "deblur"', source)
+        self.assertIn("render_fastgs_deblur(", source)
+        self.assertIn("score_renderer = \"sharp\"", source)
+        self.assertIn("score_purpose = None", source)
+        self.assertIn("deblur score renderer requires an enabled DeblurState", source)
 
     def test_fastgs_argparse_uses_central_defaults(self) -> None:
         sys.path.insert(0, str(BACKEND_ROOT))

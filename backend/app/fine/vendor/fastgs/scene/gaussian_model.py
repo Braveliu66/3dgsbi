@@ -624,6 +624,38 @@ class GaussianModel:
         torch.cuda.empty_cache()
         return max(0, added)
 
+    def densify_deblur_seed_points(self, target_count, extent, args):
+        before = int(self.get_xyz.shape[0])
+        target_count = int(target_count or 0)
+        if before <= 0 or target_count <= before:
+            return 0
+        add_count = target_count - before
+        device = self.get_xyz.device
+        source = torch.randint(0, before, (add_count,), device=device)
+        max_jitter = float(extent) * 0.01
+        min_jitter = float(extent) * 1e-5
+        jitter_scale = torch.clamp(self.get_scaling[source], min=min_jitter, max=max_jitter)
+        new_xyz = self._xyz[source] + torch.randn((add_count, 3), device=device) * jitter_scale
+        new_features_dc = self._features_dc[source]
+        new_features_rest = self._features_rest[source]
+        new_opacities = self._opacity[source]
+        new_scaling = self._scaling[source]
+        new_rotation = self._rotation[source]
+        new_tmp_radii = torch.zeros((add_count), dtype=self.max_radii2D.dtype, device=device)
+        self.tmp_radii = torch.zeros((before), dtype=self.max_radii2D.dtype, device=device)
+        self.densification_postfix(
+            new_xyz,
+            new_features_dc,
+            new_features_rest,
+            new_opacities,
+            new_scaling,
+            new_rotation,
+            new_tmp_radii,
+        )
+        self.tmp_radii = None
+        torch.cuda.empty_cache()
+        return int(self.get_xyz.shape[0]) - before
+
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.xyz_gradient_accum_abs[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter, 2:], dim=-1, keepdim=True)

@@ -9,10 +9,18 @@ from typing import Any
 
 from app.config import get_settings
 from app.fine.fastgs_defaults import (
+    COLMAP_GUIDED_MATCHING,
     COLMAP_MATCHER,
     COLMAP_MAX_IMAGE_SIZE,
     COLMAP_MIN_REGISTERED_RATIO,
+    COLMAP_MIN_SPARSE_POINTS,
+    COLMAP_SIFT_EDGE_THRESHOLD,
+    COLMAP_SIFT_ESTIMATE_AFFINE_SHAPE,
+    COLMAP_SIFT_DOMAIN_SIZE_POOLING,
+    COLMAP_SIFT_MATCH_MAX_RATIO,
     COLMAP_SIFT_MAX_NUM_FEATURES,
+    COLMAP_SIFT_PEAK_THRESHOLD,
+    COLMAP_TARGET_SPARSE_POINTS,
     COLMAP_THREADS,
     DEFAULT_FINE_SCENE_PROFILE,
     FINE_IMAGE_MAX_SIDE,
@@ -73,10 +81,17 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
     default_image_max_side = min(profile_image_max_side, settings.fine_image_max_side, FINE_IMAGE_MAX_SIDE)
     image_max_side = read_int(ctx.options.get("fine_image_max_side"), default_image_max_side, minimum=512, maximum=FINE_IMAGE_MAX_SIDE)
     reject_ratio = read_float(ctx.options.get("fine_blur_reject_ratio"), 0.10, minimum=0.0, maximum=0.45)
-    colmap_features = read_int(ctx.options.get("fine_sift_max_num_features"), COLMAP_SIFT_MAX_NUM_FEATURES, minimum=1024, maximum=32768)
-    colmap_max_size = read_int(ctx.options.get("fine_colmap_max_image_size"), min(image_max_side, COLMAP_MAX_IMAGE_SIZE), minimum=512, maximum=FINE_IMAGE_MAX_SIDE)
+    colmap_features = read_int(ctx.options.get("fine_sift_max_num_features"), COLMAP_SIFT_MAX_NUM_FEATURES, minimum=1024, maximum=65_536)
+    colmap_max_size = read_int(ctx.options.get("fine_colmap_max_image_size"), COLMAP_MAX_IMAGE_SIZE, minimum=512, maximum=4_096)
     colmap_threads = read_int(ctx.options.get("fine_colmap_threads"), COLMAP_THREADS, minimum=1, maximum=32)
     colmap_matcher = str(ctx.options.get("fine_colmap_matcher") or COLMAP_MATCHER).strip().lower()
+    colmap_sift_peak_threshold = read_float(ctx.options.get("fine_colmap_sift_peak_threshold"), COLMAP_SIFT_PEAK_THRESHOLD, minimum=0.0001, maximum=0.1)
+    colmap_sift_edge_threshold = read_float(ctx.options.get("fine_colmap_sift_edge_threshold"), COLMAP_SIFT_EDGE_THRESHOLD, minimum=1.0, maximum=100.0)
+    colmap_estimate_affine_shape = read_bool(ctx.options.get("fine_colmap_estimate_affine_shape"), COLMAP_SIFT_ESTIMATE_AFFINE_SHAPE)
+    colmap_domain_size_pooling = read_bool(ctx.options.get("fine_colmap_domain_size_pooling"), COLMAP_SIFT_DOMAIN_SIZE_POOLING)
+    colmap_guided_matching = read_bool(ctx.options.get("fine_colmap_guided_matching"), COLMAP_GUIDED_MATCHING)
+    colmap_match_max_ratio = read_float(ctx.options.get("fine_colmap_sift_match_max_ratio"), COLMAP_SIFT_MATCH_MAX_RATIO, minimum=0.1, maximum=1.0)
+    min_sparse_points = read_int(ctx.options.get("fine_sfm_min_sparse_points"), COLMAP_MIN_SPARSE_POINTS, minimum=0, maximum=1_000_000)
     min_registered_ratio = _optional_float(
         ctx.options,
         "fine_min_registered_ratio",
@@ -121,6 +136,13 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         colmap_max_size,
         colmap_threads,
         matcher=colmap_matcher,
+        sift_peak_threshold=colmap_sift_peak_threshold,
+        sift_edge_threshold=colmap_sift_edge_threshold,
+        estimate_affine_shape=colmap_estimate_affine_shape,
+        domain_size_pooling=colmap_domain_size_pooling,
+        guided_matching=colmap_guided_matching,
+        match_max_ratio=colmap_match_max_ratio,
+        min_sparse_points=min_sparse_points,
         min_registered_ratio=min_registered_ratio,
     )
     print(
@@ -295,29 +317,110 @@ def build_scene(
     colmap_max_size: int,
     colmap_threads: int,
     matcher: str = "auto",
+    sift_peak_threshold: float | None = None,
+    sift_edge_threshold: float | None = None,
+    estimate_affine_shape: bool = False,
+    domain_size_pooling: bool = False,
+    guided_matching: bool = False,
+    match_max_ratio: float | None = None,
+    min_sparse_points: int = COLMAP_MIN_SPARSE_POINTS,
     min_registered_ratio: float | None = None,
 ):
     sfm_backend = str(ctx.options.get("fine_sfm_backend") or "pycolmap").strip().lower()
     print(
         "[fine-runner] scene build start "
         f"requested_sfm_backend={sfm_backend} input_dir={input_dir} scene_dir={scene_dir} "
-        f"colmap_features={colmap_features} colmap_max_size={colmap_max_size} colmap_threads={colmap_threads} matcher={matcher}",
+        f"colmap_features={colmap_features} colmap_max_size={colmap_max_size} colmap_threads={colmap_threads} "
+        f"matcher={matcher} min_sparse_points={min_sparse_points}",
         flush=True,
     )
     if sfm_backend not in {"pycolmap", "colmap"}:
         raise FineFailure("UNSUPPORTED_FINE_SFM_BACKEND", f"Unsupported fine SfM backend: {sfm_backend}")
 
-    result = build_pycolmap_scene(
-        input_dir,
-        scene_dir,
-        max_num_features=colmap_features,
-        max_image_size=colmap_max_size,
-        min_model_size=max(3, min(10, len(image_files(input_dir)))),
-        num_threads=colmap_threads,
-        matcher=matcher,
-        min_registered_ratio=min_registered_ratio,
-        progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
-    )
+    retryable_sfm_codes = {"COLMAP_RECONSTRUCTION_FAILED", "COLMAP_RECONSTRUCTION_INCOMPLETE"}
+    try:
+        result = build_pycolmap_scene(
+            input_dir,
+            scene_dir,
+            max_num_features=colmap_features,
+            max_image_size=colmap_max_size,
+            min_model_size=max(3, min(10, len(image_files(input_dir)))),
+            num_threads=colmap_threads,
+            matcher=matcher,
+            sift_peak_threshold=sift_peak_threshold,
+            sift_edge_threshold=sift_edge_threshold,
+            estimate_affine_shape=estimate_affine_shape,
+            domain_size_pooling=domain_size_pooling,
+            guided_matching=guided_matching,
+            match_max_ratio=match_max_ratio,
+            profile_name="primary",
+            min_registered_ratio=min_registered_ratio,
+            progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
+        )
+        point_count = int(result.point_count or 0)
+        if min_sparse_points > 0 and point_count < min_sparse_points:
+            print(
+                "[fine-runner] sparse SfM below gate; retrying high-recall COLMAP "
+                f"points={point_count} min_sparse_points={min_sparse_points}",
+                flush=True,
+            )
+            result = build_pycolmap_scene(
+                input_dir,
+                scene_dir,
+                max_num_features=max(colmap_features, COLMAP_SIFT_MAX_NUM_FEATURES),
+                max_image_size=max(colmap_max_size, COLMAP_MAX_IMAGE_SIZE),
+                min_model_size=max(3, min(10, len(image_files(input_dir)))),
+                num_threads=colmap_threads,
+                matcher="exhaustive",
+                sift_peak_threshold=COLMAP_SIFT_PEAK_THRESHOLD,
+                sift_edge_threshold=COLMAP_SIFT_EDGE_THRESHOLD,
+                estimate_affine_shape=COLMAP_SIFT_ESTIMATE_AFFINE_SHAPE,
+                domain_size_pooling=COLMAP_SIFT_DOMAIN_SIZE_POOLING,
+                guided_matching=COLMAP_GUIDED_MATCHING,
+                match_max_ratio=COLMAP_SIFT_MATCH_MAX_RATIO,
+                profile_name="high_recall",
+                min_registered_ratio=min_registered_ratio,
+                progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
+            )
+            result.metrics["sfm_high_recall_retry"] = True
+            point_count = int(result.point_count or 0)
+        else:
+            result.metrics["sfm_high_recall_retry"] = False
+    except FineFailure as exc:
+        if exc.code not in retryable_sfm_codes:
+            raise
+        print(
+            "[fine-runner] initial COLMAP pass failed; retrying high-recall COLMAP "
+            f"code={exc.code}",
+            flush=True,
+        )
+        result = build_pycolmap_scene(
+            input_dir,
+            scene_dir,
+            max_num_features=max(colmap_features, COLMAP_SIFT_MAX_NUM_FEATURES),
+            max_image_size=max(colmap_max_size, COLMAP_MAX_IMAGE_SIZE),
+            min_model_size=max(3, min(10, len(image_files(input_dir)))),
+            num_threads=colmap_threads,
+            matcher="exhaustive",
+            sift_peak_threshold=COLMAP_SIFT_PEAK_THRESHOLD,
+            sift_edge_threshold=COLMAP_SIFT_EDGE_THRESHOLD,
+            estimate_affine_shape=COLMAP_SIFT_ESTIMATE_AFFINE_SHAPE,
+            domain_size_pooling=COLMAP_SIFT_DOMAIN_SIZE_POOLING,
+            guided_matching=COLMAP_GUIDED_MATCHING,
+            match_max_ratio=COLMAP_SIFT_MATCH_MAX_RATIO,
+            profile_name="high_recall",
+            min_registered_ratio=min_registered_ratio,
+            progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
+        )
+        result.metrics["sfm_high_recall_retry"] = True
+        point_count = int(result.point_count or 0)
+    result.metrics["sfm_min_sparse_points"] = min_sparse_points
+    result.metrics["sfm_target_sparse_points"] = COLMAP_TARGET_SPARSE_POINTS
+    if min_sparse_points > 0 and point_count < min_sparse_points:
+        raise FineFailure(
+            "SFM_SPARSE_POINTS_TOO_LOW",
+            f"COLMAP produced {point_count} sparse points, below quality gate {min_sparse_points}",
+        )
     if sfm_backend == "colmap":
         result.metrics["sfm_backend_requested_alias"] = "colmap_maps_to_pycolmap"
     return result

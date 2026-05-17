@@ -510,6 +510,13 @@ def build_pycolmap_scene(
     min_model_size: int,
     num_threads: int,
     matcher: str = "auto",
+    sift_peak_threshold: float | None = None,
+    sift_edge_threshold: float | None = None,
+    estimate_affine_shape: bool = False,
+    domain_size_pooling: bool = False,
+    guided_matching: bool = False,
+    match_max_ratio: float | None = None,
+    profile_name: str = "default",
     min_registered_ratio: float | None = None,
     progress: Progress,
 ) -> SceneBuildResult:
@@ -540,20 +547,47 @@ def build_pycolmap_scene(
     started = time.monotonic()
     database_path = distorted_dir / "database.db"
     progress("fine_colmap_features", 24, f"extracting COLMAP features from {len(files)} images")
-    pycolmap.extract_features(
-        database_path,
-        images_dir,
-        sift_options={
-            "max_num_features": max_num_features,
-            "max_image_size": max_image_size,
-            "num_threads": num_threads,
-        },
-    )
+    sift_options: dict[str, Any] = {
+        "max_num_features": max_num_features,
+        "max_image_size": max_image_size,
+        "num_threads": num_threads,
+    }
+    if sift_peak_threshold is not None:
+        sift_options["peak_threshold"] = float(sift_peak_threshold)
+    if sift_edge_threshold is not None:
+        sift_options["edge_threshold"] = float(sift_edge_threshold)
+    if estimate_affine_shape:
+        sift_options["estimate_affine_shape"] = True
+    if domain_size_pooling:
+        sift_options["domain_size_pooling"] = True
+    try:
+        pycolmap.extract_features(database_path, images_dir, sift_options=sift_options)
+    except TypeError:
+        pycolmap.extract_features(
+            database_path,
+            images_dir,
+            sift_options={
+                "max_num_features": max_num_features,
+                "max_image_size": max_image_size,
+                "num_threads": num_threads,
+            },
+        )
     progress("fine_colmap_matching", 30, f"matching COLMAP features with {matcher} matcher")
+    matching_options: dict[str, Any] = {}
+    if guided_matching:
+        matching_options["guided_matching"] = True
+    if match_max_ratio is not None:
+        matching_options["max_ratio"] = float(match_max_ratio)
     if matcher == "exhaustive":
-        pycolmap.match_exhaustive(database_path)
+        try:
+            pycolmap.match_exhaustive(database_path, sift_options=matching_options)
+        except TypeError:
+            pycolmap.match_exhaustive(database_path)
     else:
-        pycolmap.match_sequential(database_path)
+        try:
+            pycolmap.match_sequential(database_path, sift_options=matching_options)
+        except TypeError:
+            pycolmap.match_sequential(database_path)
 
     options = pycolmap.IncrementalPipelineOptions()
     options.min_num_matches = 15
@@ -608,9 +642,16 @@ def build_pycolmap_scene(
             "sfm_min_registered_ratio": threshold,
             "sfm_sparse_points": point_count,
             "sfm_undistorted": True,
+            "colmap_profile": profile_name,
             "colmap_matcher": matcher,
             "colmap_sift_max_num_features": max_num_features,
             "colmap_max_image_size": max_image_size,
+            "colmap_sift_peak_threshold": sift_peak_threshold,
+            "colmap_sift_edge_threshold": sift_edge_threshold,
+            "colmap_estimate_affine_shape": estimate_affine_shape,
+            "colmap_domain_size_pooling": domain_size_pooling,
+            "colmap_guided_matching": guided_matching,
+            "colmap_sift_match_max_ratio": match_max_ratio,
         },
     )
 

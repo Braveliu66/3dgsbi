@@ -25,6 +25,9 @@ from app.fine.fastgs_defaults import (
     FASTGS_DEBLUR_BLUR_REGISTRY,
     FASTGS_DEBLUR_ENABLED,
     FASTGS_DEBLUR_EXTRA_POINTS_ENABLED,
+    FASTGS_DEBLUR_EXTRA_POINTS_MANDATORY,
+    FASTGS_DEBLUR_EXTRA_POINTS_TARGET,
+    FASTGS_DEBLUR_EXTRA_POINTS_WEAK_TARGET,
     FASTGS_DEBLUR_GTNET_LR,
     FASTGS_DEBLUR_HIDDEN,
     FASTGS_DEBLUR_LAMBDA_P,
@@ -49,6 +52,7 @@ from app.fine.fastgs_defaults import (
     FASTGS_DENSIFY_GRAD_THRESHOLD,
     FASTGS_DENSIFY_UNTIL_ITER,
     FASTGS_FEATURE_LR,
+    FASTGS_FINAL_PRUNE_ENABLED,
     FASTGS_FINAL_PRUNE_MAX_WORLD_SCALE_RATIO,
     FASTGS_FINAL_PRUNE_MIN_OPACITY,
     FASTGS_FINAL_PRUNE_SCORE_THRESH,
@@ -194,6 +198,9 @@ class OptimizationParams(ParamGroup):
         self.deblur_late_densify_enabled = FASTGS_DEBLUR_LATE_DENSIFY_ENABLED
         self.deblur_warmup_iters = FASTGS_DEBLUR_WARMUP_ITERS
         self.deblur_extra_points_enabled = FASTGS_DEBLUR_EXTRA_POINTS_ENABLED
+        self.deblur_extra_points_mandatory = FASTGS_DEBLUR_EXTRA_POINTS_MANDATORY
+        self.deblur_extra_points_target = FASTGS_DEBLUR_EXTRA_POINTS_TARGET
+        self.deblur_extra_points_weak_target = FASTGS_DEBLUR_EXTRA_POINTS_WEAK_TARGET
         self.deblur_sharp_refine_enabled = FASTGS_DEBLUR_SHARP_REFINE_ENABLED
         self.deblur_sharp_refine_from_iter = FASTGS_DEBLUR_SHARP_REFINE_FROM_ITER
         self.deblur_sharp_refine_clear_only = FASTGS_DEBLUR_SHARP_REFINE_CLEAR_ONLY
@@ -210,6 +217,7 @@ class OptimizationParams(ParamGroup):
         self.deblur_xyz_lr_scale = FASTGS_DEBLUR_XYZ_LR_SCALE
         self.deblur_blurred_views_only = FASTGS_DEBLUR_BLURRED_VIEWS_ONLY
         self.fastgs_final_prune_min_opacity = FASTGS_FINAL_PRUNE_MIN_OPACITY
+        self.fastgs_final_prune_enabled = "true" if FASTGS_FINAL_PRUNE_ENABLED else "false"
         self.fastgs_final_prune_score_thresh = FASTGS_FINAL_PRUNE_SCORE_THRESH
         self.fastgs_final_prune_max_world_scale_ratio = FASTGS_FINAL_PRUNE_MAX_WORLD_SCALE_RATIO
         self.fastgs_late_prune_enabled = "true" if FASTGS_LATE_PRUNE_ENABLED else "false"

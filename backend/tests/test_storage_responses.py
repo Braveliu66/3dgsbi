@@ -10,6 +10,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from sqlalchemy import select
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 
 TMP = tempfile.TemporaryDirectory()
@@ -108,6 +110,35 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(response.headers["content-range"], f"bytes 1-3/{len(PNG_BYTES)}")
             self.assertEqual(response.headers["accept-ranges"], "bytes")
 
+    def test_project_events_does_not_hold_db_connections_open(self) -> None:
+        import app.database as database
+        import app.main as main
+
+        engine = create_engine(
+            f"sqlite:///{(TMP_PATH / 'events_pool.db').as_posix()}",
+            connect_args={"check_same_thread": False},
+            pool_size=1,
+            max_overflow=0,
+            pool_timeout=1,
+        )
+        session_local = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+
+        try:
+            database.Base.metadata.create_all(bind=engine)
+            with patch.object(database, "engine", engine), patch.object(database, "SessionLocal", session_local), patch.object(main, "engine", engine), patch.object(main, "SessionLocal", session_local):
+                with TestClient(app) as client:
+                    headers = auth_headers(client)
+                    project_id = create_image_project(client, headers, "event pool")
+
+                    with client.stream("GET", f"/api/projects/{project_id}/events", headers=headers) as stream:
+                        first_line = next(stream.iter_lines())
+                        self.assertTrue(first_line)
+
+                        login_response = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
+                        self.assertEqual(login_response.status_code, 200)
+        finally:
+            engine.dispose()
+
     def test_pipeline_parameter_schema_lists_supported_pipelines_and_fields(self) -> None:
         with TestClient(app) as client:
             response = client.get("/api/pipeline-parameters/schema")
@@ -120,6 +151,7 @@ class StorageResponseTests(unittest.TestCase):
             self.assertIn("lingbot_video_pointcloud_fast", pipelines)
             self.assertIn("official_fastgs_big", pipelines)
             self.assertIn("preview_max_points", {item["key"] for item in pipelines["litevggt_spz"]["fields"]})
+            self.assertIn("preview_lingbot_preprocess_mode", {item["key"] for item in pipelines["lingbot_video_pointcloud_fast"]["fields"]})
             self.assertIn("preview_lingbot_mask_sky", {item["key"] for item in pipelines["lingbot_video_pointcloud_fast"]["fields"]})
             fastgs_keys = {item["key"] for item in pipelines["official_fastgs_big"]["fields"]}
             self.assertIn("fine_deblur_enabled", fastgs_keys)
@@ -155,12 +187,34 @@ class StorageResponseTests(unittest.TestCase):
                         PipelineParameterDefault.scene_type == "outdoor",
                     )
                 )
-                self.assertIsNotNone(row)
-                self.assertEqual(row.options[LITEVGGT_DEFAULTS_PRESET_KEY], LITEVGGT_OFFICIAL_PAD_PRESET)
+            self.assertIsNotNone(row)
+            self.assertEqual(row.options[LITEVGGT_DEFAULTS_PRESET_KEY], LITEVGGT_OFFICIAL_PAD_PRESET)
 
             loaded = client.get("/api/admin/pipeline-parameter-defaults", headers=admin_headers)
             loaded.raise_for_status()
             self.assertEqual(loaded.json()["defaults"]["litevggt_spz"]["outdoor"]["preview_max_points"], 1234)
+        clear_pipeline_defaults()
+
+    def test_lingbot_pipeline_parameter_defaults_include_preprocess_mode(self) -> None:
+        clear_pipeline_defaults()
+        with TestClient(app) as client:
+            admin_headers = auth_headers(client)
+
+            saved = client.put(
+                "/api/admin/pipeline-parameter-defaults/lingbot_video_pointcloud_fast/outdoor",
+                json={"options": {"preview_lingbot_preprocess_mode": "pad", "unknown_option": True}},
+                headers=admin_headers,
+            )
+            saved.raise_for_status()
+            self.assertEqual(saved.json()["options"]["preview_lingbot_preprocess_mode"], "pad")
+            self.assertNotIn("unknown_option", saved.json()["options"])
+
+            loaded = client.get("/api/admin/pipeline-parameter-defaults", headers=admin_headers)
+            loaded.raise_for_status()
+            self.assertEqual(
+                loaded.json()["defaults"]["lingbot_video_pointcloud_fast"]["outdoor"]["preview_lingbot_preprocess_mode"],
+                "pad",
+            )
         clear_pipeline_defaults()
 
     def test_task_options_merge_scene_defaults_and_request_overrides(self) -> None:
@@ -686,6 +740,12 @@ class StorageResponseTests(unittest.TestCase):
             task_response = client.post(f"/api/projects/{project_id}/tasks/preview", json={"options": {}}, headers=headers)
             task_response.raise_for_status()
             task_id = task_response.json()["id"]
+            with SessionLocal() as db:
+                task = db.get(Task, task_id)
+                assert task is not None
+                task.status = "running"
+                task.worker_id = "preview-worker-test"
+                db.commit()
 
             self.assertIn(task_id, fake_redis.lists["preview_tasks"])
 
@@ -699,6 +759,7 @@ class StorageResponseTests(unittest.TestCase):
                 task = db.get(Task, task_id)
                 assert task is not None
                 self.assertEqual(task.status, "canceled")
+                self.assertIsNone(task.worker_id)
 
     def test_delete_project_requests_active_task_cancel(self) -> None:
         fake_redis = FakeRedis()

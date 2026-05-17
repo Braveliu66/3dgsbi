@@ -55,12 +55,7 @@ def decode_token(token: str) -> dict[str, Any]:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token") from exc
 
 
-def get_current_user(
-    credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
-    token_query: str | None = Query(default=None, alias="token"),
-    db: Session = Depends(get_db),
-) -> User:
-    token = credentials.credentials if credentials else token_query
+def get_current_user_from_token(token: str | None, db: Session) -> User:
     if not token:
         return default_user(db)
     try:
@@ -72,6 +67,15 @@ def get_current_user(
     if not user:
         return default_user(db)
     return user
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+    token_query: str | None = Query(default=None, alias="token"),
+    db: Session = Depends(get_db),
+) -> User:
+    token = credentials.credentials if credentials else token_query
+    return get_current_user_from_token(token, db)
 
 
 def default_user(db: Session) -> User:

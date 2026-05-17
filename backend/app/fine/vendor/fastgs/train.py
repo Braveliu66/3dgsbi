@@ -27,6 +27,10 @@ if str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
 
 from app.fine.fastgs_defaults import (
+    COLMAP_MIN_SPARSE_POINTS,
+    FASTGS_DEBLUR_EXTRA_POINTS_TARGET,
+    FASTGS_DEBLUR_EXTRA_POINTS_WEAK_TARGET,
+    FASTGS_FINAL_PRUNE_ENABLED,
     FASTGS_ITERATIONS,
     FASTGS_LATE_PRUNE_ENABLED,
     FASTGS_LATE_PRUNE_FROM_ITER,
@@ -67,6 +71,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         gaussians.restore(model_params, opt)
     deblur_state = gaussians.create_deblur_net(opt)
     blur_registry = load_blur_registry(getattr(opt, "deblur_blur_registry", ""))
+    registry_match_metrics = summarize_blur_registry_matches(scene.getTrainCameras(), blur_registry)
+    print(
+        "[deblur] registry matched "
+        f"{registry_match_metrics['matched_cameras']}/{registry_match_metrics['camera_count']} "
+        f"clear_runtime_cameras={registry_match_metrics['clear_runtime_cameras']} "
+        f"blur_runtime_cameras={registry_match_metrics['blur_runtime_cameras']}"
+    )
     if deblur_state.enabled:
         opt.deblur_warmup_iters = min(max(0, int(opt.deblur_warmup_iters)), max(0, int(opt.iterations) - 1))
     deblur_schedule = build_deblur_training_schedule(opt, deblur_state)
@@ -106,11 +117,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         deblur_phase_end=int(getattr(opt, "fastgs_late_prune_from_iter", int(opt.iterations * 0.6))),
         consolidate_end=int(getattr(opt, "deblur_sharp_refine_from_iter", int(opt.iterations * 0.8))),
         sharp_refine_start=int(getattr(opt, "deblur_sharp_refine_from_iter", int(opt.iterations * 0.8))),
-        num_blurred_frames=sum(
-            1
-            for item in blur_registry.values()
-            if isinstance(item, dict) and item.get("blurred") and not item.get("rejected")
-        ),
+        num_blurred_frames=sum(1 for item in unique_blur_registry_items(blur_registry) if item.get("blurred") and not item.get("rejected")),
         num_total_frames=len(scene.getTrainCameras()),
     )
     print(f"[PROFILE] Using scene profile: {scene_profile.name} ({scene_profile_name})")
@@ -135,6 +142,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     deblur_final_pruned = False
     deblur_extra_points_added = 0
     deblur_extra_densify_steps = 0
+    deblur_mandatory_extra_points_added = 0
+    deblur_mandatory_extra_points_done = False
     sharp_score_sample_count = 0
     sharp_score_skipped_steps = 0
     topology_blur_stats_skipped = 0
@@ -172,12 +181,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         )
         sharp_refine_active = bool(sharp_refine_enabled and iteration >= sharp_refine_from_iter)
 
-        # Keep topology-changing prune out of the active Deblur stage.  Once
-        # sharp refine starts, train ordinary Gaussians from clear views only.
-        deblur_loss_active = (
-            schedule_deblur_loss_active(iteration, deblur_schedule, deblur_state)
-            and not sharp_refine_active
-        )
+        # Keep GTnet as the training-time blur renderer through final refine.
+        # Export and quality checks still use the normal sharp FastGS renderer.
+        deblur_loss_active = schedule_deblur_loss_active(iteration, deblur_schedule, deblur_state)
         if iteration == sharp_refine_from_iter and deblur_state.enabled:
             gaussians.freeze_deblur_mlp()
             print(f"[ITER {iteration}] Switching to frozen GTnet sharp refine mode")
@@ -257,12 +263,24 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # Log and save
             # training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_time, testing_iterations, scene, render_fastgs, (pipe, background, opt.mult))
             if (iteration in saving_iterations):
-                if iteration == opt.iterations and not deblur_final_pruned:
+                final_prune_enabled = option_bool(
+                    getattr(opt, "fastgs_final_prune_enabled", None),
+                    FASTGS_FINAL_PRUNE_ENABLED,
+                )
+                if iteration == opt.iterations and final_prune_enabled and not deblur_final_pruned:
                     camlist = sample_sharp_score_cameras(scene, blur_registry, opt)
                     pruning_score = None
                     if camlist:
                         sharp_score_sample_count += len(camlist)
-                        _, pruning_score = compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, opt)
+                        _, pruning_score = compute_gaussian_score_fastgs(
+                            camlist,
+                            gaussians,
+                            pipe,
+                            bg,
+                            opt,
+                            score_renderer="sharp",
+                            score_purpose="vcp",
+                        )
                         blur_indicator = compute_blur_indicator(
                             deblur_state,
                             gaussians.get_xyz,
@@ -287,6 +305,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     )
                     deblur_final_pruned = True
                     print(f"\n[ITER {iteration}] FastGS final prune complete {final_prune_metrics}")
+                elif iteration == opt.iterations and not final_prune_enabled:
+                    final_prune_metrics = {"enabled": False, "removed": 0}
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
             
@@ -296,14 +316,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             can_update_topology = schedule_densify_active(iteration, deblur_schedule)
             if can_update_topology:
                 topology_sharp_only = option_bool(
-                    getattr(opt, "deblur_topology_sharp_only", "true"),
-                    True,
+                    getattr(opt, "deblur_topology_sharp_only", "false"),
+                    False,
                 )
                 topology_stats_active = not (topology_sharp_only and deblur_view_active)
                 if topology_stats_active:
-                    # Keep topology signals tied to ordinary sharp renders.  Deblur
-                    # renders intentionally learn blur formation and should not
-                    # decide where the base Gaussian topology grows.
+                    # VCD uses the active score renderer.  Legacy sharp-only mode
+                    # can still skip blurred-view topology stats via the option.
                     gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                     gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
                 else:
@@ -314,6 +333,42 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     getattr(opt, "deblur_extra_points_enabled", "false"),
                     False,
                 )
+                enable_mandatory_extra_points = option_bool(
+                    getattr(opt, "deblur_extra_points_mandatory", "false"),
+                    False,
+                )
+                if (
+                    enable_deblur_extra_points
+                    and enable_mandatory_extra_points
+                    and not deblur_mandatory_extra_points_done
+                    and deblur_state.enabled
+                    and not sharp_refine_active
+                    and iteration > opt.deblur_warmup_iters
+                    and iteration % opt.densification_interval == 0
+                ):
+                    weak_init = int(gaussians.get_xyz.shape[0]) < COLMAP_MIN_SPARSE_POINTS
+                    target_count = int(
+                        getattr(
+                            opt,
+                            "deblur_extra_points_weak_target" if weak_init else "deblur_extra_points_target",
+                            FASTGS_DEBLUR_EXTRA_POINTS_WEAK_TARGET if weak_init else FASTGS_DEBLUR_EXTRA_POINTS_TARGET,
+                        )
+                    )
+                    added = gaussians.densify_deblur_seed_points(
+                        target_count=target_count,
+                        extent=scene.cameras_extent,
+                        args=opt,
+                    )
+                    deblur_mandatory_extra_points_done = True
+                    if added:
+                        deblur_extra_points_added += int(added)
+                        deblur_mandatory_extra_points_added += int(added)
+                        deblur_extra_densify_steps += 1
+                        deblur_extra_densified = True
+                        print(
+                            f"\n[ITER {iteration}] Deblur mandatory extra points "
+                            f"target={target_count} added={added}"
+                        )
                 if (
                     enable_deblur_extra_points
                     and deblur_view_active
@@ -345,10 +400,36 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     size_threshold = size_prune_max_screen_size if iteration > size_prune_from_iter else None
                     camlist = sample_sharp_score_cameras(scene, blur_registry, opt)
 
-                    # The multiview consistent densification of fastgs
+                    # VCD grows topology from the same blurred observation model
+                    # used by the active training loss, while VCP stays sharp.
                     if camlist:
                         sharp_score_sample_count += len(camlist)
-                        importance_score, pruning_score = compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, opt, DENSIFY=True)                    
+                        vcd_score_renderer = (
+                            "deblur"
+                            if deblur_loss_active and deblur_state.enabled and not topology_sharp_only
+                            else "sharp"
+                        )
+                        importance_score, pruning_score = compute_gaussian_score_fastgs(
+                            camlist,
+                            gaussians,
+                            pipe,
+                            bg,
+                            opt,
+                            DENSIFY=True,
+                            score_renderer=vcd_score_renderer,
+                            score_purpose="vcd",
+                            deblur_state=deblur_state if vcd_score_renderer == "deblur" else None,
+                        )
+                        if vcd_score_renderer == "deblur":
+                            _, pruning_score = compute_gaussian_score_fastgs(
+                                camlist,
+                                gaussians,
+                                pipe,
+                                bg,
+                                opt,
+                                score_renderer="sharp",
+                                score_purpose="vcp",
+                            )
                         gaussians.densify_and_prune_fastgs(max_screen_size = size_threshold, 
                                                     min_opacity = 0.005, 
                                                     extent = scene.cameras_extent, 
@@ -377,7 +458,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             late_prune_until_iter = int(getattr(opt, "fastgs_late_prune_until_iter", FASTGS_LATE_PRUNE_UNTIL_ITER))
             if (
                 late_prune_enabled
-                and not deblur_loss_active
                 and iteration >= sharp_refine_from_iter
                 and schedule_late_prune_active(iteration, deblur_schedule)
                 and (iteration - late_prune_from_iter) % late_prune_interval == 0
@@ -388,7 +468,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 if camlist:
                     sharp_score_sample_count += len(camlist)
-                    _, pruning_score = compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, opt)                    
+                    _, pruning_score = compute_gaussian_score_fastgs(
+                        camlist,
+                        gaussians,
+                        pipe,
+                        bg,
+                        opt,
+                        score_renderer="sharp",
+                        score_purpose="vcp",
+                    )
                     blur_indicator = compute_blur_indicator(
                         deblur_state,
                         gaussians.get_xyz,
@@ -477,10 +565,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         gaussians,
         deblur_state,
         blur_registry,
+        registry_match_metrics,
         deblur_photometric_views,
         deblur_clear_train_cameras,
         deblur_final_pruned,
         deblur_extra_points_added,
+        deblur_mandatory_extra_points_added,
         deblur_extra_densify_steps,
         sharp_score_sample_count,
         sharp_score_skipped_steps,
@@ -510,14 +600,85 @@ def load_blur_registry(path):
         print(f"[deblur] failed to read blur registry {path}: {exc}")
         return {}
     if isinstance(payload, dict) and "frames" in payload and isinstance(payload["frames"], dict):
-        return payload["frames"]
+        return normalize_blur_registry(payload["frames"])
     if isinstance(payload, dict):
-        return payload
+        return normalize_blur_registry(payload)
     return {}
 
 
-def is_deblur_view(_viewpoint_camera, _blur_registry, _opt):
-    return True
+def norm_image_key(name):
+    if name is None:
+        return ""
+    normalized = str(name).replace("\\", "/").split("/")[-1]
+    return os.path.splitext(normalized)[0].lower()
+
+
+def normalize_blur_registry(registry):
+    normalized = {}
+    for key, value in registry.items():
+        if not isinstance(value, dict):
+            continue
+        aliases = {
+            norm_image_key(key),
+            norm_image_key(value.get("training_image")),
+            norm_image_key(value.get("training_stem")),
+            norm_image_key(value.get("source_image")),
+        }
+        for alias in aliases:
+            if alias:
+                normalized[alias] = value
+    return normalized
+
+
+def blur_registry_entry(viewpoint_camera, blur_registry):
+    key = norm_image_key(getattr(viewpoint_camera, "image_name", ""))
+    return blur_registry.get(key)
+
+
+def is_deblur_view(viewpoint_camera, blur_registry, opt):
+    if not option_bool(getattr(opt, "deblur_blurred_views_only", "false"), False):
+        return True
+    item = blur_registry_entry(viewpoint_camera, blur_registry)
+    if not isinstance(item, dict):
+        return False
+    return bool(item.get("blurred") and not item.get("rejected"))
+
+
+def summarize_blur_registry_matches(cameras, blur_registry):
+    camera_keys = {norm_image_key(getattr(camera, "image_name", "")) for camera in cameras}
+    camera_keys.discard("")
+    matched = camera_keys & set(blur_registry.keys())
+    clear = 0
+    blur = 0
+    for key in matched:
+        item = blur_registry.get(key)
+        if not isinstance(item, dict) or item.get("rejected"):
+            continue
+        if item.get("blurred"):
+            blur += 1
+        else:
+            clear += 1
+    return {
+        "camera_count": len(camera_keys),
+        "registry_keys": len(blur_registry),
+        "matched_cameras": len(matched),
+        "clear_runtime_cameras": clear,
+        "blur_runtime_cameras": blur,
+    }
+
+
+def unique_blur_registry_items(blur_registry):
+    seen = set()
+    items = []
+    for key, item in blur_registry.items():
+        if not isinstance(item, dict):
+            continue
+        identity = norm_image_key(item.get("training_image")) or norm_image_key(item.get("training_stem")) or key
+        if identity in seen:
+            continue
+        seen.add(identity)
+        items.append(item)
+    return items
 
 
 def sample_sharp_score_cameras(scene, _blur_registry, opt):
@@ -596,8 +757,8 @@ def build_deblur_training_schedule(opt, deblur_state):
     )
     enable_late_densify = option_bool(getattr(opt, "deblur_late_densify_enabled", "false"), False)
     if enabled and auto and enable_late_densify:
-        densify_b_from = clamp_int(round(total * 0.60), warmup + 1, total)
-        densify_b_until = clamp_int(round(total * 0.80), densify_b_from + 1, total)
+        densify_b_from = clamp_int(round(total * 0.55), warmup + 1, total)
+        densify_b_until = clamp_int(round(total * 0.85), densify_b_from + 1, total)
     else:
         densify_b_from = -1
         densify_b_until = -1
@@ -811,10 +972,12 @@ def write_deblur_metrics(
     gaussians,
     deblur_state,
     blur_registry,
+    registry_match_metrics,
     deblur_photometric_views,
     deblur_clear_train_cameras,
     deblur_final_pruned,
     deblur_extra_points_added,
+    deblur_mandatory_extra_points_added,
     deblur_extra_densify_steps,
     sharp_score_sample_count,
     sharp_score_skipped_steps,
@@ -831,9 +994,10 @@ def write_deblur_metrics(
 ):
     if not model_path:
         return
-    training_blur_frames = sum(1 for item in blur_registry.values() if isinstance(item, dict) and item.get("blurred") and not item.get("rejected"))
-    rejected_blur_frames = sum(1 for item in blur_registry.values() if isinstance(item, dict) and item.get("blurred") and item.get("rejected"))
-    clear_train_cameras = sum(1 for item in blur_registry.values() if isinstance(item, dict) and not item.get("blurred") and not item.get("rejected"))
+    registry_items = unique_blur_registry_items(blur_registry)
+    training_blur_frames = sum(1 for item in registry_items if item.get("blurred") and not item.get("rejected"))
+    rejected_blur_frames = sum(1 for item in registry_items if item.get("blurred") and item.get("rejected"))
+    clear_train_cameras = sum(1 for item in registry_items if not item.get("blurred") and not item.get("rejected"))
     metrics = {
         "deblur_enabled": bool(deblur_state.enabled),
         "deblur_mode": getattr(opt, "deblur_mode", "sharp"),
@@ -847,9 +1011,15 @@ def write_deblur_metrics(
         "deblur_training_blur_frames": training_blur_frames,
         "deblur_rejected_blur_frames": rejected_blur_frames,
         "deblur_clear_train_cameras": clear_train_cameras,
-        "deblur_runtime_clear_train_cameras": deblur_clear_train_cameras,
+        "deblur_runtime_clear_train_cameras": registry_match_metrics.get("clear_runtime_cameras", 0),
+        "deblur_runtime_blur_train_cameras": registry_match_metrics.get("blur_runtime_cameras", 0),
+        "deblur_registry_camera_count": registry_match_metrics.get("camera_count", 0),
+        "deblur_registry_key_count": registry_match_metrics.get("registry_keys", 0),
+        "deblur_registry_matched_cameras": registry_match_metrics.get("matched_cameras", 0),
+        "deblur_clear_render_views": deblur_clear_train_cameras,
         "deblur_photometric_views": deblur_photometric_views,
         "deblur_extra_points_added": deblur_extra_points_added,
+        "deblur_mandatory_extra_points_added": deblur_mandatory_extra_points_added,
         "deblur_extra_densify_steps": deblur_extra_densify_steps,
         "sharp_score_sample_count": sharp_score_sample_count,
         "sharp_score_skipped_steps": sharp_score_skipped_steps,
@@ -859,6 +1029,7 @@ def write_deblur_metrics(
         "late_prune_deferred": late_prune_deferred,
         "late_prune_scale_candidates": late_prune_scale_candidates,
         "deblur_final_prune_uses_sharp_score": True,
+        "fastgs_final_prune_enabled": getattr(opt, "fastgs_final_prune_enabled", None),
         "deblur_final_pruned": deblur_final_pruned,
         "final_prune_metrics": final_prune_metrics,
         "fastgs_size_prune_from_iter": getattr(opt, "fastgs_size_prune_from_iter", None),

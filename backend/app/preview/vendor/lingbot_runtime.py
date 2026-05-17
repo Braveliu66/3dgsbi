@@ -134,6 +134,7 @@ class PointCloudVideoConfig:
     image_size: int = 518
     target_width: int = 518
     target_height: int = 378
+    preprocess_mode: str = "crop"
     window_size: int = 128
     keyframe_interval: int = 1
     overlap_keyframes: int = 16
@@ -700,7 +701,7 @@ def run_lingbot_video_pointcloud_fast(
         kv_cache_sliding_window=kv_cache_sliding_window,
         overlap_size=overlap,
         overlap_keyframes=config.overlap_keyframes,
-        preprocess_mode="crop",
+        preprocess_mode=config.preprocess_mode,
     )
 
     try:

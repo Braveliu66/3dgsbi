@@ -63,6 +63,20 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertNotIn("lm_default = iterations", runner_source)
         self.assertNotIn("min(15_000, iterations)", runner_source)
 
+    def test_build_scene_retries_high_recall_when_sparse_points_are_low(self) -> None:
+        runner_source = (BACKEND_ROOT / "app" / "fine" / "runner.py").read_text(encoding="utf-8")
+
+        self.assertIn("min_sparse_points = read_int", runner_source)
+        self.assertIn("COLMAP_MIN_SPARSE_POINTS", runner_source)
+        self.assertIn("sfm_high_recall_retry", runner_source)
+        self.assertIn("COLMAP_SIFT_PEAK_THRESHOLD", runner_source)
+        self.assertIn("COLMAP_SIFT_EDGE_THRESHOLD", runner_source)
+        self.assertIn("COLMAP_SIFT_ESTIMATE_AFFINE_SHAPE", runner_source)
+        self.assertIn("COLMAP_GUIDED_MATCHING", runner_source)
+        self.assertIn("COLMAP_RECONSTRUCTION_FAILED", runner_source)
+        self.assertIn("COLMAP_RECONSTRUCTION_INCOMPLETE", runner_source)
+        self.assertIn("SFM_SPARSE_POINTS_TOO_LOW", runner_source)
+
     def test_worker_builds_vendored_3dgs_extensions_without_runtime_fastgs_clone(self) -> None:
         dockerfile = (BACKEND_ROOT.parent / "worker" / "Dockerfile").read_text(encoding="utf-8")
 
@@ -186,7 +200,10 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "UNSUPPORTED_FINE_PIPELINE")
 
     def test_viewer_ply_scale_multiplier_and_clamp_binary_ply(self) -> None:
-        from app.fine.viewer_meta import write_scaled_viewer_ply
+        try:
+            from app.fine.viewer_meta import write_scaled_viewer_ply
+        except Exception as exc:
+            raise unittest.SkipTest(f"viewer meta dependencies unavailable: {exc}") from exc
 
         header = (
             "ply\n"

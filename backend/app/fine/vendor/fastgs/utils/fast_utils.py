@@ -1,6 +1,7 @@
 import torch
 from PIL import ImageFilter
 from gaussian_renderer import render_fastgs
+from gaussian_renderer.deblur import render_fastgs_deblur
 from .loss_utils import l1_loss
 from fused_ssim import fused_ssim as fast_ssim
 import torchvision.transforms as transforms
@@ -50,7 +51,44 @@ def normalize(config_value, value_tensor):
 
     return ret_value
 
-def compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, args, DENSIFY = False):
+def _render_score_image(viewpoint_cam, gaussians, pipe, bg, args, score_renderer, deblur_state, get_flag=None, metric_map=None):
+    if score_renderer == "sharp":
+        return render_fastgs(
+            viewpoint_cam,
+            gaussians,
+            pipe,
+            bg,
+            args.mult,
+            get_flag=get_flag,
+            metric_map=metric_map,
+        )
+    if score_renderer == "deblur":
+        if deblur_state is None or not getattr(deblur_state, "enabled", False):
+            raise RuntimeError("deblur score renderer requires an enabled DeblurState")
+        return render_fastgs_deblur(
+            viewpoint_cam,
+            gaussians,
+            pipe,
+            bg,
+            args.mult,
+            deblur_state,
+            get_flag=get_flag,
+            metric_map=metric_map,
+        )
+    raise ValueError(f"Unsupported FastGS score renderer: {score_renderer}")
+
+
+def compute_gaussian_score_fastgs(
+    camlist,
+    gaussians,
+    pipe,
+    bg,
+    args,
+    DENSIFY = False,
+    score_renderer = "sharp",
+    score_purpose = None,
+    deblur_state = None,
+):
     """Compute multi-view consistency scores for Gaussians to guide densification.
 
     For each camera in `camlist` the function renders the scene and computes a
@@ -66,6 +104,11 @@ def compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, args, DENSIFY = 
         args: runtime config containing thresholds (e.g. `loss_thresh`).
         DENSIFY (bool): whether to compute and return the importance score
             used for densification. If False, only the pruning score is computed.
+        score_renderer (str): "sharp" for normal FastGS scoring or "deblur"
+            for GTnet-transformed scoring during VCD.
+        score_purpose (str): optional caller label ("vcd" or "vcp") for explicit
+            routing at call sites.
+        deblur_state: DeblurState required when `score_renderer` is "deblur".
 
     Returns:
         importance_score (Tensor): per-Gaussian integer counts of how many views
@@ -75,12 +118,21 @@ def compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, args, DENSIFY = 
             prioritize densification (higher means worse reconstruction consistency).
     """
 
+    _ = score_purpose
     full_metric_counts = None
     full_metric_score = None
 
     for view in range(len(camlist)):
         my_viewpoint_cam = camlist[view]
-        render_image = render_fastgs(my_viewpoint_cam, gaussians, pipe, bg, args.mult)["render"]
+        render_image = _render_score_image(
+            my_viewpoint_cam,
+            gaussians,
+            pipe,
+            bg,
+            args,
+            score_renderer,
+            deblur_state,
+        )["render"]
         photometric_loss = compute_photometric_loss(my_viewpoint_cam, render_image, getattr(args, "lambda_dssim", FASTGS_LAMBDA_DSSIM))
 
         gt_image = my_viewpoint_cam.original_image.cuda()
@@ -89,7 +141,17 @@ def compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, args, DENSIFY = 
         
         metric_map = (l1_loss_norm > args.loss_thresh).int()
 
-        render_pkg = render_fastgs(my_viewpoint_cam, gaussians, pipe, bg, args.mult, get_flag = get_flag, metric_map = metric_map)
+        render_pkg = _render_score_image(
+            my_viewpoint_cam,
+            gaussians,
+            pipe,
+            bg,
+            args,
+            score_renderer,
+            deblur_state,
+            get_flag=get_flag,
+            metric_map=metric_map,
+        )
 
         accum_loss_counts = render_pkg["accum_metric_counts"]
 
@@ -104,7 +166,12 @@ def compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, args, DENSIFY = 
         else:
             full_metric_score += photometric_loss * accum_loss_counts
 
-    pruning_score = (full_metric_score - torch.min(full_metric_score)) / (torch.max(full_metric_score) - torch.min(full_metric_score))
+    score_min = torch.min(full_metric_score)
+    score_range = torch.max(full_metric_score) - score_min
+    if float(score_range.detach().item()) <= 1e-8:
+        pruning_score = torch.zeros_like(full_metric_score)
+    else:
+        pruning_score = (full_metric_score - score_min) / score_range
     
     if DENSIFY:
         importance_score = torch.div(full_metric_counts, len(camlist), rounding_mode='floor')

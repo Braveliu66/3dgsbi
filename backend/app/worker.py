@@ -122,7 +122,7 @@ def main() -> None:
             continue
         _, task_id = item
         try:
-            run_preview_task_in_process(task_id, worker_id, redis_client)
+            run_task_in_subprocess(task_id, worker_id, redis_client, run_preview_task, "preview-worker")
         except Exception as exc:
             print(f"[worker] unexpected failure for {task_id}: {exc}", flush=True)
 

@@ -178,6 +178,7 @@ class LingBotVideoPreviewTests(unittest.TestCase):
                 config = kwargs["config"]
                 self.assertEqual(config.scene_type, "indoor")
                 self.assertEqual(config.mode, "windowed")
+                self.assertEqual(config.preprocess_mode, "crop")
                 self.assertEqual(config.fps, 10.0)
                 self.assertEqual(config.target_width, 518)
                 self.assertEqual(config.target_height, 378)
@@ -244,6 +245,54 @@ class LingBotVideoPreviewTests(unittest.TestCase):
             self.assertEqual(result.metrics["viewer_default_point_size"], 0.00001)
             self.assertEqual(result.metrics["viewer_default_downsample_factor"], 6)
             self.assertEqual(result.metrics["viewer_default_conf_threshold"], 1.2)
+
+    def test_lingbot_pointcloud_adapter_respects_preprocess_override(self) -> None:
+        from app.preview.adapters import lingbot_pointcloud
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            (input_dir / "clip.mp4").write_bytes(b"video")
+            weight = root / "model-cache" / "lingbot" / "lingbot-map-long.pt"
+            weight.parent.mkdir(parents=True)
+            weight.write_bytes(b"weight")
+            ctx = PreviewContext(
+                task_id="task",
+                project_id="project",
+                pipeline="lingbot_video_pointcloud_fast",
+                input_dir=input_dir,
+                work_dir=root / "work",
+                output_spz=root / "work" / "preview.spz",
+                model_cache_dir=root / "model-cache",
+                source_version=3,
+                options={"preview_lingbot_preprocess_mode": "pad"},
+                progress=lambda *_: None,
+            )
+
+            def fake_runtime(**kwargs):
+                self.assertEqual(kwargs["config"].preprocess_mode, "pad")
+                kwargs["output_fast_ply"].write_text("ply", encoding="utf-8")
+                kwargs["output_full_ply"].write_text("ply", encoding="utf-8")
+                kwargs["output_camera_path_json"].write_text("{\"frames\":[]}", encoding="utf-8")
+                kwargs["output_metrics_json"].write_text("{}", encoding="utf-8")
+                kwargs["output_meta_json"].write_text("{}", encoding="utf-8")
+                return {
+                    "adapter": "lingbot_video_pointcloud_fast",
+                    "point_source": "world_points_from_depth",
+                    "lingbot_point_source": "world_points_from_depth",
+                    "point_count": 1,
+                    "preview_fast_ply_size": kwargs["output_fast_ply"].stat().st_size,
+                    "preview_full_ply_size": kwargs["output_full_ply"].stat().st_size,
+                    "camera_path_json_size": kwargs["output_camera_path_json"].stat().st_size,
+                    "metrics_json_size": kwargs["output_metrics_json"].stat().st_size,
+                    "preview_meta_json": str(kwargs["output_meta_json"]),
+                }
+
+            with patch.object(lingbot_pointcloud, "run_lingbot_video_pointcloud_fast", side_effect=fake_runtime):
+                result = lingbot_pointcloud.run(ctx)
+
+            self.assertEqual(result.metrics["scene_type"], "indoor")
 
     def test_lingbot_pointcloud_scene_defaults_are_deterministic(self) -> None:
         from app.preview.adapters.lingbot_pointcloud import read_scene_type, scene_lingbot_defaults
