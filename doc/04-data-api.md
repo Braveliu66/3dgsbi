@@ -342,7 +342,7 @@ Fine tasks accept uploaded JPG/PNG images without EXIF camera metadata. Valid ta
 - `fine_training_flavor=auto|dash_deblur_group`. `auto` uses the embedded trainer or an explicitly configured compatible `train.py --config` repo.
 - `fine_data_device=cpu|cuda`.
 - `fine_deblur_enabled=true|false`. `false` writes `deblur=0` for sharp canonical training.
-- `fine_deblur_mode=mix|motion|defocus|sharp`. `mix` auto-selects motion or defocus from blur analysis before training.
+- `fine_deblur_mode=mix|motion|defocus|sharp`. `mix` keeps the mixed deblur preset instead of auto-selecting a single branch.
 - `num_moments` controls the GTnet motion branch moment count.
 - `dash_enable`, `dash_start_iter`, `resolution_mode`, and `densify_mode` control DashGaussian scheduling.
 - `Grouping`, `UTR`, `grouping_from_iter`, `grouping_until_iter`, and `grouping_interval` control non-destructive Group Training.
@@ -361,14 +361,14 @@ Fine `metrics.json` now includes:
   "fine_training_flavor": "dash_deblur_group",
   "fine_deblur_mode": "mix",
   "fine_deblur_mode_requested": "mix",
-  "fine_deblur_mode_effective": "motion",
-  "deblur_auto_confidence": "high",
-  "deblur": 1,
+  "fine_deblur_mode_effective": "mix",
+  "deblur_auto_confidence": "explicit",
+  "deblur": 4,
   "colmap_use_gpu": true,
   "colmap_ba_use_gpu": true,
   "colmap_gpu_index": "0",
   "dash_enable": true,
-  "dash_start_iter": 3000,
+  "dash_start_iter": 5000,
   "Grouping": true,
   "UTR": 0.78,
   "splat_count": 1200000

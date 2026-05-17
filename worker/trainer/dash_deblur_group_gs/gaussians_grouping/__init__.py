@@ -9,9 +9,9 @@ class GroupingParams(ParamGroup):
         self.Grouping = True
         self.grouping_method = "Opacity-weighted"
         self.UTR = 0.78
-        self.grouping_from_iter = 4500
-        self.grouping_until_iter = 20000
-        self.grouping_interval = 600
+        self.grouping_from_iter = 10000
+        self.grouping_until_iter = 27000
+        self.grouping_interval = 800
         self.grouping_freeze_around_pts = 1000
         super().__init__(parser, "Grouping Parameters")
 

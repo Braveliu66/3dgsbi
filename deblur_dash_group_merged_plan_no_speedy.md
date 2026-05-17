@@ -60,11 +60,11 @@ fine_deblur_mode = mix | motion | defocus | sharp
 
 Default is `mix`.
 
-`mix` means automatic branch selection before training, not mixed branch training:
+`mix` means the backend keeps the mixed deblur preset instead of auto-selecting a single blur branch:
 
-- motion vote wins -> `deblur = 1`
-- defocus vote wins -> `deblur = 2`
-- uncertain -> conservative `motion`
+- `mix` -> `deblur = 4` indoors, `deblur = 6` outdoors
+- `motion` -> `deblur = 1`
+- `defocus` -> same deblur kernel strength with position deltas disabled
 - explicit `motion`, `defocus`, or `sharp` skips auto selection
 
 The backend writes metrics:
@@ -72,18 +72,20 @@ The backend writes metrics:
 ```json
 {
   "fine_deblur_mode_requested": "mix",
-  "fine_deblur_mode_effective": "motion",
-  "deblur_auto_confidence": "high"
+  "fine_deblur_mode_effective": "mix",
+  "deblur_auto_confidence": "explicit"
 }
 ```
 
 ## Config Presets
 
-Only four concrete presets exist:
+Scene-specific presets exist:
 
 - `indoor_motion`
+- `indoor_mix`
 - `indoor_defocus`
 - `outdoor_motion`
+- `outdoor_mix`
 - `outdoor_defocus`
 
 The UI/API exposes only `scene_type` and `fine_deblur_mode`. The generated config must not contain `protect_new_points_iters`.

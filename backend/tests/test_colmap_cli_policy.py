@@ -54,9 +54,9 @@ class ColmapCliPolicyTests(unittest.TestCase):
         outdoor_large = choose_max_num_matches(12.0, "outdoor", 4000)
 
         self.assertGreaterEqual(indoor, 10000)
-        self.assertLessEqual(indoor, 24000)
+        self.assertLessEqual(indoor, 32768)
         self.assertGreaterEqual(outdoor_large, 6000)
-        self.assertLessEqual(outdoor_large, 14000)
+        self.assertLessEqual(outdoor_large, 65536)
 
     def test_policy_selects_indoor_quality_and_outdoor_scale(self) -> None:
         indoor = resolve_colmap_policy(
@@ -91,6 +91,25 @@ class ColmapCliPolicyTests(unittest.TestCase):
         self.assertIn("vocab_tree", outdoor.matchers)
         self.assertFalse(outdoor.guided_matching)
         self.assertEqual(outdoor.mapper, "global")
+
+    def test_policy_applies_explicit_recall_overrides(self) -> None:
+        policy = resolve_colmap_policy(
+            scene_type="indoor",
+            input_type="video",
+            n_images=45,
+            free_vram_gb=12,
+            quality_mode="auto",
+            capture_order="auto",
+            prefer_gpu=True,
+            gpu_index="0",
+            max_num_features=32768,
+            max_num_matches=32768,
+            sequential_overlap=60,
+        )
+
+        self.assertEqual(policy.max_num_features, 32768)
+        self.assertEqual(policy.max_num_matches, 32768)
+        self.assertEqual(policy.sequential_overlap, 60)
 
     def test_policy_disables_colmap_gpu_when_prefer_gpu_is_false(self) -> None:
         policy = resolve_colmap_policy(

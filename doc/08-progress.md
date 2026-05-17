@@ -5,7 +5,7 @@
 - FastAPI, Next.js, PostgreSQL, Redis, local object storage, preview worker, and fine worker are wired into the single-machine Docker Compose stack.
 - Image preview uses LiteVGGT plus Spark SPZ conversion.
 - Video preview uses LingBot-Map plus Spark SPZ conversion.
-- Image fine reconstruction uses the active `dash_deblur_group_gs` pipeline: JPG/PNG or extracted-frame normalization, blur analysis and low-quality frame filtering, existing COLMAP-compatible `images/` + `sparse/0`, automatic `mix` deblur resolution to motion/defocus, DashDeblurGroupGS training, and Spark SPZ conversion.
+- Image fine reconstruction uses the active `dash_deblur_group_gs` pipeline: JPG/PNG or extracted-frame normalization, blur analysis and low-quality frame filtering, existing COLMAP-compatible `images/` + `sparse/0`, mixed/motion/defocus DashDeblurGroupGS training, and Spark SPZ conversion.
 - The old MobileGS/LM-RS, LiteVGGT-fine, and video-fine code paths have been removed from the backend.
 
 ## Current Limits

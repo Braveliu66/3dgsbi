@@ -159,8 +159,8 @@ Fine workflow now runs:
 4. Run the COLMAP CLI path by default. The worker image builds upstream COLMAP with `global_mapper`, `hierarchical_mapper`, `model_clusterer`, and `model_splitter`.
 5. Select indoor/outdoor COLMAP policies by image count, input type, quality mode, GPU memory, and reconstruction feedback. Outdoor large scenes prefer `global_mapper`; only missing CLI support falls back to `mapper`.
 6. Write a COLMAP-compatible scene with `images/` and `sparse/0`.
-7. Resolve `fine_deblur_mode=mix` to `motion` or `defocus` from blur analysis, unless the user explicitly selected `motion`, `defocus`, or `sharp`.
-8. Generate one of four DashDeblurGroupGS configs: `indoor_motion`, `indoor_defocus`, `outdoor_motion`, or `outdoor_defocus`.
+7. Keep `fine_deblur_mode=mix` as the mixed deblur preset; explicit `motion`, `defocus`, or `sharp` still selects a single branch.
+8. Generate a scene-specific DashDeblurGroupGS config for `mix`, `motion`, `defocus`, or `sharp`.
 9. Train DashDeblurGroupGS from the COLMAP scene and surface progress from training logs.
 10. Export standard `final.ply`, transcode `final_web.spz`, write `final_viewer_meta.json`, and write `metrics.json`.
 

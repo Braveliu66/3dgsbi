@@ -32,12 +32,13 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(config["iterations"], 1234)
-        self.assertEqual(config["deblur"], 2)
-        self.assertEqual(config["dash_start_iter"], 5000)
-        self.assertEqual(config["grouping_interval"], 1000)
+        self.assertEqual(config["deblur"], 6)
+        self.assertEqual(config["use_pos"], 0)
+        self.assertEqual(config["dash_start_iter"], 4000)
+        self.assertEqual(config["grouping_interval"], 600)
         self.assertEqual(config["lambda_p"], 0.0)
 
-    def test_mix_deblur_mode_uses_motion_vote(self) -> None:
+    def test_mix_deblur_mode_keeps_mixed_training_for_motion_vote(self) -> None:
         blur = SimpleNamespace(
             per_frame_blur={
                 "000000.jpg": {"rejected": False, "blurred": True, "kind": "motion"},
@@ -49,11 +50,12 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         mode = resolve_effective_deblur_mode({"fine_deblur_mode": "mix"}, blur)
         config = build_training_config({"scene_type": "indoor", "fine_deblur_mode": "mix"}, blur_analysis=blur)
 
-        self.assertEqual(mode.effective, "motion")
-        self.assertEqual(mode.confidence, "high")
-        self.assertEqual(config["deblur"], 1)
+        self.assertEqual(mode.effective, "mix")
+        self.assertEqual(mode.confidence, "explicit")
+        self.assertEqual(mode.motion_frames, 2)
+        self.assertEqual(config["deblur"], 4)
 
-    def test_mix_deblur_mode_uses_defocus_vote(self) -> None:
+    def test_mix_deblur_mode_keeps_mixed_training_for_defocus_vote(self) -> None:
         blur = SimpleNamespace(
             per_frame_blur={
                 "000000.jpg": {"rejected": False, "blurred": True, "kind": "defocus"},
@@ -65,12 +67,13 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         mode = resolve_effective_deblur_mode({"scene_type": "outdoor", "fine_deblur_mode": "mix"}, blur)
         config = build_training_config({"scene_type": "outdoor", "fine_deblur_mode": "mix"}, blur_analysis=blur)
 
-        self.assertEqual(mode.effective, "defocus")
+        self.assertEqual(mode.effective, "mix")
         self.assertEqual(mode.defocus_frames, 2)
-        self.assertEqual(config["deblur"], 2)
-        self.assertEqual(config["dash_start_iter"], 5000)
+        self.assertEqual(config["deblur"], 6)
+        self.assertEqual(config["num_moments"], 6)
+        self.assertEqual(config["dash_start_iter"], 4000)
 
-    def test_mix_deblur_mode_falls_back_to_motion_when_uncertain(self) -> None:
+    def test_mix_deblur_mode_ignores_auto_override_when_uncertain(self) -> None:
         blur = SimpleNamespace(
             per_frame_blur={
                 "000000.jpg": {"rejected": False, "blurred": True, "kind": "motion"},
@@ -81,9 +84,9 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
 
         mode = resolve_effective_deblur_mode({"scene_type": "outdoor", "fine_deblur_mode": "mix"}, blur)
 
-        self.assertEqual(mode.effective, "motion")
-        self.assertEqual(mode.confidence, "low")
-        self.assertEqual(mode.reason, "outdoor_conservative_default")
+        self.assertEqual(mode.effective, "mix")
+        self.assertEqual(mode.confidence, "explicit")
+        self.assertEqual(mode.reason, "mixed_training_requested")
 
     def test_explicit_deblur_mode_overrides_blur_analysis(self) -> None:
         blur = SimpleNamespace(
@@ -100,6 +103,20 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         self.assertEqual(mode.confidence, "explicit")
         self.assertEqual(config["deblur"], 1)
 
+    def test_requested_deblur_mode_key_overrides_auto_detection(self) -> None:
+        blur = SimpleNamespace(
+            per_frame_blur={
+                "000000.jpg": {"rejected": False, "blurred": True, "kind": "defocus"},
+                "000001.jpg": {"rejected": False, "blurred": True, "kind": "defocus"},
+            }
+        )
+
+        mode = resolve_effective_deblur_mode({"fine_deblur_mode_requested": "mix"}, blur)
+        config = build_training_config({"scene_type": "indoor", "fine_deblur_mode_requested": "mix"}, blur_analysis=blur)
+
+        self.assertEqual(mode.effective, "mix")
+        self.assertEqual(config["deblur"], 4)
+
     def test_write_training_config_preserves_deblur_dash_group_keys(self) -> None:
         config = build_training_config({"scene_type": "indoor", "fine_deblur_mode": "motion"})
         with tempfile.TemporaryDirectory() as tmp:
@@ -109,6 +126,9 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
 
         self.assertIn("deblur = 1", text)
+        self.assertIn("position_lr_final = 1.6e-06", text)
+        self.assertIn("percent_dense = 0.005", text)
+        self.assertIn("lambda_dssim = 0.3", text)
         self.assertIn("dash_enable = True", text)
         self.assertIn("Grouping = True", text)
         self.assertIn("grouping_method = Opacity-weighted", text)

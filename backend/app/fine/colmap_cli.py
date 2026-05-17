@@ -84,6 +84,10 @@ def build_colmap_cli_scene(
     prefer_gpu: bool = True,
     gpu_index: str | None = None,
     min_registered_ratio: float | None = None,
+    max_num_features: int | None = None,
+    max_image_size: int | None = None,
+    max_num_matches: int | None = None,
+    sequential_overlap: int | None = None,
     progress: Progress,
 ) -> SceneBuildResult:
     files = image_files(input_dir)
@@ -104,6 +108,10 @@ def build_colmap_cli_scene(
         matcher_policy=matcher_policy,
         prefer_gpu=prefer_gpu,
         gpu_index=resolved_gpu_index,
+        max_num_features=max_num_features,
+        max_image_size=max_image_size,
+        max_num_matches=max_num_matches,
+        sequential_overlap=sequential_overlap,
         capabilities=capabilities,
     )
 
@@ -151,6 +159,10 @@ def retry_policies(
     prefer_gpu: bool,
     gpu_index: str,
     capabilities: ColmapCapabilities,
+    max_num_features: int | None = None,
+    max_image_size: int | None = None,
+    max_num_matches: int | None = None,
+    sequential_overlap: int | None = None,
 ) -> list[ColmapPolicy]:
     policies = [
         resolve_colmap_policy(
@@ -163,6 +175,10 @@ def retry_policies(
             matcher_policy=matcher_policy,
             prefer_gpu=prefer_gpu,
             gpu_index=gpu_index,
+            max_num_features=max_num_features,
+            max_image_size=max_image_size,
+            max_num_matches=max_num_matches,
+            sequential_overlap=sequential_overlap,
             retry_profile="primary",
             feature_type="SIFT",
             matcher_type="SIFT_BRUTEFORCE",
@@ -177,6 +193,10 @@ def retry_policies(
             matcher_policy=matcher_policy,
             prefer_gpu=prefer_gpu,
             gpu_index=gpu_index,
+            max_num_features=max_num_features,
+            max_image_size=max_image_size,
+            max_num_matches=max_num_matches,
+            sequential_overlap=sequential_overlap,
             retry_profile="high_recall",
             feature_type="SIFT",
             matcher_type="SIFT_BRUTEFORCE",
@@ -194,6 +214,10 @@ def retry_policies(
                 matcher_policy=matcher_policy,
                 prefer_gpu=prefer_gpu,
                 gpu_index=gpu_index,
+                max_num_features=max_num_features,
+                max_image_size=max_image_size,
+                max_num_matches=max_num_matches,
+                sequential_overlap=sequential_overlap,
                 retry_profile="aliked_lightglue",
                 feature_type="ALIKED_N16ROT",
                 matcher_type="ALIKED_LIGHTGLUE",
@@ -211,6 +235,10 @@ def retry_policies(
                 matcher_policy=matcher_policy,
                 prefer_gpu=prefer_gpu,
                 gpu_index=gpu_index,
+                max_num_features=max_num_features,
+                max_image_size=max_image_size,
+                max_num_matches=max_num_matches,
+                sequential_overlap=sequential_overlap,
                 retry_profile="sift_lightglue",
                 feature_type="SIFT",
                 matcher_type="SIFT_LIGHTGLUE",
@@ -258,6 +286,10 @@ def resolve_colmap_policy(
     matcher_policy: str = "auto",
     prefer_gpu: bool,
     gpu_index: str,
+    max_num_features: int | None = None,
+    max_image_size: int | None = None,
+    max_num_matches: int | None = None,
+    sequential_overlap: int | None = None,
     retry_profile: str = "primary",
     feature_type: str = "SIFT",
     matcher_type: str = "SIFT_BRUTEFORCE",
@@ -297,7 +329,14 @@ def resolve_colmap_policy(
         max_features = max(3000, int(max_features * 0.85))
         max_size = max(1200, int(max_size * 0.90))
 
-    max_matches = choose_max_num_matches(free_vram_gb, scene, n_images)
+    if max_num_features is not None:
+        max_features = max(1024, int(max_num_features))
+    if max_image_size is not None:
+        max_size = max(512, int(max_image_size))
+    if sequential_overlap is not None:
+        overlap = max(4, int(sequential_overlap))
+
+    max_matches = max(1, int(max_num_matches)) if max_num_matches is not None else choose_max_num_matches(free_vram_gb, scene, n_images)
     return ColmapPolicy(
         name=retry_profile,
         scene_type=scene,
@@ -329,10 +368,10 @@ def choose_max_num_matches(free_vram_gb: float, scene_type: str, n_images: int) 
     budget = free_vram_gb * reserve * (1024**3)
     matches = int((-1024 + math.sqrt(1024**2 + 16 * budget)) / 8)
     if scene_type == "indoor":
-        return max(8000, min(matches, 24000))
+        return max(8000, min(matches, 32768))
     if n_images > 3000:
-        return max(6000, min(matches, 14000))
-    return max(8000, min(matches, 18000))
+        return max(6000, min(matches, 65536))
+    return max(8000, min(matches, 65536))
 
 
 def detect_colmap_capabilities() -> ColmapCapabilities:

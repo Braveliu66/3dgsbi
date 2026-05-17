@@ -10,8 +10,10 @@ from app.fine.colmap_defaults import (
     COLMAP_GUIDED_MATCHING,
     COLMAP_MATCHER,
     COLMAP_MAX_IMAGE_SIZE,
+    COLMAP_MAX_NUM_MATCHES,
     COLMAP_MIN_REGISTERED_RATIO,
     COLMAP_MIN_SPARSE_POINTS,
+    COLMAP_SEQUENTIAL_OVERLAP,
     COLMAP_SIFT_EDGE_THRESHOLD,
     COLMAP_SIFT_ESTIMATE_AFFINE_SHAPE,
     COLMAP_SIFT_DOMAIN_SIZE_POOLING,
@@ -69,6 +71,8 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
     reject_ratio = read_float(ctx.options.get("fine_blur_reject_ratio"), 0.10, minimum=0.0, maximum=0.45)
     colmap_features = read_int(ctx.options.get("fine_sift_max_num_features"), COLMAP_SIFT_MAX_NUM_FEATURES, minimum=1024, maximum=65_536)
     colmap_max_size = read_int(ctx.options.get("fine_colmap_max_image_size"), COLMAP_MAX_IMAGE_SIZE, minimum=512, maximum=4_096)
+    colmap_max_matches = read_int(ctx.options.get("fine_colmap_max_num_matches"), COLMAP_MAX_NUM_MATCHES, minimum=1024, maximum=65_536)
+    colmap_sequential_overlap = read_int(ctx.options.get("fine_colmap_sequential_overlap"), COLMAP_SEQUENTIAL_OVERLAP, minimum=4, maximum=200)
     colmap_threads = read_int(ctx.options.get("fine_colmap_threads"), COLMAP_THREADS, minimum=1, maximum=32)
     colmap_matcher = str(ctx.options.get("fine_colmap_matcher") or COLMAP_MATCHER).strip().lower()
     min_sparse_points = read_int(ctx.options.get("fine_sfm_min_sparse_points"), COLMAP_MIN_SPARSE_POINTS, minimum=0, maximum=1_000_000)
@@ -96,6 +100,8 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         colmap_features,
         colmap_max_size,
         colmap_threads,
+        colmap_max_matches=colmap_max_matches,
+        colmap_sequential_overlap=colmap_sequential_overlap,
         matcher=colmap_matcher,
         sift_peak_threshold=read_float(ctx.options.get("fine_colmap_sift_peak_threshold"), COLMAP_SIFT_PEAK_THRESHOLD, minimum=0.0001, maximum=0.1),
         sift_edge_threshold=read_float(ctx.options.get("fine_colmap_sift_edge_threshold"), COLMAP_SIFT_EDGE_THRESHOLD, minimum=1.0, maximum=100.0),
@@ -194,6 +200,8 @@ def build_scene(
     colmap_max_size: int,
     colmap_threads: int,
     matcher: str = "auto",
+    colmap_max_matches: int = COLMAP_MAX_NUM_MATCHES,
+    colmap_sequential_overlap: int = COLMAP_SEQUENTIAL_OVERLAP,
     sift_peak_threshold: float | None = None,
     sift_edge_threshold: float | None = None,
     estimate_affine_shape: bool = False,
@@ -218,6 +226,10 @@ def build_scene(
             prefer_gpu=read_bool(ctx.options.get("prefer_gpu"), True),
             gpu_index=str(ctx.options.get("fine_colmap_gpu_index") or "").strip() or None,
             min_registered_ratio=min_registered_ratio,
+            max_num_features=colmap_features,
+            max_image_size=colmap_max_size,
+            max_num_matches=colmap_max_matches,
+            sequential_overlap=colmap_sequential_overlap,
             progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
         )
         if sfm_backend == "colmap":

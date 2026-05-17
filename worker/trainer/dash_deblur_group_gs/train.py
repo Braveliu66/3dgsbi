@@ -72,6 +72,8 @@ def training(dataset, opt, pipe, group_training, testing_iterations, saving_iter
     ema_loss_for_log = 0.0
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
+    zero_densify_since = None
+    grouping_disabled_by_densify_stall = False
 
     viewpoint_stack = scene.getTrainCameras().copy()
 
@@ -201,6 +203,24 @@ def training(dataset, opt, pipe, group_training, testing_iterations, saving_iter
                         momentum_add = int(gaussians.get_xyz.shape[0]) - n_before
                     point_caching = None
                     progress_bar.write(f"[ITER {iteration}] render_scale={render_scale} N_GS={gaussians.get_xyz.shape[0]} densify_rate={densify_rate:.4f} momentum_add={momentum_add}")
+                    if (
+                        group_training is not None
+                        and getattr(group_training, "Grouping", False)
+                        and iteration >= group_training.grouping_from_iter
+                        and iteration < opt.densify_until_iter
+                    ):
+                        if densify_rate <= 0.0:
+                            zero_densify_since = iteration if zero_densify_since is None else zero_densify_since
+                            if not grouping_disabled_by_densify_stall and iteration - zero_densify_since >= 500:
+                                point_caching = merge_group_cache_if_needed(gaussians, point_caching)
+                                group_training.Grouping = False
+                                grouping_disabled_by_densify_stall = True
+                                progress_bar.write(
+                                    f"[ITER {iteration}] grouping_disabled=True reason=densify_rate_zero "
+                                    f"stall_iters={iteration - zero_densify_since}"
+                                )
+                        else:
+                            zero_densify_since = None
 
                 # Point addition
                 if iteration == opt.pts_iter:
@@ -336,7 +356,7 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[20_000])
     parser.add_argument("--start_checkpoint", type=str, default = None)
-    parser.add_argument('--deblur', type=int, default=1)
+    parser.add_argument('--deblur', type=int, default=4)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 

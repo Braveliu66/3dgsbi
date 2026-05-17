@@ -40,19 +40,20 @@ fine_deblur_mode = mix | motion | defocus | sharp
 
 Default is `mix`.
 
-`mix` does not run a mixed deblur branch. The backend uses the blur analysis from preprocessing to choose an effective branch before training:
+`mix` runs the mixed deblur preset. Blur analysis is still recorded in metrics, but it no longer auto-replaces a requested `mix` run with a single motion or defocus branch:
 
 - `motion` -> trainer config `deblur = 1`
-- `defocus` -> trainer config `deblur = 2`
+- `mix` -> trainer config `deblur = 4` indoors, `deblur = 6` outdoors
+- `defocus` -> trainer config `deblur = 4` indoors, `deblur = 6` outdoors, with position deltas disabled
 - `sharp` -> trainer config `deblur = 0`
 
-If auto classification is uncertain, the conservative default is `motion`. Metrics record both requested and effective modes:
+Metrics record both requested and effective modes:
 
 ```json
 {
   "fine_deblur_mode_requested": "mix",
-  "fine_deblur_mode_effective": "motion",
-  "deblur_auto_confidence": "low"
+  "fine_deblur_mode_effective": "mix",
+  "deblur_auto_confidence": "explicit"
 }
 ```
 
@@ -63,14 +64,14 @@ The UI/API exposes only:
 - `scene_type=indoor|outdoor`
 - `fine_deblur_mode=mix|motion|defocus|sharp`
 
-The backend resolves those into one of four concrete presets:
+The backend resolves those into scene-specific presets:
 
 - `indoor_motion`
+- `indoor_mix`
 - `indoor_defocus`
 - `outdoor_motion`
+- `outdoor_mix`
 - `outdoor_defocus`
-
-There is no fifth mixed-training preset.
 
 The removed `protect_new_points_iters` and `birth_iter` mechanism must not be reintroduced. It was a local helper, not part of the Deblurring-3DGS densification model, and it broke tensor-length invariants after `add_points()` and prune. New point survival is controlled by the original densify/prune thresholds and Group cache timing.
 
