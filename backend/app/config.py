@@ -42,7 +42,6 @@ class Settings(BaseSettings):
 
     preview_queue_name: str = "preview_tasks"
     preview_expected_seconds_litevggt_spz: int = 180
-    preview_expected_seconds_lingbot_map_spz: int = 300
     preview_image_max_side: int = 518
     preview_image_jpeg_quality: int = 90
 
@@ -53,7 +52,6 @@ class Settings(BaseSettings):
     fine_iterations: int = FINE_ITERATIONS
 
     litevggt_repo_commit: str = "4767c17f8b6f176bb751566e92f60eb885040033"
-    lingbot_map_repo_commit: str = "4cd986009b9adeded8a4e740919221940dedeffe"
     spark_repo_commit: str = "3cf9fa15adb7ac7c47a1e962740db97b9e8a9fdf"
     fast_dropgaussian_repo_commit: str = "aba6c08e567bc0b99dfe63f159df3a241562efc4"
     fastergs_repo_commit: str = "12ec29da2a5c0f13974fbe4827c5fc782b817c62"

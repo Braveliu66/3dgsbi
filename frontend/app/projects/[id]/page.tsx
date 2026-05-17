@@ -8,7 +8,6 @@ import { api, artifactUrl, downloadFileWithProgress, formatBytes, mediaFileUrl, 
 import type { TransferProgress } from "@/lib/api";
 import { formatDateTime, inputTypeLabel, isActiveTask, projectStatusLabel, taskStatusLabel, taskTypeLabel } from "@/lib/labels";
 import type { Artifact, MediaAsset, Project, Task, ViewerConfig } from "@/lib/types";
-import { PointCloudPreviewViewer } from "@/components/PointCloudPreviewViewer";
 import { SplatViewer } from "@/components/SplatViewer";
 import { TaskProgress } from "@/components/TaskProgress";
 
@@ -84,10 +83,6 @@ export default function ProjectDetailPage() {
   const logTaskArtifact = useMemo(
     () => artifacts.find((artifact) => artifact.kind === "task_log" && artifact.task_id === logTask?.id) ?? null,
     [artifacts, logTask?.id]
-  );
-  const pointCloudArtifact = useMemo(
-    () => pointCloudArtifactFromViewer(viewer, project),
-    [viewer, project]
   );
 
   useEffect(() => {
@@ -313,24 +308,15 @@ export default function ProjectDetailPage() {
             {project ? <span className={`status-pill ${project.status}`}>{projectStatusLabel(project.status)}</span> : null}
           </div>
           <div className="panel-body scrollable" style={{ padding: 0 }}>
-            {viewer?.status === "ready" && pointCloudArtifact ? (
-              <PointCloudPreviewViewer
-                artifact={pointCloudArtifact}
-                pointSize={viewer.viewer_default_point_size ?? 0.00001}
-                downsampleFactor={viewer.viewer_default_downsample_factor ?? 10}
-                confidenceThreshold={viewer.viewer_default_conf_threshold ?? 1.5}
-              />
-            ) : (
-              <SplatViewer
-                modelUrl={viewer?.status === "ready" ? viewer.model_url : null}
-                format={viewer?.format}
-                viewerMetaUrl={viewer?.status === "ready" ? viewer.viewer_meta_url ?? viewer.preview_meta_url : null}
-                gaussianPlyUrl={viewer?.status === "ready" ? viewer.gaussian_ply_url : null}
-                debugPointsUrl={viewer?.status === "ready" ? viewer.debug_points_ply_url : null}
-                cameraPathUrl={viewer?.status === "ready" ? viewer.camera_path_url : null}
-                defaultViewMode={viewer?.status === "ready" && viewer.point_source ? "points" : "splats"}
-              />
-            )}
+            <SplatViewer
+              modelUrl={viewer?.status === "ready" ? viewer.model_url : null}
+              format={viewer?.format}
+              viewerMetaUrl={viewer?.status === "ready" ? viewer.viewer_meta_url ?? viewer.preview_meta_url : null}
+              gaussianPlyUrl={viewer?.status === "ready" ? viewer.gaussian_ply_url : null}
+              debugPointsUrl={viewer?.status === "ready" ? viewer.debug_points_ply_url : null}
+              cameraPathUrl={viewer?.status === "ready" ? viewer.camera_path_url : null}
+              defaultViewMode={viewer?.status === "ready" && viewer.point_source ? "points" : "splats"}
+            />
           </div>
         </div>
 
@@ -560,31 +546,6 @@ function isPlyArtifact(artifact: Artifact): boolean {
 function hasIntermediatePly(artifact: Artifact): boolean {
   const value = artifact.metadata?.intermediate_ply;
   return typeof value === "string" && value.length > 0;
-}
-
-function pointCloudArtifactFromViewer(viewer: ViewerConfig | null, project: Project | null): Artifact | null {
-  if (viewer?.status !== "ready") return null;
-  if (viewer.format !== "ply" && viewer.artifact_kind !== "preview_pointcloud_ply") return null;
-  const url = viewer.debug_points_ply_url ?? viewer.download_ply_url;
-  if (!url) return null;
-  return {
-    id: viewer.artifact_id ?? "preview-pointcloud",
-    project_id: project?.id ?? "",
-    task_id: "",
-    kind: viewer.artifact_kind ?? "preview_pointcloud_ply",
-    object_uri: url,
-    file_name: viewer.artifact_file_name ?? "preview_fast.ply",
-    file_size: viewer.file_size ?? 0,
-    format: "ply",
-    metadata: {
-      scene_type: viewer.scene_type,
-      artifact_display: viewer.artifact_display,
-      viewer_default_point_size: viewer.viewer_default_point_size,
-      viewer_default_downsample_factor: viewer.viewer_default_downsample_factor,
-      viewer_default_conf_threshold: viewer.viewer_default_conf_threshold
-    },
-    created_at: project?.updated_at ?? new Date(0).toISOString()
-  };
 }
 
 function compareArtifactCreatedAtDesc(a: Artifact, b: Artifact): number {

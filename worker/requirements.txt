@@ -5,11 +5,16 @@
 # Transformer Engine is installed separately in Dockerfile so CUDA/cuDNN
 # compile prerequisites fail with a clear error. Keep einops pinned here too:
 # LiteVGGT requires it, and Dockerfile installs it early before TE import checks.
+# DashDeblurGroupGS CUDA extensions are installed by Dockerfile from its own
+# checkout to avoid vendoring duplicate rasterizers into this image. Keep shared
+# Python deps here.
 tqdm==4.67.1
 einops==0.8.0
 Cython==0.29.37
 scipy==1.15.1
 huggingface_hub==0.30.2
+imageio==2.37.0
+natsort==8.4.0
 matplotlib==3.10.1
 seaborn==0.13.2
 evo==1.36.4
@@ -26,10 +31,11 @@ addict==2.4.0
 timm==0.6.7
 wandb==0.19.8
 lpips==0.1.4
+pytorch-msssim==1.0.0
 plyfile==1.1
 rich==13.9.4
 kornia==0.8.0
 loguru==0.7.3
 scikit-learn==1.6.1
+scikit-image==0.25.2
 gsplat==1.5.3
-safetensors==0.7.0

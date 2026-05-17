@@ -139,27 +139,28 @@ class WeightDownloadTests(unittest.TestCase):
     def test_pipeline_weights_are_task_specific(self) -> None:
         self.assertEqual([item.relative_path for item in weights_for_pipeline("litevggt_spz")], ["litevggt/te_dict.pt"])
         self.assertEqual([item.relative_path for item in weights_for_pipeline("litevggt_edgs")], [])
-        self.assertEqual([item.relative_path for item in weights_for_pipeline("lingbot_map_spz")], ["lingbot/lingbot-map-long.pt"])
-        self.assertEqual([item.relative_path for item in weights_for_pipeline("lingbot_video_pointcloud_fast")], ["lingbot/lingbot-map-long.pt"])
+        self.assertEqual([item.relative_path for item in weights_for_pipeline("lingbot_map_spz")], [])
+        self.assertEqual([item.relative_path for item in weights_for_pipeline("lingbot_video_pointcloud_fast")], [])
         self.assertEqual([item.relative_path for item in weights_for_pipeline("colmap_sparse")], [])
+        self.assertEqual([item.relative_path for item in weights_for_pipeline("dash_deblur_group_gs")], [])
 
     def test_seed_model_weights_copies_missing_weight_from_image_seed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             seed = root / "seed"
             model_root = root / "model-cache"
-            source = seed / "lingbot" / "lingbot-map-long.pt"
+            source = seed / "litevggt" / "te_dict.pt"
             source.parent.mkdir(parents=True)
             source.write_bytes(b"weight")
-            stale_part = model_root / "lingbot" / "lingbot-map-long.pt.part"
-            stale_lock = model_root / "lingbot" / "lingbot-map-long.pt.lock"
+            stale_part = model_root / "litevggt" / "te_dict.pt.part"
+            stale_lock = model_root / "litevggt" / "te_dict.pt.lock"
             stale_part.parent.mkdir(parents=True)
             stale_part.write_bytes(b"partial")
             stale_lock.write_text("stale", encoding="utf-8")
 
-            results = seed_model_weights(model_root, seed, (ModelWeight("lingbot/lingbot-map-long.pt", "https://example.test/w"),))
+            results = seed_model_weights(model_root, seed, (ModelWeight("litevggt/te_dict.pt", "https://example.test/w"),))
 
-            target = model_root / "lingbot" / "lingbot-map-long.pt"
+            target = model_root / "litevggt" / "te_dict.pt"
             self.assertEqual(target.read_bytes(), b"weight")
             self.assertEqual(results[0]["status"], "seeded")
             self.assertFalse(stale_part.exists())

@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import json
-import shutil
-import struct
 from pathlib import Path
 from typing import Any
 
-from app.config import get_settings
+from app.config import get_settings, resolve_local_path
 from app.fine.colmap_cli import build_colmap_cli_scene
 from app.fine.colmap_defaults import (
     COLMAP_GUIDED_MATCHING,
@@ -28,6 +26,7 @@ from app.fine.colmap_defaults import (
     FINE_SCENE_PROFILE_MAX_SIDES,
     LEGACY_FINE_PIPELINE_ALIASES,
 )
+from app.fine.dash_deblur_group import resolve_runtime_paths, run_dash_deblur_group_training
 from app.fine.option_utils import read_float, read_int
 from app.fine.preprocess import build_pycolmap_scene, prepare_fine_images
 from app.fine.types import FineContext, FineFailure, FineResult
@@ -39,6 +38,7 @@ PIPELINE_NAME = FINE_PIPELINE_NAME
 SOURCE_COMMITS_FINE = {
     "COLMAP": "system",
     "pycolmap": "3.12.6",
+    "DashDeblurGroupGS": "runtime",
 }
 
 
@@ -56,6 +56,7 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         raise FineFailure("UNSUPPORTED_FINE_PIPELINE", f"Unsupported fine pipeline: {ctx.pipeline}")
     reject_removed_options(ctx.options)
     assert_runtime_ready()
+    assert_training_runtime_ready(ctx.options, resolve_local_path(settings.repo_cache_dir))
 
     image_count = len(image_files(ctx.input_dir))
     if image_count < 3:
@@ -112,14 +113,19 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         flush=True,
     )
 
-    ctx_progress(ctx, "fine_colmap_export", 82, "exporting COLMAP sparse point cloud")
-    sparse_ply = ctx.work_dir / "colmap_sparse.ply"
-    sparse_points = export_colmap_sparse_ply(scene_result.scene_dir / "sparse" / "0", sparse_ply)
-    if sparse_points <= 0:
-        raise FineFailure("COLMAP_SPARSE_POINTS_EMPTY", "COLMAP sparse reconstruction contains no exportable 3D points")
+    ctx_progress(ctx, "fine_training_start", 42, "starting DashDeblurGroupGS from COLMAP scene")
+    training_result = run_dash_deblur_group_training(
+        scene_dir=scene_result.scene_dir,
+        work_dir=ctx.work_dir,
+        final_ply=ctx.final_ply,
+        final_spz=ctx.final_spz,
+        options=ctx.options,
+        repo_cache_dir=resolve_local_path(settings.repo_cache_dir),
+        blur_analysis=quality,
+        progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
+    )
 
-    ctx.final_ply.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(sparse_ply, ctx.final_ply)
+    ctx_progress(ctx, "fine_outputs_validating", 82, "validating fine Gaussian outputs")
     from app.fine.viewer_meta import read_ply_xyz_bounds, write_final_viewer_meta_json
 
     bounds = read_ply_xyz_bounds(ctx.final_ply)
@@ -131,43 +137,51 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
             final_ply=ctx.final_ply,
             scene_dir=scene_result.scene_dir,
             preferred_image_names=first_clear_training_images(quality.per_frame_blur),
+            asset_type="fine_dash_deblur_group_gaussians",
+            point_source="dash_deblur_group_gs",
+            default_view_mode="splats",
         )
 
+    source_commits = {
+        **SOURCE_COMMITS_FINE,
+        "DashDeblurGroupGS": training_result.source_commit,
+    }
     metrics = {
         "pipeline": PIPELINE_NAME,
-        "algorithm": scene_result.backend,
-        "requested_algorithms": [scene_result.backend],
-        "effective_algorithms": [scene_result.backend],
+        "algorithm": "dash_deblur_group_gs",
+        "requested_algorithms": [scene_result.backend, "dash_deblur_group_gs"],
+        "effective_algorithms": [scene_result.backend, "dash_deblur_group_gs"],
         "source_version": ctx.source_version,
-        "source_commits": SOURCE_COMMITS_FINE,
+        "source_commits": source_commits,
         "fine_input_type": ctx.options.get("input_type") or ("video" if ctx.input_video else "images"),
         "input_images": image_count,
         "training_images": len(image_files(train_input_dir)),
         "fine_scene_profile": fine_scene_profile,
         "fine_image_max_side": image_max_side,
-        "colmap_sparse_points_exported": sparse_points,
         "final_ply_bytes": ctx.final_ply.stat().st_size,
+        "final_spz_bytes": training_result.final_spz.stat().st_size if training_result.final_spz else None,
         "viewer_meta_json_bytes": ctx.viewer_meta_json.stat().st_size if ctx.viewer_meta_json and ctx.viewer_meta_json.exists() else None,
         "bbox_min": bounds["bbox_min"],
         "bbox_max": bounds["bbox_max"],
         "bbox_radius": bounds["radius"],
         **quality.metrics(),
         **scene_result.metrics,
+        **training_result.metrics,
     }
     if viewer_meta_payload is not None:
         metrics["viewer_meta_asset_type"] = viewer_meta_payload.get("asset_type")
     ctx.metrics_json.parent.mkdir(parents=True, exist_ok=True)
     ctx.metrics_json.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    ctx_progress(ctx, "fine_outputs_ready", 90, "validated COLMAP sparse point cloud", metrics)
+    ctx_progress(ctx, "fine_outputs_ready", 90, "validated DashDeblurGroupGS outputs", metrics)
     return FineResult(
         final_ply=ctx.final_ply,
-        final_spz=None,
+        final_spz=training_result.final_spz,
         metrics_json=ctx.metrics_json,
         viewer_meta_json=ctx.viewer_meta_json if ctx.viewer_meta_json and ctx.viewer_meta_json.exists() else None,
         lod_rad=None,
-        splat_count=None,
-        source_commits=SOURCE_COMMITS_FINE,
+        splat_count=training_result.splat_count,
+        source_commits=source_commits,
         metrics=metrics,
     )
 
@@ -200,6 +214,7 @@ def build_scene(
             input_type=str(ctx.options.get("input_type") or ("video" if getattr(ctx, "input_video", None) else "images")),
             quality_mode=str(ctx.options.get("quality_mode") or "auto"),
             capture_order=str(ctx.options.get("fine_capture_order") or "auto"),
+            matcher_policy=matcher,
             prefer_gpu=read_bool(ctx.options.get("prefer_gpu"), True),
             gpu_index=str(ctx.options.get("fine_colmap_gpu_index") or "").strip() or None,
             min_registered_ratio=min_registered_ratio,
@@ -230,42 +245,14 @@ def build_scene(
     result.metrics["sfm_min_sparse_points"] = min_sparse_points
     result.metrics["sfm_target_sparse_points"] = COLMAP_TARGET_SPARSE_POINTS
     point_count = int(result.point_count or 0)
+    if point_count < COLMAP_TARGET_SPARSE_POINTS:
+        result.metrics["sfm_sparse_points_below_target"] = True
     if min_sparse_points > 0 and point_count < min_sparse_points:
         raise FineFailure(
             "SFM_SPARSE_POINTS_TOO_LOW",
             f"COLMAP produced {point_count} sparse points, below quality gate {min_sparse_points}",
         )
     return result
-
-
-def export_colmap_sparse_ply(model_dir: Path, output_ply: Path) -> int:
-    try:
-        import pycolmap
-    except Exception as exc:
-        raise FineFailure("PYCOLMAP_UNAVAILABLE", f"pycolmap import failed: {exc}") from exc
-
-    reconstruction = pycolmap.Reconstruction(model_dir)
-    points = list(getattr(reconstruction, "points3D", {}).values())
-    output_ply.parent.mkdir(parents=True, exist_ok=True)
-    header = (
-        "ply\n"
-        "format binary_little_endian 1.0\n"
-        f"element vertex {len(points)}\n"
-        "property float x\n"
-        "property float y\n"
-        "property float z\n"
-        "property uchar red\n"
-        "property uchar green\n"
-        "property uchar blue\n"
-        "end_header\n"
-    ).encode("ascii")
-    with output_ply.open("wb") as handle:
-        handle.write(header)
-        for point in points:
-            xyz = [float(value) for value in getattr(point, "xyz", (0.0, 0.0, 0.0))]
-            color = [int(max(0, min(255, value))) for value in getattr(point, "color", (255, 255, 255))]
-            handle.write(struct.pack("<fffBBB", xyz[0], xyz[1], xyz[2], color[0], color[1], color[2]))
-    return len(points)
 
 
 def normalize_fine_pipeline(value: str | None) -> str:
@@ -289,6 +276,10 @@ def assert_runtime_ready() -> None:
         import pycolmap  # noqa: F401
     except Exception as exc:
         raise FineFailure("PYCOLMAP_UNAVAILABLE", f"pycolmap import failed: {exc}") from exc
+
+
+def assert_training_runtime_ready(options: dict[str, Any], repo_cache_dir: Path) -> None:
+    resolve_runtime_paths(options, repo_cache_dir)
 
 
 def reject_removed_options(options: dict[str, Any]) -> None:

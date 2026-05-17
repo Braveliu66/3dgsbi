@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -23,7 +23,19 @@ from app.resources import collect_gpu
 
 
 Progress = Callable[[str, int, str], None]
-REQUIRED_COLMAP_COMMANDS = {"global_mapper", "hierarchical_mapper"}
+REQUIRED_COLMAP_COMMANDS = {"feature_extractor", "mapper", "image_undistorter", "model_analyzer"}
+KNOWN_COLMAP_COMMANDS = REQUIRED_COLMAP_COMMANDS | {
+    "exhaustive_matcher",
+    "sequential_matcher",
+    "vocab_tree_matcher",
+    "spatial_matcher",
+    "transitive_matcher",
+    "global_mapper",
+    "hierarchical_mapper",
+    "view_graph_calibrator",
+    "model_clusterer",
+    "model_splitter",
+}
 
 
 @dataclass(slots=True)
@@ -48,6 +60,7 @@ class ColmapPolicy:
     use_gpu: bool
     gpu_index: str
     ba_use_gpu: bool
+    use_view_graph_calibrator: bool = False
 
 
 @dataclass(slots=True)
@@ -67,6 +80,7 @@ def build_colmap_cli_scene(
     input_type: str,
     quality_mode: str = "auto",
     capture_order: str = "auto",
+    matcher_policy: str = "auto",
     prefer_gpu: bool = True,
     gpu_index: str | None = None,
     min_registered_ratio: float | None = None,
@@ -87,6 +101,7 @@ def build_colmap_cli_scene(
         free_vram_gb=free_vram_gb,
         quality_mode=quality_mode,
         capture_order=capture_order,
+        matcher_policy=matcher_policy,
         prefer_gpu=prefer_gpu,
         gpu_index=resolved_gpu_index,
         capabilities=capabilities,
@@ -132,6 +147,7 @@ def retry_policies(
     free_vram_gb: float,
     quality_mode: str,
     capture_order: str,
+    matcher_policy: str,
     prefer_gpu: bool,
     gpu_index: str,
     capabilities: ColmapCapabilities,
@@ -144,6 +160,7 @@ def retry_policies(
             free_vram_gb=free_vram_gb,
             quality_mode=quality_mode,
             capture_order=capture_order,
+            matcher_policy=matcher_policy,
             prefer_gpu=prefer_gpu,
             gpu_index=gpu_index,
             retry_profile="primary",
@@ -157,6 +174,7 @@ def retry_policies(
             free_vram_gb=free_vram_gb,
             quality_mode="quality",
             capture_order=capture_order,
+            matcher_policy=matcher_policy,
             prefer_gpu=prefer_gpu,
             gpu_index=gpu_index,
             retry_profile="high_recall",
@@ -173,6 +191,7 @@ def retry_policies(
                 free_vram_gb=free_vram_gb,
                 quality_mode="quality",
                 capture_order=capture_order,
+                matcher_policy=matcher_policy,
                 prefer_gpu=prefer_gpu,
                 gpu_index=gpu_index,
                 retry_profile="aliked_lightglue",
@@ -189,6 +208,7 @@ def retry_policies(
                 free_vram_gb=free_vram_gb,
                 quality_mode="quality",
                 capture_order=capture_order,
+                matcher_policy=matcher_policy,
                 prefer_gpu=prefer_gpu,
                 gpu_index=gpu_index,
                 retry_profile="sift_lightglue",
@@ -196,7 +216,35 @@ def retry_policies(
                 matcher_type="SIFT_LIGHTGLUE",
             )
         )
-    return policies[:3]
+    return [adapt_policy_to_capabilities(policy, capabilities) for policy in policies[:3]]
+
+
+def adapt_policy_to_capabilities(policy: ColmapPolicy, capabilities: ColmapCapabilities) -> ColmapPolicy:
+    commands = capabilities.commands
+    matchers = [matcher for matcher in policy.matchers if f"{matcher}_matcher" in commands]
+    if not matchers:
+        if "sequential_matcher" in commands:
+            matchers = ["sequential"]
+        elif "exhaustive_matcher" in commands:
+            matchers = ["exhaustive"]
+        else:
+            raise FineFailure("COLMAP_CLI_UNSUPPORTED", "colmap CLI is missing sequential_matcher/exhaustive_matcher")
+
+    mapper = policy.mapper
+    mapper_command = colmap_mapper_command(mapper)
+    if mapper_command not in commands:
+        if policy.n_images > 3000 and "hierarchical_mapper" in commands:
+            mapper = "hierarchical"
+        elif "mapper" in commands:
+            mapper = "mapper"
+        else:
+            raise FineFailure("COLMAP_CLI_UNSUPPORTED", "colmap CLI is missing mapper")
+    return replace(
+        policy,
+        matchers=matchers,
+        mapper=mapper,
+        use_view_graph_calibrator=mapper == "global" and "view_graph_calibrator" in commands,
+    )
 
 
 def resolve_colmap_policy(
@@ -207,6 +255,7 @@ def resolve_colmap_policy(
     free_vram_gb: float,
     quality_mode: str,
     capture_order: str,
+    matcher_policy: str = "auto",
     prefer_gpu: bool,
     gpu_index: str,
     retry_profile: str = "primary",
@@ -219,14 +268,14 @@ def resolve_colmap_policy(
 
     if scene == "indoor":
         max_features, max_size, mapper = _indoor_feature_size_mapper(n_images)
-        matchers = _indoor_matchers(n_images, sequential_input)
+        matchers = _matchers_for_policy(matcher_policy, _indoor_matchers(n_images, sequential_input))
         guided = True
         affine = True
         dsp = True
         overlap = _seq_overlap(scene, n_images, input_type)
     else:
         max_features, max_size, mapper = _outdoor_feature_size_mapper(n_images)
-        matchers = _outdoor_matchers(n_images, sequential_input)
+        matchers = _matchers_for_policy(matcher_policy, _outdoor_matchers(n_images, sequential_input))
         guided = False
         affine = False
         dsp = False
@@ -307,7 +356,7 @@ def detect_colmap_capabilities() -> ColmapCapabilities:
     if completed.returncode != 0:
         raise FineFailure("COLMAP_CLI_UNAVAILABLE", help_text.strip() or f"colmap help exited with {completed.returncode}")
     commands = {match.group(1) for match in re.finditer(r"^\s+([a-z_]+)(?:\s|$)", help_text, flags=re.MULTILINE)}
-    commands.update(command for command in REQUIRED_COLMAP_COMMANDS if command in help_text)
+    commands.update(command for command in KNOWN_COLMAP_COMMANDS if colmap_help_contains_command(help_text, command))
     missing = sorted(REQUIRED_COLMAP_COMMANDS - commands)
     if missing:
         raise FineFailure("COLMAP_CLI_UNSUPPORTED", f"colmap CLI is missing required commands: {', '.join(missing)}")
@@ -318,6 +367,19 @@ def detect_colmap_capabilities() -> ColmapCapabilities:
         has_aliked_lightglue="ALIKED_LIGHTGLUE" in help_text,
         has_sift_lightglue="SIFT_LIGHTGLUE" in help_text,
     )
+
+
+def colmap_mapper_command(mapper: str) -> str:
+    if mapper == "hierarchical":
+        return "hierarchical_mapper"
+    if mapper == "global":
+        return "global_mapper"
+    return "mapper"
+
+
+def colmap_help_contains_command(help_text: str, command: str) -> bool:
+    pattern = rf"(?<![A-Za-z0-9_]){re.escape(command)}(?![A-Za-z0-9_])"
+    return re.search(pattern, help_text) is not None
 
 
 def current_free_vram_gb() -> tuple[float, str]:
@@ -485,12 +547,13 @@ def _run_colmap_attempt(
     if policy.mapper == "global":
         mapper_database = workspace / "database_global.db"
         shutil.copy2(database_path, mapper_database)
-        _run_colmap_command(
-            [executable, "view_graph_calibrator", "--database_path", str(mapper_database)],
-            stage="fine_colmap_view_graph_calibrator",
-            progress=progress,
-            progress_value=34,
-        )
+        if policy.use_view_graph_calibrator:
+            _run_colmap_command(
+                [executable, "view_graph_calibrator", "--database_path", str(mapper_database)],
+                stage="fine_colmap_view_graph_calibrator",
+                progress=progress,
+                progress_value=34,
+            )
 
     progress("fine_colmap_mapping", 36, f"running COLMAP {policy.mapper} mapper")
     if policy.mapper == "hierarchical":
@@ -712,11 +775,20 @@ def _outdoor_feature_size_mapper(n_images: int) -> tuple[int, int, str]:
         return 8192, 3200, "mapper"
     if n_images <= 800:
         return 8192, 3000, "mapper"
-    if n_images <= 3000:
-        return 6000, 2600, "global"
+    if n_images <= 1500:
+        return 6000, 2600, "mapper"
+    if n_images <= 5000:
+        return 6000, 2400, "global"
     if n_images <= 8000:
         return 4096, 2400, "hierarchical"
     return 4096, 2200, "hierarchical"
+
+
+def _matchers_for_policy(matcher_policy: str, default: list[str]) -> list[str]:
+    policy = matcher_policy.strip().lower()
+    if policy in {"exhaustive", "sequential", "vocab_tree", "spatial"}:
+        return [policy]
+    return default
 
 
 def _indoor_matchers(n_images: int, sequential_input: bool) -> list[str]:

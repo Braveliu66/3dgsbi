@@ -66,20 +66,12 @@ sequenceDiagram
 ```mermaid
 flowchart TD
     Start["用户点击精细重建"] --> Queue["创建 fine 任务"]
-    Queue --> Analysis["素材质量分析"]
-    Analysis --> LongVideo{"视频或序列 > 500 帧?"}
-    LongVideo -- 是且启用 --> Global["长视频全局优化管线待重写"]
-    LongVideo -- 否或未启用 --> Init["标准初始化"]
-    Global --> Init
-    Init --> Sparse{"有效视角 < 15 或位姿失败?"}
-    Sparse -- 是 --> FreeSplatter["FreeSplatter 初始化"]
-    Sparse -- 否 --> Engine["精细合成引擎"]
-    FreeSplatter --> Engine
-    Engine --> Blur{"检测到模糊素材?"}
-    Blur -- 是 --> Deblur["启用 Deblurring 钩子"]
-    Blur -- no --> Train["official_fastgs_big training"]
-    Deblur --> Train
-    Train --> LOD
+    Queue --> Input["图片/视频帧归一化与低质量过滤"]
+    Input --> Colmap["现有 COLMAP CLI / pycolmap 生成 images + sparse/0"]
+    Colmap --> Config["生成 DashDeblurGroupGS 配置"]
+    Config --> Train["Deblur + Dash + Group 训练"]
+    Train --> Export["导出 final.ply 并转码 final_web.spz"]
+    Export --> LOD
     LOD --> Save["保存 final 产物和 metrics.json"]
 ```
 
@@ -157,16 +149,19 @@ sequenceDiagram
 - viewer config 存在 `preview_spz` 时返回 `mode=single`；不存在时返回 `unavailable`。视频/实时视频加载语义待新管线重新定义。
 - 当前取消接口只持久化 `canceled` 状态；正在执行的外部算法进程中断和临时目录清理属于后续增强。
 
-## 2026-05-07 Fine Workflow Update
+## 2026-05-18 Fine Workflow Update
 
-Fine image workflow now runs:
+Fine workflow now runs:
 
-1. Normalize uploaded JPG/PNG into RGB JPEG. Missing EXIF is valid; EXIF orientation is only a pixel-rotation hint.
-2. Analyze blur and keep at least 3 real images.
-3. Run pycolmap as the production fine SfM frontend. Preview remains LiteVGGT with separate speed-oriented defaults.
-4. Write COLMAP-compatible `sparse/0` with `images.bin`, `cameras.bin`, and `points3D.bin`; metrics set `sfm_backend=pycolmap`.
-5. Train official FastGS-Big from the COLMAP scene and surface progress every 200 iterations.
-6. Export standard `final.ply`, transcode `final_web.spz`, and write `metrics.json`.
+1. Frontend sends `scene_type=indoor|outdoor`; backend does not run a scene-classification model.
+2. Normalize uploaded JPG/PNG or extracted video frames into RGB JPEG. Missing EXIF is valid; EXIF orientation is only a pixel-rotation hint.
+3. Analyze blur and keep at least 3 real images.
+4. Run the COLMAP CLI path by default. The worker image builds upstream COLMAP with `global_mapper`, `hierarchical_mapper`, `model_clusterer`, and `model_splitter`.
+5. Select indoor/outdoor COLMAP policies by image count, input type, quality mode, GPU memory, and reconstruction feedback. Outdoor large scenes prefer `global_mapper`; only missing CLI support falls back to `mapper`.
+6. Write a COLMAP-compatible scene with `images/` and `sparse/0`.
+7. Generate a DashDeblurGroupGS config from the selected scene/deblur/Dash/Group options.
+8. Train DashDeblurGroupGS from the COLMAP scene and surface progress from training logs.
+9. Export standard `final.ply`, transcode `final_web.spz`, write `final_viewer_meta.json`, and write `metrics.json`.
 
-`pycolmap` is the default image fine SfM path. The deprecated `fine_sfm_backend=litevggt` fine option is unsupported; preview LiteVGGT is unchanged.
+`colmap_sparse` is now only a legacy fine pipeline alias. The default fine pipeline is `dash_deblur_group_gs`. The deprecated `fine_sfm_backend=litevggt` fine option remains unsupported; preview LiteVGGT is unchanged.
 

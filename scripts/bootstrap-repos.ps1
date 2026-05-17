@@ -1,8 +1,9 @@
 $ErrorActionPreference = "Stop"
 
-# Optional maintainer helper. Runtime does not use repo-cache; bundled preview
-# code lives in backend/app/preview/vendor. This script only refreshes upstream
-# comparison copies when updating the vendored implementation.
+# Optional maintainer helper. Preview runtime uses bundled code under
+# backend/app/preview/vendor. Fine training uses the embedded trainer under
+# worker/trainer/dash_deblur_group_gs; this script only refreshes upstream
+# comparison copies for bundled preview code.
 
 $repos = @(
   @{ Name = "LiteVGGT-repo"; Url = "https://github.com/GarlicBa/LiteVGGT-repo.git"; Commit = "4767c17f8b6f176bb751566e92f60eb885040033" },

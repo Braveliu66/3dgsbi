@@ -75,7 +75,13 @@ services:
       target: worker
       args:
         WORKER_BASE_IMAGE: ${WORKER_BASE_IMAGE:-docker.m.daocloud.io/pytorch/pytorch:2.8.0-cuda12.8-cudnn9-devel}
+        COLMAP_REPO_URL: ${COLMAP_REPO_URL:-https://github.com/colmap/colmap.git}
+        COLMAP_REPO_COMMIT: ${COLMAP_REPO_COMMIT:-4.0.4}
+        COLMAP_SOURCE_INSTALL: ${COLMAP_SOURCE_INSTALL:-true}
+        BUILDKIT_INLINE_CACHE: "1"
+        DASH_DEBLUR_GROUP_INSTALL_EXTENSIONS: ${DASH_DEBLUR_GROUP_INSTALL_EXTENSIONS:-true}
       cache_from:
+        - 3dgsbi-worker:local
         - type=local,src=.docker-build-cache/worker
       cache_to:
         - type=local,dest=.docker-build-cache/worker,mode=max
@@ -132,6 +138,7 @@ services:
       MODEL_AUTO_DOWNLOAD: "true"
       MODEL_DOWNLOAD_PREFER_HF_MIRROR: "true"
       FINE_RECONSTRUCTION_ENABLED: "true"
+      DASH_DEBLUR_GROUP_REPO: /opt/dash_deblur_group_gs
       TORCH_HOME: /model-cache/torch
       HF_HOME: /model-cache/huggingface
       HF_HUB_CACHE: /model-cache/huggingface/hub

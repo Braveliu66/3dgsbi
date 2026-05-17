@@ -25,6 +25,7 @@ from app.models import Artifact, MediaAsset, Project, Task, TaskEvent, User, Wor
 from app.preview.image_preprocess import normalize_image_directory
 from app.preview.runner import run_preview_pipeline
 from app.preview.types import PreviewContext, PreviewFailure
+from app.preview.video_preprocess import preprocess_preview_video
 from app.preview.weights import ModelDownloadError, download_model_weights, weights_for_pipeline
 from app.resources import collect_cpu, collect_gpu
 from app.storage import Storage, sha256_path, storage_key
@@ -387,7 +388,7 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
             if not task or not project:
                 return
 
-            default_pipeline = "lingbot_video_pointcloud_fast" if project.input_type == "video" else "litevggt_spz"
+            default_pipeline = "litevggt_spz"
             requested_pipeline = (task.options or {}).get("pipeline") or (task.options or {}).get("preview_pipeline")
             pipeline = normalize_preview_pipeline(requested_pipeline, default_pipeline)
             print(
@@ -428,7 +429,34 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
                     f"normalized {normalized.output_count} images to RGB JPEG, max side {normalized.max_side}px",
                 )
             else:
-                update_task(db, task, project, "input_ready", 14, started, f"downloaded {len(project.media)} media files")
+                videos = sorted((path for path in input_dir.iterdir() if path.is_file()), key=lambda path: path.name)
+                if project.input_type != "video" or len(videos) != 1:
+                    raise PreviewFailure("INVALID_PREVIEW_INPUT", "Preview requires images or exactly one video file")
+                max_side = read_positive_int((task.options or {}).get("preview_image_max_side"), settings.preview_image_max_side)
+                jpeg_quality = read_positive_int((task.options or {}).get("preview_image_jpeg_quality"), settings.preview_image_jpeg_quality)
+                video_result = preprocess_preview_video(
+                    videos[0],
+                    work_dir,
+                    scene_type=str((task.options or {}).get("scene_type") or "indoor"),
+                    max_side=max_side,
+                    jpeg_quality=jpeg_quality,
+                )
+                input_dir = video_result.output_dir
+                input_metrics = video_result.metrics
+                print(
+                    "[preview-worker] extracted video input "
+                    f"input_dir={input_dir} metrics={format_options(input_metrics)}",
+                    flush=True,
+                )
+                update_task(
+                    db,
+                    task,
+                    project,
+                    "input_ready",
+                    14,
+                    started,
+                    f"extracted {input_metrics.get('video_preprocess_selected_frames')} video frames for LiteVGGT",
+                )
 
             output_spz = work_dir / "preview.spz"
             source_version = task_source_version(task, project)
@@ -512,7 +540,12 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
                 )
                 upload_db.add(artifact)
                 ply_artifact = None
-                if result.intermediate_ply and result.intermediate_ply.exists() and result.intermediate_ply.stat().st_size > 0:
+                if (
+                    result.intermediate_ply
+                    and result.intermediate_ply.exists()
+                    and result.intermediate_ply.stat().st_size > 0
+                    and result.intermediate_ply.resolve() != primary_artifact.resolve()
+                ):
                     ply_key = storage_key("users", project.owner_id, "projects", project.id, "preview", task.id, "original.ply")
                     ply_uri = storage.upload_path(result.intermediate_ply, ply_key)
                     ply_artifact = Artifact(
@@ -535,7 +568,6 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
                 for metric_key, kind, file_name in (
                     ("intermediate_splats_ply", "debug_splats_ply", "preview_splats.ply"),
                     ("preview_meta_json", "preview_meta_json", "preview_meta.json"),
-                    ("lingbot_official_predictions_npz", "lingbot_official_predictions_npz", "official_predictions.npz"),
                 ):
                     path_value = result.metrics.get(metric_key)
                     path = Path(path_value) if isinstance(path_value, str) else None
@@ -797,80 +829,12 @@ def read_optional_int(value: Any) -> int | None:
 
 def preview_artifact_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     keys = (
-        "lingbot_commit",
-        "lingbot_model",
-        "lingbot_sampled_frames",
-        "lingbot_source_fps",
-        "lingbot_sampled_fps",
-        "lingbot_frame_width",
-        "lingbot_frame_height",
-        "lingbot_scene_type",
-        "lingbot_image_size",
-        "lingbot_target_width",
-        "lingbot_target_height",
-        "lingbot_preprocessed_width",
-        "lingbot_preprocessed_height",
-        "lingbot_model_image_size",
-        "lingbot_inference_frames",
-        "lingbot_inference_mode",
-        "lingbot_keyframe_interval",
-        "lingbot_preprocess_mode",
-        "lingbot_camera_iterations",
-        "lingbot_num_scale_frames",
-        "lingbot_window_size",
-        "lingbot_kv_cache_sliding_window",
-        "lingbot_overlap_size",
-        "lingbot_overlap_keyframes",
-        "lingbot_use_sdpa",
-        "lingbot_flashinfer_available",
-        "lingbot_allow_sdpa_fallback",
-        "lingbot_sdpa_fallback_active",
-        "lingbot_enable_point",
-        "lingbot_aggregator_dtype",
-        "lingbot_compile",
-        "lingbot_compile_requested",
-        "lingbot_compile_cudagraphs",
-        "lingbot_compile_fallback",
-        "lingbot_max_frames",
-        "lingbot_inference_seconds",
-        "lingbot_inference_fps",
-        "lingbot_frame_stride",
-        "lingbot_pixel_stride",
-        "lingbot_pixel_stride_fast",
-        "lingbot_pixel_stride_full",
-        "lingbot_conf_percentile",
-        "lingbot_conf_percentile_fast",
-        "lingbot_conf_percentile_full",
-        "lingbot_min_conf",
-        "lingbot_mask_sky",
-        "lingbot_sky_points_removed",
-        "lingbot_max_points",
-        "lingbot_save_predictions",
-        "lingbot_keyframes_only_points",
-        "lingbot_predictions_dir",
-        "lingbot_point_source",
-        "lingbot_point_source_frames",
-        "lingbot_point_skipped_frames",
-        "lingbot_depth_reprojection_fallback",
-        "lingbot_ply_format",
-        "lingbot_points_before_confidence_filter",
-        "lingbot_points_filtered_by_confidence",
-        "lingbot_points_after_confidence_filter",
-        "lingbot_points_before_downsample",
-        "lingbot_points_after_downsample",
-        "lingbot_points_removed_by_limit",
-        "lingbot_point_frame_count",
-        "lingbot_window_count",
-        "lingbot_retry_window_count",
-        "lingbot_bad_window_count",
-        "preview_fast_voxel_size",
-        "preview_fast_input_points",
-        "preview_fast_voxel_points",
-        "preview_fast_points_removed_by_voxel",
-        "preview_full_voxel_size",
-        "preview_full_input_points",
-        "preview_full_voxel_points",
-        "preview_full_points_removed_by_voxel",
+        "preview_input_type",
+        "video_preprocess_source_path",
+        "video_preprocess_sampled_fps",
+        "video_preprocess_max_frames",
+        "video_preprocess_extracted_frames",
+        "video_preprocess_selected_frames",
         "preview_scene_profile",
         "scene_type",
         "artifact_display",
@@ -887,17 +851,13 @@ def preview_artifact_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "bbox_radius",
         "quality_warning",
         "intermediate_points_ply_size",
-        "preview_fast_ply_size",
-        "preview_full_ply_size",
-        "camera_path_json_size",
-        "metrics_json_size",
         "intermediate_splats_ply_size",
         "preview_meta_json_size",
-        "lingbot_official_predictions_npz_size",
         "fixed_splat_base_point_radius",
         "fixed_splat_point_radius_scale",
         "fixed_splat_point_radius",
         "fixed_splat_opacity",
+        "fixed_splat_count",
         "cuda_memory_peak_mb",
     )
     return {key: metrics.get(key) for key in keys if key in metrics}
@@ -1031,20 +991,12 @@ def expected_seconds_for_task(task: Task, project: Project) -> int:
 def expected_seconds_for_pipeline(pipeline: str | None) -> int:
     if pipeline == "litevggt_spz":
         return settings.preview_expected_seconds_litevggt_spz
-    if pipeline == "lingbot_map_spz":
-        return settings.preview_expected_seconds_lingbot_map_spz
-    if pipeline == "lingbot_video_pointcloud_fast":
-        return settings.preview_expected_seconds_lingbot_map_spz
     return settings.preview_expected_seconds_litevggt_spz
 
 
 def stage_for_pipeline(pipeline: str) -> str:
     if pipeline == "litevggt_spz":
         return "litevggt_direct_spz"
-    if pipeline == "lingbot_map_spz":
-        return "lingbot_map_spz"
-    if pipeline == "lingbot_video_pointcloud_fast":
-        return "lingbot_video_pointcloud_fast"
     return "unknown_preview_pipeline"
 
 

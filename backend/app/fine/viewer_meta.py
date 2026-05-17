@@ -34,12 +34,15 @@ def write_final_viewer_meta_json(
     final_ply: Path,
     scene_dir: Path,
     preferred_image_names: list[str] | None = None,
+    asset_type: str = "fine_colmap_sparse_pointcloud",
+    point_source: str = "colmap_sparse_points",
+    default_view_mode: str = "points",
 ) -> dict[str, Any]:
     bounds = read_ply_xyz_bounds(final_ply)
     recommended_view = recommended_training_camera_view(scene_dir, bounds, preferred_image_names=preferred_image_names)
     payload: dict[str, Any] = {
-        "asset_type": "fine_colmap_sparse_pointcloud",
-        "point_source": "colmap_sparse_points",
+        "asset_type": asset_type,
+        "point_source": point_source,
         "num_points": bounds["vertex_count"],
         "point_count_exported": bounds["vertex_count"],
         "bbox_min": bounds["bbox_min"],
@@ -51,7 +54,7 @@ def write_final_viewer_meta_json(
         "scale_applied": 1.0,
         "coordinate_system": "colmap_world",
         "recommended_frontend": {
-            "default_view_mode": "points",
+            "default_view_mode": default_view_mode,
         },
     }
     if recommended_view is not None:

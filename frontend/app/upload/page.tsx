@@ -7,8 +7,7 @@ import { api, formatBytes, mediaFileUrl, mediaThumbnailUrl } from "@/lib/api";
 import type { TransferProgress } from "@/lib/api";
 import { formatDateTime, inputTypeLabel, isActiveTask, projectStatusLabel } from "@/lib/labels";
 import { rememberTaskId } from "@/lib/taskTracking";
-import type { Artifact, MediaAsset, Project, Task, ViewerConfig } from "@/lib/types";
-import { PointCloudPreviewViewer } from "@/components/PointCloudPreviewViewer";
+import type { MediaAsset, Project, Task, ViewerConfig } from "@/lib/types";
 import { SplatViewer } from "@/components/SplatViewer";
 import { TaskProgress } from "@/components/TaskProgress";
 
@@ -31,6 +30,10 @@ function sceneTypeForProfile(profile: PreviewSceneProfile): SceneType {
 
 function sceneTypeForVideoPreview(profile: PreviewSceneProfile): "indoor" | "outdoor" {
   return profile === "outdoor_fast_clean" ? "outdoor" : "indoor";
+}
+
+function videoMaxInputFrames(): number {
+  return 300;
 }
 
 export default function UploadPage() {
@@ -62,10 +65,6 @@ export default function UploadPage() {
     (project.input_type === "images" && imageCount >= MIN_FINE_INPUT_FRAMES) ||
     (project.input_type === "video" && videoCount === 1 && media.length === 1)
   ));
-  const pointCloudArtifact = useMemo(
-    () => pointCloudArtifactFromViewer(viewer, project),
-    [viewer, project]
-  );
 
   useEffect(() => {
     return () => {
@@ -178,8 +177,11 @@ export default function UploadPage() {
     try {
       const options: Record<string, unknown> = {};
       if (project.input_type === "video") {
-        options.pipeline = "lingbot_video_pointcloud_fast";
+        options.pipeline = "litevggt_spz";
+        options.preview_scene_profile = previewSceneProfile;
         options.scene_type = sceneTypeForVideoPreview(previewSceneProfile);
+        options.litevggt_preprocess_mode = "pad";
+        options.litevggt_max_input_frames = videoMaxInputFrames();
       } else {
         options.pipeline = "litevggt_spz";
         options.preview_scene_profile = previewSceneProfile;
@@ -435,14 +437,7 @@ export default function UploadPage() {
           </div>
           <div className="panel-body scrollable" style={{ padding: 0 }}>
             {viewer?.stale ? <div className="notice-box preview-stale">{viewer.message}</div> : null}
-            {viewer?.status === "ready" && pointCloudArtifact ? (
-              <PointCloudPreviewViewer
-                artifact={pointCloudArtifact}
-                pointSize={viewer.viewer_default_point_size ?? 0.00001}
-                downsampleFactor={viewer.viewer_default_downsample_factor ?? 10}
-                confidenceThreshold={viewer.viewer_default_conf_threshold ?? 1.5}
-              />
-            ) : viewer?.status === "ready" ? (
+            {viewer?.status === "ready" ? (
               <SplatViewer
                 modelUrl={viewer.model_url}
                 format={viewer.format}
@@ -511,31 +506,6 @@ async function runUploadPool<T>(items: T[], concurrency: number, worker: (item: 
 
 function mediaResolutionLabel(media: MediaAsset): string {
   return media.width && media.height ? `${media.width} x ${media.height}` : "resolution pending";
-}
-
-function pointCloudArtifactFromViewer(viewer: ViewerConfig | null, project: Project | null): Artifact | null {
-  if (viewer?.status !== "ready") return null;
-  if (viewer.format !== "ply" && viewer.artifact_kind !== "preview_pointcloud_ply") return null;
-  const url = viewer.debug_points_ply_url ?? viewer.download_ply_url;
-  if (!url) return null;
-  return {
-    id: viewer.artifact_id ?? "preview-pointcloud",
-    project_id: project?.id ?? "",
-    task_id: "",
-    kind: viewer.artifact_kind ?? "preview_pointcloud_ply",
-    object_uri: url,
-    file_name: viewer.artifact_file_name ?? "preview_fast.ply",
-    file_size: viewer.file_size ?? 0,
-    format: "ply",
-    metadata: {
-      scene_type: viewer.scene_type,
-      artifact_display: viewer.artifact_display,
-      viewer_default_point_size: viewer.viewer_default_point_size,
-      viewer_default_downsample_factor: viewer.viewer_default_downsample_factor,
-      viewer_default_conf_threshold: viewer.viewer_default_conf_threshold
-    },
-    created_at: project?.updated_at ?? new Date(0).toISOString()
-  };
 }
 
 function TransferProgressBar({ progress }: { progress: (TransferProgress & { fileIndex: number; totalFiles: number }) | null }) {

@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 
-FINE_PIPELINE_NAME = "colmap_sparse"
-LEGACY_FINE_PIPELINE_ALIASES: set[str] = set()
+FINE_PIPELINE_NAME = "dash_deblur_group_gs"
+LEGACY_FINE_PIPELINE_ALIASES: set[str] = {"colmap_sparse"}
 
 FINE_SCENE_PROFILE_MAX_SIDES = {
-    "mixed_balanced": 1080,
-    "indoor_full": 1500,
-    "outdoor_fast_clean": 1080,
+    "mixed_balanced": 3200,
+    "indoor_full": 4000,
+    "outdoor_fast_clean": 2400,
 }
 DEFAULT_FINE_SCENE_PROFILE = "mixed_balanced"
-FINE_IMAGE_MAX_SIDE = 1500
-FINE_ITERATIONS = 1
+FINE_IMAGE_MAX_SIDE = 4096
+FINE_ITERATIONS = 24_000
 
 COLMAP_SIFT_MAX_NUM_FEATURES = 65_536
 COLMAP_MAX_IMAGE_SIZE = 3_200
@@ -21,7 +21,7 @@ COLMAP_SIFT_ESTIMATE_AFFINE_SHAPE = True
 COLMAP_SIFT_DOMAIN_SIZE_POOLING = True
 COLMAP_GUIDED_MATCHING = True
 COLMAP_SIFT_MATCH_MAX_RATIO = 0.85
-COLMAP_MIN_SPARSE_POINTS = 15_000
+COLMAP_MIN_SPARSE_POINTS = 0
 COLMAP_TARGET_SPARSE_POINTS = 30_000
 COLMAP_THREADS = 16
 COLMAP_MATCHER = "exhaustive"

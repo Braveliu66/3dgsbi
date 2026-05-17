@@ -1139,7 +1139,7 @@ def create_preview_task(
     if project.input_type == "images" and not any(item.kind == "image" for item in project.media):
         raise HTTPException(status_code=400, detail="图片预览至少需要 1 张图片")
     payload_options = payload.options or {}
-    default_pipeline = "lingbot_video_pointcloud_fast" if project.input_type == "video" else "litevggt_spz"
+    default_pipeline = "litevggt_spz"
     requested_pipeline = payload_options.get("pipeline") or payload_options.get("preview_pipeline")
     pipeline = normalize_preview_pipeline(str(requested_pipeline or ""), default_pipeline)
     scene_for_defaults = normalize_parameter_scene_type(
@@ -1179,11 +1179,14 @@ def create_preview_task(
         video_count = sum(1 for item in project.media if item.kind == "video")
         if video_count != 1 or len(project.media) != 1:
             raise HTTPException(status_code=400, detail="Video preview requires exactly one video file")
-        if pipeline != "lingbot_video_pointcloud_fast":
+        if pipeline != "litevggt_spz":
             raise HTTPException(status_code=400, detail=f"Unsupported preview pipeline for video input: {pipeline}")
-        options.pop("preview_scene_profile", None)
         options["scene_type"] = normalize_preview_video_scene_type(
             options.get("scene_type") or options.get("preview_scene_type")
+        )
+        options["preview_scene_profile"] = normalize_preview_scene_profile(
+            options.get("preview_scene_profile")
+            or ("outdoor_fast_clean" if options["scene_type"] == "outdoor" else "indoor_full")
         )
     else:
         raise HTTPException(status_code=400, detail="Preview input type is unsupported")
@@ -1271,7 +1274,7 @@ def create_fine_task(
     payload_options = {
         key: value
         for key, value in payload_options.items()
-        if key != "fastgs_target" and not key.startswith("fine_fastgs_") and not key.startswith("fine_deblur_")
+        if key != "fastgs_target" and not key.startswith("fine_fastgs_")
     }
     options = {
         **payload_options,
@@ -1635,7 +1638,7 @@ def project_viewer_payload(project: Project) -> dict[str, Any]:
                 "preview_meta_url": artifact_url(preview_meta) if preview_meta else None,
                 "camera_path_url": artifact_url(preview_camera_path) if preview_camera_path else None,
                 "quality_warning": metadata.get("quality_warning"),
-                "point_source": metadata.get("point_source") or metadata.get("lingbot_point_source"),
+                "point_source": metadata.get("point_source"),
                 "scene_type": metadata.get("scene_type"),
                 "artifact_display": metadata.get("artifact_display"),
                 "viewer_default_point_size": metadata.get("viewer_default_point_size"),
@@ -1656,8 +1659,7 @@ def project_viewer_payload(project: Project) -> dict[str, Any]:
             "download_ply_url": artifact_url(preview_ply, download=True) if preview_ply else None,
             "preview_meta_url": artifact_url(preview_meta) if preview_meta else None,
             "quality_warning": (preview_model.metadata_json or {}).get("quality_warning"),
-            "point_source": (preview_model.metadata_json or {}).get("point_source")
-            or (preview_model.metadata_json or {}).get("lingbot_point_source"),
+            "point_source": (preview_model.metadata_json or {}).get("point_source"),
         }
 
     final_artifacts = [item for item in project.artifacts if item.kind in {"final_spz", "lod_rad"}]
@@ -1719,8 +1721,7 @@ def viewer_config(project_id: str, user: User = Depends(get_current_user), db: S
             "debug_splats_ply_url": artifact_url(debug_splats) if debug_splats else None,
             "preview_meta_url": artifact_url(preview_meta) if preview_meta else None,
             "quality_warning": (artifact.metadata_json or {}).get("quality_warning"),
-            "point_source": (artifact.metadata_json or {}).get("point_source")
-            or (artifact.metadata_json or {}).get("lingbot_point_source"),
+            "point_source": (artifact.metadata_json or {}).get("point_source"),
         }
     if final_artifacts:
         return {

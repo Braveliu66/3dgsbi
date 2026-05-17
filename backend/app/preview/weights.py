@@ -30,22 +30,16 @@ LITEVGGT_WEIGHT = ModelWeight(
     "litevggt/te_dict.pt",
     "https://huggingface.co/ZhijianShu/LiteVGGT/resolve/main/te_dict.pt",
 )
-LINGBOT_MAP_LONG_WEIGHT = ModelWeight(
-    "lingbot/lingbot-map-long.pt",
-    "https://huggingface.co/robbyant/lingbot-map/resolve/main/lingbot-map-long.pt",
-)
 
 MODEL_WEIGHTS: tuple[ModelWeight, ...] = (
     LITEVGGT_WEIGHT,
-    LINGBOT_MAP_LONG_WEIGHT,
 )
 WEIGHT_BY_RELATIVE_PATH = {item.relative_path: item for item in MODEL_WEIGHTS}
 
 PIPELINE_WEIGHT_PATHS: dict[str, tuple[str, ...]] = {
     "litevggt_spz": ("litevggt/te_dict.pt",),
-    "lingbot_map_spz": ("lingbot/lingbot-map-long.pt",),
-    "lingbot_video_pointcloud_fast": ("lingbot/lingbot-map-long.pt",),
     "colmap_sparse": (),
+    "dash_deblur_group_gs": (),
 }
 
 

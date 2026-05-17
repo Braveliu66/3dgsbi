@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import shutil
+import importlib
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -9,7 +12,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.config import Settings, get_settings
+from app.config import Settings, get_settings, resolve_local_path
 from app.models import AlgorithmRegistry, WorkerHeartbeat
 from app.preview.io.spz import locate_spark_cli
 from app.preview.utils import prepend_sys_path
@@ -19,6 +22,49 @@ from app.resources import collect_gpu, python_info, torch_info
 
 VENDOR_ROOT = Path(__file__).resolve().parent / "preview" / "vendor"
 FINE_ROOT = Path(__file__).resolve().parent / "fine"
+
+
+ALGORITHM_DEPENDENCIES: dict[str, dict[str, Any]] = {
+    "LiteVGGT": {
+        "python_modules": [
+            "torch",
+            "torchvision",
+            "transformer_engine.pytorch",
+            "einops",
+            "cv2",
+            "PIL",
+            "numpy",
+            "huggingface_hub",
+        ],
+        "executables": ["node"],
+        "requires_cuda": True,
+    },
+    "Spark SPZ": {
+        "python_modules": [],
+        "executables": ["node"],
+        "requires_cuda": False,
+    },
+    "DashDeblurGroupGS Fine": {
+        "python_modules": [
+            "torch",
+            "torchvision",
+            "pycolmap",
+            "cv2",
+            "PIL",
+            "numpy",
+            "plyfile",
+            "scipy",
+            "tqdm",
+            "lpips",
+            "pytorch_msssim",
+            "sklearn",
+            "diff_gaussian_rasterization",
+            "simple_knn._C",
+        ],
+        "executables": ["colmap", "ffmpeg", "node", "git"],
+        "requires_cuda": True,
+    },
+}
 
 
 ALGORITHMS: list[dict[str, Any]] = [
@@ -36,32 +82,6 @@ ALGORITHMS: list[dict[str, Any]] = [
         "notes": "Bundled LiteVGGT direct point cloud preview.",
     },
     {
-        "name": "LingBot-Map Video Preview",
-        "repo_url": "https://github.com/Robbyant/lingbot-map",
-        "license": "Apache-2.0",
-        "commit_hash_setting": "lingbot_map_repo_commit",
-        "local_path": Path(__file__).resolve().parent / "preview" / "adapters" / "lingbot.py",
-        "enabled": True,
-        "weight_paths": ["lingbot/lingbot-map-long.pt"],
-        "commands": {},
-        "source_type": "pinned_runtime_package",
-        "license_notice": "Apache-2.0; worker installs the LingBot-Map core package at a pinned commit and excludes optional rendering/visualization dependencies.",
-        "notes": "Legacy video preview pipeline: sampled video frames -> LingBot-Map windowed RGB-D reconstruction -> per-frame NPZ -> Spark plain PLY -> Spark SPZ. It does not use LingBot offline rendering, Kaolin, Open3D, viser, sky segmentation, or custom render CUDA extensions.",
-    },
-    {
-        "name": "LingBot Video Point Cloud Fast",
-        "repo_url": "https://github.com/Robbyant/lingbot-map",
-        "license": "Apache-2.0",
-        "commit_hash_setting": "lingbot_map_repo_commit",
-        "local_path": Path(__file__).resolve().parent / "preview" / "adapters" / "lingbot_pointcloud.py",
-        "enabled": True,
-        "weight_paths": ["lingbot/lingbot-map-long.pt"],
-        "commands": {},
-        "source_type": "pinned_runtime_package",
-        "license_notice": "Apache-2.0; worker installs the LingBot-Map core package at a pinned commit and exports depth-reprojected PLY point clouds without Spark SPZ conversion.",
-        "notes": "Default video preview pipeline: ffmpeg raw frame stream -> windowed LingBot-Map inference -> depth-world point export -> streaming voxel PLY LODs.",
-    },
-    {
         "name": "Spark SPZ",
         "repo_url": "https://github.com/sparkjsdev/spark",
         "license": "MIT",
@@ -75,17 +95,17 @@ ALGORITHMS: list[dict[str, Any]] = [
         "notes": "Spark-readable SPZ conversion/validation.",
     },
     {
-        "name": "Image Fine (COLMAP Sparse)",
-        "repo_url": "https://colmap.github.io/",
-        "license": "BSD-3-Clause",
+        "name": "DashDeblurGroupGS Fine",
+        "repo_url": "https://github.com/benhenryL/Deblurring-3D-Gaussian-Splatting",
+        "license": "Research",
         "commit_hash_setting": None,
         "local_path": FINE_ROOT / "runner.py",
         "enabled": True,
         "weight_paths": [],
         "commands": {},
-        "source_type": "system",
-        "license_notice": "Fine reconstruction uses COLMAP CLI/pycolmap sparse reconstruction only.",
-        "notes": "Default fine reconstruction pipeline: image or video-frame normalization, COLMAP sparse scene, and sparse PLY export.",
+        "source_type": "bundled",
+        "license_notice": "Fine reconstruction uses system COLMAP/pycolmap plus the embedded DashDeblurGroupGS worker trainer.",
+        "notes": "Default fine reconstruction pipeline: image or video-frame normalization, existing COLMAP scene construction, embedded DashDeblurGroupGS training, final PLY/SPZ export.",
     },
 ]
 
@@ -130,18 +150,12 @@ def seed_algorithm_registry(db: Session, settings: Settings | None = None) -> No
     db.commit()
 
 
-def normalize_preview_pipeline(value: str | None, default: str = "lingbot_video_pointcloud_fast") -> str:
+def normalize_preview_pipeline(value: str | None, default: str = "litevggt_spz") -> str:
     normalized = (value or default).strip().lower()
     aliases = {
         "litevggt_spark": "litevggt_spz",
         "litevggt_spz": "litevggt_spz",
         "direct": "litevggt_spz",
-        "lingbot": "lingbot_video_pointcloud_fast",
-        "lingbot_map": "lingbot_video_pointcloud_fast",
-        "lingbot_map_spz": "lingbot_video_pointcloud_fast",
-        "video_lingbot": "lingbot_video_pointcloud_fast",
-        "lingbot_video_pointcloud_fast": "lingbot_video_pointcloud_fast",
-        "lingbot_pointcloud": "lingbot_video_pointcloud_fast",
     }
     return aliases.get(normalized, normalized)
 
@@ -152,9 +166,12 @@ def runtime_preflight(db: Session, settings: Settings | None = None) -> dict[str
     errors: list[str] = []
     warnings: list[str] = []
     fine_workers = fine_worker_status(db)
+    preview_workers = preview_worker_status(db)
     for item in db.scalars(select(AlgorithmRegistry).order_by(AlgorithmRegistry.name)).all():
         issues = []
         module_status = bundled_module_status(item.name)
+        dependency_status = algorithm_dependency_status(item.name)
+        worker_runtime_available = worker_runtime_for_algorithm(item.name, preview_workers, fine_workers)
         weights_ready = True
         weight_statuses = []
         extensions_ready = True
@@ -168,18 +185,16 @@ def runtime_preflight(db: Session, settings: Settings | None = None) -> dict[str
                 if not status["exists"]:
                     issues.append(f"weight missing: {weight_path}")
                     weights_ready = False
+            if not worker_runtime_available:
+                for missing in dependency_status["missing"]:
+                    issues.append(f"dependency missing: {missing}")
             if not module_status.get("available", True):
                 issues.append(f"bundled module import failed: {module_status.get('error')}")
-            if item.name == "Image Fine (COLMAP Sparse)":
+            if item.name == "DashDeblurGroupGS Fine":
                 fine_runtime = fine_runtime_status()
                 extensions_ready = bool(fine_runtime["available"] or fine_workers["available"])
                 if not extensions_ready:
-                    issues.append("worker-fine heartbeat missing and backend fine CUDA runtime unavailable")
-            if item.name in {"LingBot-Map Video Preview", "LingBot Video Point Cloud Fast"}:
-                lingbot_runtime = lingbot_preview_runtime_status()
-                extensions_ready = bool(lingbot_runtime["available"] or preview_worker_status(db)["available"])
-                if not extensions_ready:
-                    issues.append("worker-preview heartbeat missing and backend LingBot-Map runtime unavailable")
+                    issues.append("worker-fine heartbeat missing and backend fine runtime unavailable")
             if item.name == "Spark SPZ":
                 if not spz_converter_ready["available"]:
                     issues.append(f"Spark SPZ converter unavailable: {spz_converter_ready['error']}")
@@ -205,6 +220,7 @@ def runtime_preflight(db: Session, settings: Settings | None = None) -> dict[str
                 "extensions_ready": extensions_ready,
                 "spz_converter_ready": spz_converter_ready["available"],
                 "module": module_status,
+                "dependencies": dependency_status,
                 "issues": issues,
             }
         )
@@ -219,7 +235,7 @@ def runtime_preflight(db: Session, settings: Settings | None = None) -> dict[str
         "gpu": gpu,
         "torch": torch,
         "transformer_engine": import_check("transformer_engine"),
-        "preview_runtime": {"lingbot_map": lingbot_preview_runtime_status(), "worker_preview": preview_worker_status(db)},
+        "preview_runtime": {"litevggt": litevggt_runtime_status(), "worker_preview": preview_workers},
         "fine_runtime": {**fine_runtime_status(), "worker_fine": fine_workers},
         "spz_converter": spark_converter_status(),
         "algorithms": algorithms,
@@ -284,24 +300,76 @@ def fine_worker_status(db: Session) -> dict[str, Any]:
         "active_count": len(active),
         "stale_count": max(0, len(workers) - len(active)),
         "workers": active,
-        "note": "worker-fine runs from the same CUDA/PyTorch worker image and model-cache as preview.",
+        "note": "worker-fine runs COLMAP preprocessing and DashDeblurGroupGS training from the configured worker image.",
     }
 
 
 def import_check(module_name: str) -> dict[str, Any]:
     try:
-        module = __import__(module_name)
-        return {"available": True, "version": getattr(module, "__version__", None)}
+        module = importlib.import_module(module_name)
+        root = module_name.split(".", 1)[0]
+        root_module = importlib.import_module(root) if root != module_name else module
+        return {"available": True, "version": getattr(module, "__version__", None) or getattr(root_module, "__version__", None)}
     except Exception as exc:
         return {"available": False, "error": str(exc)}
+
+
+def algorithm_dependency_status(name: str) -> dict[str, Any]:
+    spec = ALGORITHM_DEPENDENCIES.get(name, {})
+    module_status = {module: import_check(module) for module in spec.get("python_modules", [])}
+    executable_statuses = {
+        executable: executable_status(executable, executable_version_args(executable))
+        for executable in spec.get("executables", [])
+    }
+    torch_status = torch_info() if spec.get("requires_cuda") else None
+    missing = [
+        f"python:{module}"
+        for module, status in module_status.items()
+        if not status.get("available")
+    ]
+    missing.extend(
+        f"command:{command}"
+        for command, status in executable_statuses.items()
+        if not status.get("available")
+    )
+    if spec.get("requires_cuda") and not (torch_status or {}).get("cuda_available"):
+        missing.append("cuda:torch")
+    return {
+        "python_modules": module_status,
+        "executables": executable_statuses,
+        "requires_cuda": bool(spec.get("requires_cuda")),
+        "torch_cuda": torch_status,
+        "missing": missing,
+        "available": not missing,
+    }
+
+
+def worker_runtime_for_algorithm(name: str, preview_workers: dict[str, Any], fine_workers: dict[str, Any]) -> bool:
+    if name == "DashDeblurGroupGS Fine":
+        return bool(fine_workers.get("available"))
+    if name == "Spark SPZ":
+        return bool(preview_workers.get("available") or fine_workers.get("available"))
+    if name == "LiteVGGT":
+        return bool(preview_workers.get("available"))
+    return False
+
+
+def executable_version_args(command: str) -> list[str]:
+    if command == "node":
+        return ["--version"]
+    if command == "git":
+        return ["--version"]
+    if command == "ffmpeg":
+        return ["-version"]
+    if command == "colmap":
+        return ["help"]
+    return ["--version"]
 
 
 def bundled_module_status(name: str) -> dict[str, Any]:
     modules = {
         "LiteVGGT": "app.preview.vendor.litevggt_runtime",
-        "LingBot-Map Video Preview": "app.preview.adapters.lingbot",
-        "LingBot Video Point Cloud Fast": "app.preview.adapters.lingbot_pointcloud",
-        "Image Fine (COLMAP Sparse)": "app.fine.runner",
+        "DashDeblurGroupGS Fine": "app.fine.runner",
         "Spark SPZ": "app.preview.io.spz",
     }
     module = modules.get(name)
@@ -313,12 +381,16 @@ def fine_runtime_status() -> dict[str, Any]:
     spark_status = spark_converter_status()
     colmap_status = colmap_cli_status()
     ffmpeg_status = executable_status("ffmpeg", ["-version"])
+    trainer_status = dash_deblur_group_status()
+    dependencies = algorithm_dependency_status("DashDeblurGroupGS Fine")
     modules = {
         "pycolmap": import_check("pycolmap"),
     }
     available = bool(
         colmap_status.get("available")
         and ffmpeg_status.get("available")
+        and trainer_status.get("available")
+        and dependencies.get("available")
         and all(item.get("available") for item in modules.values())
     )
     return {
@@ -327,8 +399,36 @@ def fine_runtime_status() -> dict[str, Any]:
         "spark_spz": spark_status,
         "colmap_cli": colmap_status,
         "ffmpeg": ffmpeg_status,
+        "dash_deblur_group": trainer_status,
+        "dependencies": dependencies,
         **modules,
-        "error": None if available else "COLMAP CLI/ffmpeg/pycolmap check failed",
+        "error": None if available else "COLMAP CLI/ffmpeg/pycolmap/DashDeblurGroupGS check failed",
+    }
+
+
+def dash_deblur_group_status() -> dict[str, Any]:
+    from app.fine.dash_deblur_group import default_embedded_trainer_dir, detect_trainer_flavor
+
+    repo_value = os.getenv("DASH_DEBLUR_GROUP_REPO")
+    repo = Path(repo_value).expanduser().resolve() if repo_value else default_embedded_trainer_dir(resolve_local_path(get_settings().repo_cache_dir))
+    train_py = repo / "train.py"
+    flavor = detect_trainer_flavor(repo) if repo.exists() else "unknown"
+    submodules = {
+        "diff_gaussian_rasterization": repo / "submodules" / "diff-gaussian-rasterization",
+        "simple_knn": repo / "submodules" / "simple-knn",
+        "fused_ssim": repo / "submodules" / "fused-ssim",
+    }
+    submodule_status = {
+        name: {"path": str(path), "exists": path.exists()}
+        for name, path in submodules.items()
+    }
+    return {
+        "available": train_py.exists() and train_py.is_file(),
+        "repo": str(repo),
+        "entrypoint": str(train_py),
+        "flavor": flavor,
+        "submodules": submodule_status,
+        "error": None if train_py.exists() else "embedded fine trainer train.py not found; set DASH_DEBLUR_GROUP_REPO only for an explicit override",
     }
 
 
@@ -377,49 +477,24 @@ def colmap_cli_status() -> dict[str, Any]:
     except Exception as exc:
         return {"available": False, "path": executable, "error": str(exc)}
     help_text = completed.stdout or ""
-    required = {"global_mapper", "hierarchical_mapper"}
-    missing = sorted(command for command in required if command not in help_text)
+    commands = {match.group(1) for match in re.finditer(r"^\s+([a-z_]+)(?:\s|$)", help_text, flags=re.MULTILINE)}
+    required = {"feature_extractor", "mapper", "image_undistorter", "model_analyzer"}
+    optional = {"global_mapper", "hierarchical_mapper", "view_graph_calibrator", "model_clusterer", "model_splitter"}
+    missing = sorted(command for command in required if command not in commands and not colmap_help_contains_command(help_text, command))
     return {
         "available": completed.returncode == 0 and not missing,
         "path": executable,
         "returncode": completed.returncode,
         "required_commands": sorted(required),
+        "optional_commands": {command: command in commands or colmap_help_contains_command(help_text, command) for command in sorted(optional)},
         "missing_commands": missing,
         "error": None if completed.returncode == 0 and not missing else f"missing COLMAP CLI commands: {', '.join(missing)}",
     }
 
 
-def lingbot_preview_runtime_status() -> dict[str, Any]:
-    torch_status = torch_info()
-    spark_status = spark_converter_status()
-    modules = {
-        "lingbot_adapter": import_check("app.preview.adapters.lingbot"),
-        "lingbot_map": import_check("lingbot_map.models.gct_stream"),
-        "opencv": import_check("cv2"),
-        "einops": import_check("einops"),
-        "safetensors": import_check("safetensors"),
-        "flashinfer": import_check("flashinfer"),
-    }
-    unavailable_required = [
-        name
-        for name, status in modules.items()
-        if not status.get("available")
-    ]
-    available = bool(
-        torch_status.get("available")
-        and torch_status.get("cuda_available")
-        and not unavailable_required
-    )
-    return {
-        "available": available,
-        "torch_cuda": torch_status,
-        "spark_spz": spark_status,
-        **modules,
-        "flashinfer_required": True,
-        "sdpa_fallback_requires_option": True,
-        "sdpa_fallback": not modules["flashinfer"].get("available"),
-        "error": None if available else "CUDA torch/LingBot-Map core runtime check failed",
-    }
+def colmap_help_contains_command(help_text: str, command: str) -> bool:
+    pattern = rf"(?<![A-Za-z0-9_]){re.escape(command)}(?![A-Za-z0-9_])"
+    return re.search(pattern, help_text) is not None
 
 
 def litevggt_runtime_status() -> dict[str, Any]:

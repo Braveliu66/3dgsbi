@@ -159,7 +159,7 @@ def read_fixed_pointcloud_ply(input_points_ply: Path) -> tuple[int, np.ndarray]:
     else:
         raise PreviewFailure(
             "PLY_INVALID",
-            f"point-cloud PLY schema does not match LingBot preview schema: {input_points_ply}",
+            f"point-cloud PLY schema does not match the preview point-cloud schema: {input_points_ply}",
         )
     body = payload[header_end + len(b"end_header\n") :]
     required_size = count * dtype.itemsize

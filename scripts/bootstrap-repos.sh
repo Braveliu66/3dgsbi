@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Optional maintainer helper. Runtime does not use repo-cache; bundled preview
-# code lives in backend/app/preview/vendor. This script only refreshes upstream
-# comparison copies when updating the vendored implementation.
+# Optional maintainer helper. Preview runtime uses bundled code under
+# backend/app/preview/vendor. Fine training uses the embedded trainer under
+# worker/trainer/dash_deblur_group_gs; this script only refreshes upstream
+# comparison copies for bundled preview code.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CACHE="$ROOT/repo-cache"

@@ -148,11 +148,13 @@ class StorageResponseTests(unittest.TestCase):
             pipelines = {item["pipeline"]: item for item in payload["pipelines"]}
             self.assertEqual({item["value"] for item in payload["scene_types"]}, {"indoor", "outdoor"})
             self.assertIn("litevggt_spz", pipelines)
-            self.assertIn("lingbot_video_pointcloud_fast", pipelines)
+            self.assertNotIn("lingbot_video_pointcloud_fast", pipelines)
             self.assertIn(FINE_PIPELINE_NAME, pipelines)
-            self.assertIn("preview_max_points", {item["key"] for item in pipelines["litevggt_spz"]["fields"]})
-            self.assertIn("preview_lingbot_preprocess_mode", {item["key"] for item in pipelines["lingbot_video_pointcloud_fast"]["fields"]})
-            self.assertIn("preview_lingbot_mask_sky", {item["key"] for item in pipelines["lingbot_video_pointcloud_fast"]["fields"]})
+            litevggt_keys = {item["key"] for item in pipelines["litevggt_spz"]["fields"]}
+            self.assertIn("preview_max_points", litevggt_keys)
+            self.assertIn("preview_fixed_splat_radius_scale", litevggt_keys)
+            self.assertNotIn("preview_video_fps", litevggt_keys)
+            self.assertNotIn("preview_video_max_frames", litevggt_keys)
             colmap_keys = {item["key"] for item in pipelines[FINE_PIPELINE_NAME]["fields"]}
             self.assertIn("fine_sfm_backend", colmap_keys)
             self.assertIn("fine_colmap_matcher", colmap_keys)
@@ -194,26 +196,21 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(loaded.json()["defaults"]["litevggt_spz"]["outdoor"]["preview_max_points"], 1234)
         clear_pipeline_defaults()
 
-    def test_lingbot_pipeline_parameter_defaults_include_preprocess_mode(self) -> None:
+    def test_lingbot_pipeline_parameter_defaults_are_not_supported(self) -> None:
         clear_pipeline_defaults()
         with TestClient(app) as client:
             admin_headers = auth_headers(client)
 
-            saved = client.put(
+            response = client.put(
                 "/api/admin/pipeline-parameter-defaults/lingbot_video_pointcloud_fast/outdoor",
                 json={"options": {"preview_lingbot_preprocess_mode": "pad", "unknown_option": True}},
                 headers=admin_headers,
             )
-            saved.raise_for_status()
-            self.assertEqual(saved.json()["options"]["preview_lingbot_preprocess_mode"], "pad")
-            self.assertNotIn("unknown_option", saved.json()["options"])
+            self.assertEqual(response.status_code, 404)
 
             loaded = client.get("/api/admin/pipeline-parameter-defaults", headers=admin_headers)
             loaded.raise_for_status()
-            self.assertEqual(
-                loaded.json()["defaults"]["lingbot_video_pointcloud_fast"]["outdoor"]["preview_lingbot_preprocess_mode"],
-                "pad",
-            )
+            self.assertNotIn("lingbot_video_pointcloud_fast", loaded.json()["defaults"])
         clear_pipeline_defaults()
 
     def test_task_options_merge_scene_defaults_and_request_overrides(self) -> None:
@@ -709,7 +706,7 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(payload["options"]["scene_type"], "indoor")
             self.assertEqual(payload["options"]["fine_sfm_backend"], "colmap_cli")
 
-    def test_video_preview_task_uses_lingbot_pipeline(self) -> None:
+    def test_video_preview_task_uses_litevggt_pipeline(self) -> None:
         fake_redis = FakeRedis()
         with TestClient(app) as client, patch("app.main.get_redis", return_value=fake_redis):
             headers = auth_headers(client)
@@ -722,13 +719,13 @@ class StorageResponseTests(unittest.TestCase):
 
             self.assertEqual(payload["type"], "preview")
             self.assertEqual(payload["status"], "queued")
-            self.assertEqual(payload["options"]["pipeline"], "lingbot_video_pointcloud_fast")
-            self.assertEqual(payload["options"]["preview_pipeline"], "lingbot_video_pointcloud_fast")
+            self.assertEqual(payload["options"]["pipeline"], "litevggt_spz")
+            self.assertEqual(payload["options"]["preview_pipeline"], "litevggt_spz")
             self.assertEqual(payload["options"]["scene_type"], "indoor")
             self.assertEqual(payload["options"]["source_version"], 1)
             self.assertIn(payload["id"], fake_redis.lists["preview_tasks"])
 
-    def test_video_preview_task_redirects_legacy_lingbot_spz_pipeline(self) -> None:
+    def test_video_preview_task_rejects_legacy_lingbot_spz_pipeline(self) -> None:
         fake_redis = FakeRedis()
         with TestClient(app) as client, patch("app.main.get_redis", return_value=fake_redis):
             headers = auth_headers(client)
@@ -740,12 +737,8 @@ class StorageResponseTests(unittest.TestCase):
                 json={"options": {"preview_pipeline": "lingbot_map_spz", "scene_type": "outdoor"}},
                 headers=headers,
             )
-            response.raise_for_status()
-            payload = response.json()
-
-            self.assertEqual(payload["options"]["pipeline"], "lingbot_video_pointcloud_fast")
-            self.assertEqual(payload["options"]["preview_pipeline"], "lingbot_video_pointcloud_fast")
-            self.assertEqual(payload["options"]["scene_type"], "outdoor")
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("Unsupported preview pipeline for video input: lingbot_map_spz", response.text)
 
     def test_video_preview_task_rejects_missing_or_multiple_videos(self) -> None:
         fake_redis = FakeRedis()

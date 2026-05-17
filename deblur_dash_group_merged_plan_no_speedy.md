@@ -37,6 +37,40 @@ Speedy-Splat：删除，不进入训练，也不作为默认推理路径
 所有 pruning、renderer 替换、部署加速都不进入第一版融合。
 ```
 
+### 本仓库当前对接方式
+
+当前平台实现不把 COLMAP 和训练代码混在一起：
+
+```text
+backend/app/fine/colmap_cli.py
+  只负责现有 COLMAP CLI / pycolmap SfM，输出 COLMAP scene：
+  images/、sparse/0/、database.db
+
+backend/app/fine/dash_deblur_group.py
+  只负责 DashDeblurGroupGS 训练配置生成、训练进程启动、final PLY 定位和 SPZ 转换
+
+backend/app/fine/runner.py
+  编排：输入预处理 -> 现有 COLMAP -> DashDeblurGroupGS -> final.ply/final_web.spz/metrics.json
+```
+
+运行时默认从 `repo-cache/DashDeblurGroupGS/train.py` 启动训练；也可以通过环境变量
+`DASH_DEBLUR_GROUP_REPO` 或任务参数 `fine_trainer_repo` 指向外部训练仓库。旧的
+`colmap_sparse` fine pipeline 名称仅作为兼容别名，新的默认名称是
+`dash_deblur_group_gs`。
+
+依赖策略：
+
+```text
+所有算法共用当前 worker 的 PyTorch/CUDA/Node/COLMAP 环境；
+LiteVGGT、LingBot、Spark 的依赖在 worker 镜像中安装；
+DashDeblurGroupGS 的 pure Python 依赖也在 worker 镜像中安装；
+DashDeblurGroupGS 的 diff_gaussian_rasterization/simple_knn CUDA 扩展从训练仓库 submodules 安装到同一个 Python 环境；
+worker/Dockerfile 通过 `DASH_DEBLUR_GROUP_REPO_URL` / `DASH_DEBLUR_GROUP_REPO_COMMIT` 完成训练仓库 checkout、submodule 初始化和扩展 wheel 构建；
+worker/Dockerfile 同时从源码构建新版 COLMAP，并要求 `global_mapper`、`hierarchical_mapper`、`model_clusterer`、`model_splitter` 在镜像构建期可用；
+本文及后续落地说明中的 FastGS 分块训练语义，在本平台内统一替换为 DashDeblurGroupGS：先全局 COLMAP sparse/0，再基于统一坐标做 DashDeblurGroupGS 分块/调度；
+不额外引入 Speedy-Splat、FastGS renderer 替换或第二套 torch/CUDA。
+```
+
 ---
 
 ## 1. 总体架构

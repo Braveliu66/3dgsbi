@@ -31,10 +31,11 @@
 - 所有第三方算法源码都先放入项目根目录 `repo-cache/<repo-name>`；Docker 构建必须优先复用本地缓存，缺失时先尝试国内镜像源再回退官方源。
 - 源码、配置和文档统一使用 UTF-8 编码；Windows PowerShell 若显示乱码，应先切换终端编码或使用 UTF-8 读取。
 
-## 2026-05-14 Image Fine COLMAP/FastGS Notes
+## 2026-05-18 Image Fine COLMAP/DashDeblurGroup Notes
 
-- Image fine `official_fastgs_big` defaults to pycolmap/COLMAP initialization, writes a COLMAP-compatible `sparse/0` scene, then runs vendored official FastGS-Big training.
-- `fine_sfm_backend=pycolmap` is the implementation default; `fine_sfm_backend=colmap` is accepted as an alias.
+- Image fine `dash_deblur_group_gs` defaults to the existing COLMAP CLI initialization, writes a COLMAP-compatible `images/` and `sparse/0` scene, then runs the embedded trainer from `worker/trainer/dash_deblur_group_gs` copied to `/opt/dash_deblur_group_gs`. `DASH_DEBLUR_GROUP_REPO` is only for explicit compatible trainer overrides.
+- `fine_sfm_backend=colmap_cli` is the implementation default; `fine_sfm_backend=colmap` is accepted as an alias and `pycolmap` remains available.
+- `colmap_sparse` is only a legacy fine pipeline alias.
 - Preview LiteVGGT keeps separate speed-oriented defaults with fewer frames and points.
 - Docker and task-specific downloads must prefer `https://hf-mirror.com`.
 

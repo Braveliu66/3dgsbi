@@ -141,17 +141,14 @@ viewer          Spark 2.0
 - `GET /api/projects/{project_id}/viewer-config` 当前返回单个预览或最终模型；视频/实时视频渐进加载待新管线重新定义。
 - Viewer 以 800 万 Gaussians 为默认预算，根据 FPS、网络状况和时间线位置自动降低远处/旧片段的 LOD 质量，目标保持 90 FPS。
 
-## 2026-05-07 Fine Pipeline Update
+## 2026-05-18 Fine Pipeline Update
 
 - Fine reconstruction accepts ordinary JPG/PNG uploads. EXIF camera parameters are not required; EXIF is used only for orientation correction.
-- Preview LiteVGGT remains isolated under the preview vendor path. Fine SfM metrics include `sfm_backend=pycolmap`, registered image count, and sparse point count.
-- The vendored FastGS-Big trainer includes the Deblurring-3DGS GTnet method. It models blurred observations during training and still exports a standard sharp Gaussian PLY.
-- The worker image keeps one CUDA/PyTorch baseline, one FastGS rasterizer, one `simple_knn`, and one `fused_ssim`.
+- Preview LiteVGGT remains isolated under the preview vendor path. Fine SfM metrics include `sfm_backend=colmap_cli` or `pycolmap`, registered image count, and sparse point count.
+- The active fine pipeline is `dash_deblur_group_gs`: existing COLMAP scene construction feeds the embedded DashDeblurGroupGS trainer.
+- Deblurring-3DGS GTnet, DashGaussian scheduling, and non-destructive Group Training live under `worker/trainer/dash_deblur_group_gs`; backend code generates config, runs `train.py`, validates `final.ply`, and converts `final_web.spz`.
+- The backend does not vendor Speedy-Splat, FastGS pruning, duplicate rasterizers, `simple_knn`, or `fused_ssim`.
+- Where earlier planning notes say "FastGS chunk training", this platform now means DashDeblurGroupGS chunk-compatible training on one global COLMAP `sparse/0` coordinate system.
+- Worker Docker builds upstream COLMAP with large-scene commands (`global_mapper`, `hierarchical_mapper`, `model_clusterer`, `model_splitter`) so large-scene behavior is an image guarantee, not a runtime surprise.
 
-
-- GTnet uses a default 3000-iteration warmup and activates inside the official FastGS-Big training path.
-
-## 2026-05-16 Fine Pipeline Cleanup
-
-- The active fine pipeline is `official_fastgs_big`.
-- Removed inactive MobileGS/LM-RS, LiteVGGT-fine, and video-fine code paths from the backend.
+- `colmap_sparse` is retained only as a legacy fine pipeline alias.
