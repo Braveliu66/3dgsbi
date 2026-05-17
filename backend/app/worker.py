@@ -387,7 +387,9 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
             if not task or not project:
                 return
 
-            pipeline = normalize_preview_pipeline((task.options or {}).get("preview_pipeline"), project.input_type)
+            default_pipeline = "lingbot_video_pointcloud_fast" if project.input_type == "video" else "litevggt_spz"
+            requested_pipeline = (task.options or {}).get("pipeline") or (task.options or {}).get("preview_pipeline")
+            pipeline = normalize_preview_pipeline(requested_pipeline, default_pipeline)
             print(
                 "[preview-worker] task context "
                 f"task_id={task.id} project_id={project.id} project_name={project.name!r} "
@@ -802,6 +804,7 @@ def preview_artifact_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "lingbot_sampled_fps",
         "lingbot_frame_width",
         "lingbot_frame_height",
+        "lingbot_scene_type",
         "lingbot_image_size",
         "lingbot_target_width",
         "lingbot_target_height",
@@ -839,6 +842,8 @@ def preview_artifact_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "lingbot_conf_percentile_fast",
         "lingbot_conf_percentile_full",
         "lingbot_min_conf",
+        "lingbot_mask_sky",
+        "lingbot_sky_points_removed",
         "lingbot_max_points",
         "lingbot_save_predictions",
         "lingbot_keyframes_only_points",
@@ -867,6 +872,11 @@ def preview_artifact_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "preview_full_voxel_points",
         "preview_full_points_removed_by_voxel",
         "preview_scene_profile",
+        "scene_type",
+        "artifact_display",
+        "viewer_default_point_size",
+        "viewer_default_downsample_factor",
+        "viewer_default_conf_threshold",
         "point_source",
         "point_count_raw",
         "point_count_exported",
@@ -1014,7 +1024,7 @@ def estimate_eta(task: Task, project: Project, started: float) -> int | None:
 
 
 def expected_seconds_for_task(task: Task, project: Project) -> int:
-    pipeline = str((task.options or {}).get("preview_pipeline") or "")
+    pipeline = str((task.options or {}).get("pipeline") or (task.options or {}).get("preview_pipeline") or "")
     return expected_seconds_for_pipeline(pipeline)
 
 

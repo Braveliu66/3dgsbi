@@ -6,6 +6,9 @@ import type {
   AuthResponse,
   FeedbackEntry,
   MediaAsset,
+  PipelineParameterDefaultsResponse,
+  PipelineParameterSchema,
+  PipelineSceneType,
   Project,
   ProjectShareResponse,
   RuntimePreflight,
@@ -624,6 +627,13 @@ export const api = {
   adminUsers: () => request<{ users: AdminUserUsage[] }>("/api/admin/users"),
   adminFeedback: () => request<{ feedback: FeedbackEntry[] }>("/api/admin/feedback"),
   workers: () => request<{ workers: unknown[]; message?: string }>("/api/admin/workers"),
+  pipelineParameterSchema: () => request<PipelineParameterSchema>("/api/pipeline-parameters/schema", { auth: false }),
+  pipelineParameterDefaults: () => request<PipelineParameterDefaultsResponse>("/api/admin/pipeline-parameter-defaults"),
+  savePipelineParameterDefaults: (pipeline: string, sceneType: PipelineSceneType, options: Record<string, unknown>) =>
+    request<{ pipeline: string; scene_type: PipelineSceneType; options: Record<string, unknown>; updated_at: string }>(
+      `/api/admin/pipeline-parameter-defaults/${encodeURIComponent(pipeline)}/${sceneType}`,
+      { method: "PUT", body: JSON.stringify({ options }) }
+    ),
   projectSummary: () => request<Record<string, number>>("/api/projects/summary"),
   projects: () => request<{ projects: Project[] }>("/api/projects"),
   project: (id: string) => request<Project>(`/api/projects/${id}`),

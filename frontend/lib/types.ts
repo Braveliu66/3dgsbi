@@ -156,6 +156,7 @@ export interface Artifact {
   object_uri: string;
   file_name: string;
   file_size: number;
+  format?: "spz" | "rad" | "ply";
   checksum?: string | null;
   metadata?: Record<string, unknown>;
   source_version?: number;
@@ -177,6 +178,8 @@ export interface ViewerConfig {
   mode?: "single";
   source?: "final" | "preview";
   artifact_id?: string;
+  artifact_kind?: string;
+  artifact_file_name?: string;
   file_size?: number | null;
   model_url?: string | null;
   download_spz_url?: string | null;
@@ -189,6 +192,11 @@ export interface ViewerConfig {
   camera_path_url?: string | null;
   quality_warning?: string | null;
   point_source?: string | null;
+  scene_type?: "indoor" | "outdoor" | string | null;
+  artifact_display?: string | null;
+  viewer_default_point_size?: number | null;
+  viewer_default_downsample_factor?: number | null;
+  viewer_default_conf_threshold?: number | null;
   lods?: ViewerLod[];
   format?: "spz" | "rad" | "ply";
   message?: string;
@@ -257,4 +265,35 @@ export interface RuntimePreflight {
   algorithms: RuntimePreflightAlgorithm[];
   errors: string[];
   warnings: string[];
+}
+
+export type PipelineSceneType = "indoor" | "outdoor";
+export type PipelineParameterType = "number" | "nullable_number" | "boolean" | "select" | "deblur_switch";
+
+export interface PipelineParameterField {
+  key: string;
+  label: string;
+  type: PipelineParameterType;
+  group: string;
+  description: string;
+  min?: number;
+  max?: number;
+  step?: number;
+  options?: string[];
+}
+
+export interface PipelineParameterSchemaItem {
+  pipeline: string;
+  label: string;
+  defaults: Record<PipelineSceneType, Record<string, unknown>>;
+  fields: PipelineParameterField[];
+}
+
+export interface PipelineParameterSchema {
+  scene_types: Array<{ value: PipelineSceneType; label: string }>;
+  pipelines: PipelineParameterSchemaItem[];
+}
+
+export interface PipelineParameterDefaultsResponse {
+  defaults: Record<string, Record<PipelineSceneType, Record<string, unknown>>>;
 }

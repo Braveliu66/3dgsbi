@@ -25,34 +25,35 @@ def run(ctx: PreviewContext) -> PreviewResult:
     metrics_json = output_dir / "metrics.json"
     meta_path = output_dir / "preview_meta.json"
 
-    profile = str(ctx.options.get("preview_lingbot_profile") or "stable_fast").strip().lower()
-    defaults = pointcloud_profile_defaults(profile)
+    scene_type = read_scene_type(ctx.options.get("scene_type") or ctx.options.get("preview_scene_type"))
+    defaults = scene_lingbot_defaults(scene_type)
     config = PointCloudVideoConfig(
-        profile=profile if profile in {"stable_fast", "low_mem", "long_video"} else "stable_fast",
-        mode=str(ctx.options.get("preview_lingbot_mode") or defaults["mode"]),
+        scene_type=scene_type,
+        mode=str(defaults["mode"]),
         fps=read_float(ctx.options.get("preview_lingbot_fps"), defaults["fps"], minimum=0.1, maximum=60.0),
-        image_size=read_int(ctx.options.get("preview_lingbot_image_size"), 518, minimum=224, maximum=1024),
-        target_width=read_int(ctx.options.get("preview_lingbot_target_width"), 518, minimum=14, maximum=2048),
-        target_height=read_int(ctx.options.get("preview_lingbot_target_height"), 378, minimum=14, maximum=2048),
+        image_size=read_int(ctx.options.get("preview_lingbot_image_size"), defaults["image_size"], minimum=224, maximum=1024),
+        target_width=read_int(ctx.options.get("preview_lingbot_target_width"), defaults["target_width"], minimum=14, maximum=2048),
+        target_height=read_int(ctx.options.get("preview_lingbot_target_height"), defaults["target_height"], minimum=14, maximum=2048),
         window_size=read_int(ctx.options.get("preview_lingbot_window_size"), defaults["window_size"], minimum=8, maximum=512),
         keyframe_interval=read_int(ctx.options.get("preview_lingbot_keyframe_interval"), defaults["keyframe_interval"], minimum=1, maximum=100_000),
         overlap_keyframes=read_int(ctx.options.get("preview_lingbot_overlap_keyframes"), defaults["overlap_keyframes"], minimum=1, maximum=128),
         num_scale_frames=read_int(ctx.options.get("preview_lingbot_num_scale_frames"), defaults["num_scale_frames"], minimum=1, maximum=64),
         camera_iterations_fast=read_int(ctx.options.get("preview_lingbot_camera_iterations"), defaults["camera_iterations"], minimum=1, maximum=8),
         camera_iterations_retry=read_int(ctx.options.get("preview_lingbot_camera_iterations_retry"), defaults["camera_iterations"], minimum=1, maximum=8),
-        pixel_stride_fast=read_int(ctx.options.get("preview_lingbot_pixel_stride_fast"), 5, minimum=1, maximum=512),
-        pixel_stride_full=read_int(ctx.options.get("preview_lingbot_pixel_stride_full"), 3, minimum=1, maximum=512),
+        pixel_stride_fast=read_int(ctx.options.get("preview_lingbot_pixel_stride_fast"), defaults["pixel_stride_fast"], minimum=1, maximum=512),
+        pixel_stride_full=read_int(ctx.options.get("preview_lingbot_pixel_stride_full"), defaults["pixel_stride_full"], minimum=1, maximum=512),
         conf_percentile_fast=read_float(ctx.options.get("preview_lingbot_conf_percentile_fast"), defaults["conf_percentile_fast"], minimum=0.0, maximum=100.0),
-        conf_percentile_full=read_float(ctx.options.get("preview_lingbot_conf_percentile_full"), 35.0, minimum=0.0, maximum=100.0),
-        min_conf=read_float(ctx.options.get("preview_lingbot_min_conf"), 1e-5, minimum=-100.0, maximum=100.0),
-        use_sdpa=read_bool(ctx.options.get("preview_lingbot_use_sdpa"), bool(defaults["use_sdpa"])),
-        allow_sdpa_fallback=read_bool(ctx.options.get("preview_lingbot_allow_sdpa_fallback"), False),
+        conf_percentile_full=read_float(ctx.options.get("preview_lingbot_conf_percentile_full"), defaults["conf_percentile_full"], minimum=0.0, maximum=100.0),
+        min_conf=read_float(ctx.options.get("preview_lingbot_min_conf"), defaults["min_conf"], minimum=-100.0, maximum=100.0),
+        use_sdpa=read_bool(ctx.options.get("preview_lingbot_use_sdpa"), defaults["use_sdpa"]),
+        allow_sdpa_fallback=read_bool(ctx.options.get("preview_lingbot_allow_sdpa_fallback"), defaults["allow_sdpa_fallback"]),
         compile_model=read_bool(ctx.options.get("preview_lingbot_compile"), bool(defaults["compile"])),
-        write_progressive_preview=read_bool(ctx.options.get("preview_lingbot_write_progressive_preview"), True),
-        voxel_target_fast=read_int(ctx.options.get("preview_lingbot_voxel_target_fast"), 3000, minimum=1, maximum=100_000),
-        voxel_target_full=read_int(ctx.options.get("preview_lingbot_voxel_target_full"), 5200, minimum=1, maximum=100_000),
-        coverage_keyframes=read_bool(ctx.options.get("preview_lingbot_coverage_keyframes"), True),
-        save_debug_predictions=read_bool(ctx.options.get("preview_lingbot_save_official_predictions"), False),
+        write_progressive_preview=True,
+        voxel_target_fast=read_int(ctx.options.get("preview_lingbot_voxel_target_fast"), defaults["voxel_target_fast"], minimum=1, maximum=100_000),
+        voxel_target_full=read_int(ctx.options.get("preview_lingbot_voxel_target_full"), defaults["voxel_target_full"], minimum=1, maximum=100_000),
+        coverage_keyframes=read_bool(ctx.options.get("preview_lingbot_coverage_keyframes"), defaults["coverage_keyframes"]),
+        mask_sky=read_bool(ctx.options.get("preview_lingbot_mask_sky"), defaults["mask_sky"]),
+        save_debug_predictions=False,
     )
     print(
         "[lingbot-pointcloud] adapter params "
@@ -68,7 +69,7 @@ def run(ctx: PreviewContext) -> PreviewResult:
         22,
         (
             "LingBot point cloud params: "
-            f"profile={config.profile} fps={config.fps:g} max_frames=0 mode={config.mode} "
+            f"scene_type={config.scene_type} fps={config.fps:g} max_frames=0 mode={config.mode} "
             f"window={config.window_size} keyframe_interval={config.keyframe_interval} "
             f"camera_iters={config.camera_iterations_fast}"
         ),
@@ -101,6 +102,11 @@ def run(ctx: PreviewContext) -> PreviewResult:
             **metrics,
             **timer.metrics(),
             "adapter": "lingbot_video_pointcloud_fast",
+            "scene_type": scene_type,
+            "artifact_display": "pointcloud",
+            "viewer_default_point_size": 0.00001,
+            "viewer_default_downsample_factor": 10 if scene_type == "outdoor" else 6,
+            "viewer_default_conf_threshold": 1.5 if scene_type == "outdoor" else 1.2,
             "intermediate_ply": str(fast_ply_path),
             "intermediate_ply_size": fast_ply_path.stat().st_size,
             "point_source": metrics.get("point_source") or metrics.get("lingbot_point_source") or "world_points",
@@ -125,43 +131,61 @@ def single_video_file(input_dir: Path) -> Path:
     return videos[0]
 
 
-def pointcloud_profile_defaults(profile: str) -> dict[str, int | float | str | bool]:
-    if profile == "low_mem":
-        return {
-            "mode": "auto",
-            "fps": 8.0,
-            "window_size": 32,
-            "keyframe_interval": 6,
-            "overlap_keyframes": 8,
-            "num_scale_frames": 2,
-            "camera_iterations": 2,
-            "conf_percentile_fast": 65.0,
-            "use_sdpa": True,
-            "compile": False,
-        }
-    if profile == "long_video":
+def read_scene_type(value: object) -> str:
+    normalized = str(value or "indoor").strip().lower()
+    if normalized in {"outdoor", "outside", "室外"}:
+        return "outdoor"
+    return "indoor"
+
+
+def scene_lingbot_defaults(scene_type: str) -> dict[str, int | float | str | bool]:
+    if scene_type == "outdoor":
         return {
             "mode": "windowed",
             "fps": 10.0,
+            "image_size": 518,
+            "target_width": 518,
+            "target_height": 378,
             "window_size": 128,
-            "keyframe_interval": 13,
-            "overlap_keyframes": 8,
-            "num_scale_frames": 4,
+            "keyframe_interval": 2,
+            "overlap_keyframes": 16,
+            "num_scale_frames": 8,
             "camera_iterations": 4,
-            "conf_percentile_fast": 65.0,
-            "use_sdpa": True,
+            "pixel_stride_fast": 6,
+            "pixel_stride_full": 4,
+            "conf_percentile_fast": 70.0,
+            "conf_percentile_full": 55.0,
+            "min_conf": 1.5,
+            "voxel_target_fast": 3000,
+            "voxel_target_full": 5200,
+            "coverage_keyframes": True,
+            "mask_sky": True,
+            "use_sdpa": False,
+            "allow_sdpa_fallback": False,
             "compile": False,
         }
     return {
-        "mode": "auto",
+        "mode": "windowed",
         "fps": 10.0,
-        "window_size": 64,
-        "keyframe_interval": 6,
-        "overlap_keyframes": 8,
-        "num_scale_frames": 4,
+        "image_size": 518,
+        "target_width": 518,
+        "target_height": 378,
+        "window_size": 128,
+        "keyframe_interval": 1,
+        "overlap_keyframes": 16,
+        "num_scale_frames": 8,
         "camera_iterations": 4,
-        "conf_percentile_fast": 65.0,
-        "use_sdpa": True,
+        "pixel_stride_fast": 4,
+        "pixel_stride_full": 2,
+        "conf_percentile_fast": 55.0,
+        "conf_percentile_full": 40.0,
+        "min_conf": 1.2,
+        "voxel_target_fast": 4200,
+        "voxel_target_full": 7000,
+        "coverage_keyframes": True,
+        "mask_sky": False,
+        "use_sdpa": False,
+        "allow_sdpa_fallback": False,
         "compile": False,
     }
 

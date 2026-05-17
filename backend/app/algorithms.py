@@ -155,16 +155,15 @@ def seed_algorithm_registry(db: Session, settings: Settings | None = None) -> No
     db.commit()
 
 
-def normalize_preview_pipeline(value: str | None, input_type: str) -> str:
-    default = "lingbot_video_pointcloud_fast" if input_type == "video" else "litevggt_spz"
+def normalize_preview_pipeline(value: str | None, default: str = "lingbot_video_pointcloud_fast") -> str:
     normalized = (value or default).strip().lower()
     aliases = {
         "litevggt_spark": "litevggt_spz",
         "litevggt_spz": "litevggt_spz",
         "direct": "litevggt_spz",
         "lingbot": "lingbot_video_pointcloud_fast",
-        "lingbot_map": "lingbot_map_spz",
-        "lingbot_map_spz": "lingbot_map_spz",
+        "lingbot_map": "lingbot_video_pointcloud_fast",
+        "lingbot_map_spz": "lingbot_video_pointcloud_fast",
         "video_lingbot": "lingbot_video_pointcloud_fast",
         "lingbot_video_pointcloud_fast": "lingbot_video_pointcloud_fast",
         "lingbot_pointcloud": "lingbot_video_pointcloud_fast",

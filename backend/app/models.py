@@ -207,6 +207,17 @@ class AlgorithmRegistry(Base):
     source_type: Mapped[str] = mapped_column(String(40), default="github")
 
 
+class PipelineParameterDefault(Base):
+    __tablename__ = "pipeline_parameter_defaults"
+    __table_args__ = (UniqueConstraint("pipeline", "scene_type", name="uq_pipeline_scene_defaults"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    pipeline: Mapped[str] = mapped_column(String(80), index=True)
+    scene_type: Mapped[str] = mapped_column(String(20), index=True)
+    options: Mapped[dict] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class TaskEvent(Base):
     __tablename__ = "task_events"
 

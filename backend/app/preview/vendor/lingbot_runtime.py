@@ -53,10 +53,21 @@ AUTO_WINDOWED_FRAME_THRESHOLD = 320
 DEFAULT_PREVIEW_SPLAT_SCALE = 0.006
 DEFAULT_PREVIEW_OPACITY = 0.65
 SH_C0 = np.float32(0.28209479177387814)
+VIDEO_FRAME_MAX_SIDE = 518
+LINGBOT_INFERENCE_HEARTBEAT_SECONDS = 15.0
+LINGBOT_INFERENCE_HEARTBEAT_MAX_PROGRESS = 64
 
 
 def _log(message: str) -> None:
     print(f"[lingbot-preview] {message}", flush=True)
+
+
+def video_decode_filter(fps: int, *, max_side: int = VIDEO_FRAME_MAX_SIDE) -> str:
+    filters = []
+    if fps > 0:
+        filters.append(f"fps={fps}")
+    filters.append(f"scale=w='if(gte(iw,ih),{max_side},-1)':h='if(gte(iw,ih),-1,{max_side})'")
+    return ",".join(filters)
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +105,7 @@ class ExtractedFramePoints:
     point_source: str
     raw_count: int
     filtered_count: int
+    sky_removed_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,33 +128,34 @@ class PointArrayQuality:
 
 @dataclass(frozen=True, slots=True)
 class PointCloudVideoConfig:
-    profile: str = "stable_fast"
-    mode: str = "auto"
+    scene_type: str = "indoor"
+    mode: str = "windowed"
     fps: float = 10.0
     image_size: int = 518
     target_width: int = 518
     target_height: int = 378
-    window_size: int = 64
-    keyframe_interval: int = 6
-    overlap_keyframes: int = 8
-    num_scale_frames: int = 4
+    window_size: int = 128
+    keyframe_interval: int = 1
+    overlap_keyframes: int = 16
+    num_scale_frames: int = 8
     camera_iterations_fast: int = 4
     camera_iterations_retry: int = 4
-    pixel_stride_fast: int = 5
-    pixel_stride_full: int = 3
-    conf_percentile_fast: float = 65.0
-    conf_percentile_full: float = 35.0
-    min_conf: float = 1e-5
-    use_sdpa: bool = True
+    pixel_stride_fast: int = 4
+    pixel_stride_full: int = 2
+    conf_percentile_fast: float = 55.0
+    conf_percentile_full: float = 40.0
+    min_conf: float = 1.2
+    use_sdpa: bool = False
     allow_sdpa_fallback: bool = False
     compile_model: bool = False
     write_progressive_preview: bool = True
-    voxel_target_fast: int = 3000
-    voxel_target_full: int = 5200
+    voxel_target_fast: int = 4200
+    voxel_target_full: int = 7000
     coverage_keyframes: bool = True
     coverage_rotation_degrees: float = 12.0
     coverage_translation: float = 0.35
     retry_overlap_pose_jump: float = 2.0
+    mask_sky: bool = False
     save_debug_predictions: bool = False
 
 
@@ -207,7 +220,7 @@ class StreamingVoxelMap:
         points, colors, confidence = self.arrays()
         if points.shape[0] <= 0:
             raise PreviewFailure("LINGBOT_EMPTY_POINT_CLOUD", "LingBot-Map produced no valid voxelized points")
-        return write_point_cloud_ply(points, colors, output_ply, confidence=confidence, max_points=0, include_confidence=False)
+        return write_point_cloud_ply(points, colors, output_ply, confidence=confidence, max_points=0, include_confidence=True)
 
     def metrics(self, prefix: str) -> dict[str, Any]:
         return {
@@ -614,12 +627,12 @@ def run_lingbot_video_pointcloud_fast(
     work_dir.mkdir(parents=True, exist_ok=True)
     _log(
         "pointcloud runtime start "
-        f"video={video_path} model={model_path} profile={config.profile} fps={config.fps} requested_mode={config.mode} "
+        f"video={video_path} model={model_path} scene_type={config.scene_type} fps={config.fps} requested_mode={config.mode} "
         f"window_size={config.window_size} keyframe_interval={config.keyframe_interval} "
         f"overlap_keyframes={config.overlap_keyframes} camera_iterations={config.camera_iterations_fast} "
         f"pixel_stride_fast={config.pixel_stride_fast} pixel_stride_full={config.pixel_stride_full} "
         f"conf_fast={config.conf_percentile_fast} conf_full={config.conf_percentile_full} "
-        f"min_conf={config.min_conf} allow_sdpa_fallback={config.allow_sdpa_fallback}"
+        f"min_conf={config.min_conf} mask_sky={config.mask_sky} allow_sdpa_fallback={config.allow_sdpa_fallback}"
     )
 
     try:
@@ -650,6 +663,11 @@ def run_lingbot_video_pointcloud_fast(
         allow_sdpa_fallback=config.allow_sdpa_fallback,
         use_sdpa=config.use_sdpa,
     )
+    if not flashinfer_found and not config.allow_sdpa_fallback:
+        raise PreviewFailure(
+            "LINGBOT_FLASHINFER_REQUIRED",
+            "FlashInfer is required for LingBot video point cloud preview. Install flashinfer-python; SDPA fallback is disabled because it is too slow for production preview.",
+        )
     dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
     kv_cache_sliding_window = resolve_kv_cache_sliding_window(config.window_size)
 
@@ -663,7 +681,7 @@ def run_lingbot_video_pointcloud_fast(
     _log(
         "pointcloud official sequence plan "
         f"sampled_frames={frames.count} estimated_internal_windows={estimated_window_count} "
-        f"profile={config.profile} mode={config.mode} "
+        f"scene_type={config.scene_type} mode={config.mode} "
         f"window_size={config.window_size} keyframe_interval={config.keyframe_interval} "
         f"overlap_keyframes={config.overlap_keyframes} overlap_source_frames={overlap} "
         "input_frames_are_prefiltered=false external_stitching=false"
@@ -711,7 +729,7 @@ def run_lingbot_video_pointcloud_fast(
             release_cuda_exception(exc, torch_module=torch)
             raise PreviewFailure(
                 "LINGBOT_CUDA_ILLEGAL_MEMORY_ACCESS",
-                "LingBot-Map CUDA inference hit an illegal memory access; retry with windowed or low_mem preview settings.",
+                "LingBot-Map CUDA inference hit an illegal memory access; retry with windowed preview settings.",
             ) from exc
         raise PreviewFailure("LINGBOT_INFERENCE_FAILED", f"LingBot-Map official-semantics inference failed: {exc}") from exc
 
@@ -744,7 +762,7 @@ def run_lingbot_video_pointcloud_fast(
     global_pose_by_source: dict[int, np.ndarray] = {}
     previous_export_pose: np.ndarray | None = None
     frame_indices = tuple(range(frame_count))
-    previous_export_pose, used_frames, raw_points, filtered_points = add_window_points_to_voxels(
+    previous_export_pose, used_frames, raw_points, filtered_points, sky_removed_count = add_window_points_to_voxels(
         pred_np,
         frame_indices,
         voxel_fast=voxel_fast,
@@ -814,6 +832,8 @@ def run_lingbot_video_pointcloud_fast(
         "lingbot_sampled_fps": float(config.fps),
         "lingbot_frame_width": int(frames.width),
         "lingbot_frame_height": int(frames.height),
+        "scene_type": config.scene_type,
+        "lingbot_scene_type": config.scene_type,
         "lingbot_image_size": int(config.image_size),
         "lingbot_target_width": int(config.target_width),
         "lingbot_target_height": int(config.target_height),
@@ -844,6 +864,8 @@ def run_lingbot_video_pointcloud_fast(
         "lingbot_conf_percentile_fast": float(config.conf_percentile_fast),
         "lingbot_conf_percentile_full": float(config.conf_percentile_full),
         "lingbot_min_conf": float(config.min_conf),
+        "lingbot_mask_sky": bool(config.mask_sky),
+        "lingbot_sky_points_removed": int(sky_removed_count),
         "lingbot_window_count": len(window_metrics),
         "lingbot_retry_window_count": 0,
         "lingbot_bad_window_count": 0,
@@ -965,13 +987,17 @@ def log_inference_heartbeat(
     progress_value: int,
     stage: str = "lingbot_window_inference",
 ) -> None:
-    while not stop_event.wait(15.0):
+    while not stop_event.wait(LINGBOT_INFERENCE_HEARTBEAT_SECONDS):
         elapsed = time.perf_counter() - started
-        message = f"LingBot inference still running: {window_label}, elapsed={elapsed:.0f}s"
+        heartbeat_progress = min(
+            LINGBOT_INFERENCE_HEARTBEAT_MAX_PROGRESS,
+            max(progress_value, progress_value + int(elapsed // LINGBOT_INFERENCE_HEARTBEAT_SECONDS)),
+        )
+        message = f"LingBot inference running: {window_label}, elapsed={elapsed:.0f}s, progress={heartbeat_progress}%"
         _log(message)
         if progress is not None:
             try:
-                progress(stage, progress_value, message)
+                progress(stage, heartbeat_progress, message)
             except Exception:
                 pass
 
@@ -1100,10 +1126,11 @@ def add_window_points_to_voxels(
     voxel_full: StreamingVoxelMap,
     previous_export_pose: np.ndarray | None,
     config: PointCloudVideoConfig,
-) -> tuple[np.ndarray | None, int, int, int]:
+) -> tuple[np.ndarray | None, int, int, int, int]:
     used_frames = 0
     raw_points = 0
     filtered_points = 0
+    sky_removed_count = 0
     for frame_index, frame in iter_prediction_frames(pred_np, strided_frame_indices(prediction_frame_count(pred_np), 1)):
         source_index = int(frame_indices[frame_index]) if frame_index < len(frame_indices) else frame_index
         pose = c2w_4x4(frame["extrinsic"]) if "extrinsic" in frame else None
@@ -1118,11 +1145,13 @@ def add_window_points_to_voxels(
             translation_threshold=config.coverage_translation,
         ):
             continue
+        sky_keep_mask = build_frame_sky_keep_mask(frame) if config.mask_sky else None
         fast = extract_frame_points_for_export(
             frame,
             pixel_stride=config.pixel_stride_fast,
             conf_percentile=config.conf_percentile_fast,
             min_conf=config.min_conf,
+            pixel_keep_mask=sky_keep_mask,
             source_name=f"window frame {source_index}",
         )
         full = extract_frame_points_for_export(
@@ -1130,16 +1159,51 @@ def add_window_points_to_voxels(
             pixel_stride=config.pixel_stride_full,
             conf_percentile=config.conf_percentile_full,
             min_conf=config.min_conf,
+            pixel_keep_mask=sky_keep_mask,
             source_name=f"window frame {source_index}",
         )
         voxel_fast.add_points(fast.points, fast.colors, fast.confidence)
         voxel_full.add_points(full.points, full.colors, full.confidence)
         raw_points += fast.raw_count
         filtered_points += fast.filtered_count
+        sky_removed_count += fast.sky_removed_count
         used_frames += 1
         if pose is not None:
             previous_export_pose = pose
-    return previous_export_pose, used_frames, raw_points, filtered_points
+    return previous_export_pose, used_frames, raw_points, filtered_points, sky_removed_count
+
+
+def build_frame_sky_keep_mask(frame: Any) -> np.ndarray | None:
+    keys = tuple(frame.files if hasattr(frame, "files") else frame.keys())
+    color_key = pick_key(keys, COLOR_KEYS)
+    if color_key is None:
+        return None
+    image = image_to_hwc_u8(frame[color_key])
+    if image is None:
+        return None
+    return build_simple_sky_mask_from_image(image)
+
+
+def build_simple_sky_mask_from_image(image: np.ndarray) -> np.ndarray:
+    img = np.asarray(image)
+    if img.ndim != 3 or img.shape[2] < 3:
+        return np.ones(img.shape[:2], dtype=bool)
+
+    h, _w = img.shape[:2]
+    rgb = img[..., :3].astype(np.float32)
+    r = rgb[..., 0]
+    g = rgb[..., 1]
+    b = rgb[..., 2]
+    brightness = (r + g + b) / 3.0
+
+    yy = np.arange(h, dtype=np.float32)[:, None] / max(1.0, float(h - 1))
+    upper = yy < 0.55
+
+    bluish = (b > r * 1.08) & (b > g * 1.03) & (brightness > 115.0)
+    white_sky = (brightness > 205.0) & (np.abs(r - g) < 28.0) & (np.abs(g - b) < 35.0)
+    sky_like = upper & (bluish | white_sky)
+
+    return ~sky_like
 
 
 def should_export_point_frame(
@@ -1403,8 +1467,7 @@ def extract_video_frames(video_path: Path, output_dir: Path, *, fps: int, max_fr
         "-i",
         str(video_path),
     ]
-    if fps > 0:
-        command.extend(["-vf", f"fps={fps}"])
+    command.extend(["-vf", video_decode_filter(fps)])
     command.extend(["-q:v", "2", str(pattern)])
 
     try:
@@ -1599,13 +1662,13 @@ def resolve_lingbot_attention_backend(
     flashinfer_probe: Callable[[], bool] = flashinfer_available,
 ) -> tuple[bool, bool]:
     flashinfer_found = flashinfer_probe()
-    if use_sdpa:
-        return True, flashinfer_found
     if not flashinfer_found and not allow_sdpa_fallback:
         raise PreviewFailure(
-            "LINGBOT_FLASHINFER_UNAVAILABLE",
-            "LingBot-Map fast preview requires FlashInfer; install flashinfer-python or explicitly enable SDPA fallback",
+            "LINGBOT_FLASHINFER_REQUIRED",
+            "FlashInfer is required for LingBot video point cloud preview. Install flashinfer-python; SDPA fallback is disabled because it is too slow for production preview.",
         )
+    if use_sdpa:
+        return True, flashinfer_found
     return (not flashinfer_found), flashinfer_found
 
 
@@ -2521,7 +2584,7 @@ def write_lingbot_pointcloud_ply(
     confidence: np.ndarray | None,
     output_ply: Path,
 ) -> int:
-    return write_point_cloud_ply(points, colors, output_ply, confidence=confidence, max_points=0, include_confidence=False)
+    return write_point_cloud_ply(points, colors, output_ply, confidence=confidence, max_points=0, include_confidence=True)
 
 
 def write_spark_plain_ply_records(
@@ -2875,6 +2938,7 @@ def extract_frame_points_for_export(
     pixel_stride: int,
     conf_percentile: float,
     min_conf: float,
+    pixel_keep_mask: np.ndarray | None = None,
     source_name: str,
 ) -> ExtractedFramePoints:
     keys = tuple(data.files if hasattr(data, "files") else data.keys())
@@ -2903,6 +2967,14 @@ def extract_frame_points_for_export(
         colors = np.full((points.shape[0], 3), 255, dtype=np.uint8)
 
     mask = np.isfinite(points).all(axis=1)
+    sky_removed_count = 0
+    if pixel_keep_mask is not None:
+        keep_2d = np.asarray(pixel_keep_mask, dtype=bool)
+        if keep_2d.shape == points_grid.shape[:2]:
+            keep = keep_2d[::stride, ::stride].reshape(-1)
+            if keep.shape[0] == points.shape[0]:
+                sky_removed_count = int(np.count_nonzero(mask & ~keep))
+                mask &= keep
     confidence = None
     if confidence_grid is not None:
         confidence = np.asarray(confidence_grid, dtype=np.float32)
@@ -2931,6 +3003,7 @@ def extract_frame_points_for_export(
         point_source=point_key,
         raw_count=raw_count,
         filtered_count=int(filtered_points.shape[0]),
+        sky_removed_count=sky_removed_count,
     )
 
 

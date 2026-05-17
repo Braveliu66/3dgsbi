@@ -8,7 +8,8 @@ import { detectSceneType } from "@/lib/sceneDetection";
 import type { TransferProgress } from "@/lib/api";
 import { formatDateTime, inputTypeLabel, isActiveTask, projectStatusLabel } from "@/lib/labels";
 import { rememberTaskId } from "@/lib/taskTracking";
-import type { MediaAsset, Project, Task, ViewerConfig } from "@/lib/types";
+import type { Artifact, MediaAsset, Project, Task, ViewerConfig } from "@/lib/types";
+import { PointCloudPreviewViewer } from "@/components/PointCloudPreviewViewer";
 import { SplatViewer } from "@/components/SplatViewer";
 import { TaskProgress } from "@/components/TaskProgress";
 
@@ -16,18 +17,21 @@ const MIN_INPUT_FRAMES = 1;
 const MIN_FINE_INPUT_FRAMES = 3;
 const MAX_INPUT_FRAMES = 800;
 const UPLOAD_FILE_CONCURRENCY = 6;
-type PreviewSceneProfile = "mixed_balanced" | "indoor_full" | "outdoor_fast_clean";
+type PreviewSceneProfile = "indoor_full" | "outdoor_fast_clean";
 type SceneType = "auto" | "indoor" | "outdoor";
 const PREVIEW_SCENE_PROFILE_OPTIONS: Array<{ value: PreviewSceneProfile; label: string }> = [
-  { value: "mixed_balanced", label: "均衡" },
   { value: "indoor_full", label: "室内" },
-  { value: "outdoor_fast_clean", label: "室外" }
+  { value: "outdoor_fast_clean", label: "户外" }
 ];
 
 function sceneTypeForProfile(profile: PreviewSceneProfile): SceneType {
   if (profile === "indoor_full") return "indoor";
   if (profile === "outdoor_fast_clean") return "outdoor";
-  return "auto";
+  return "indoor";
+}
+
+function sceneTypeForVideoPreview(profile: PreviewSceneProfile): "indoor" | "outdoor" {
+  return profile === "outdoor_fast_clean" ? "outdoor" : "indoor";
 }
 
 export default function UploadPage() {
@@ -35,7 +39,7 @@ export default function UploadPage() {
   const thumbsRef = useRef<Record<string, string>>({});
   const [name, setName] = useState("新建重建项目");
   const [inputType, setInputType] = useState<Project["input_type"]>("images");
-  const [previewSceneProfile, setPreviewSceneProfile] = useState<PreviewSceneProfile>("mixed_balanced");
+  const [previewSceneProfile, setPreviewSceneProfile] = useState<PreviewSceneProfile>("indoor_full");
   const [tags, setTags] = useState("preview, research");
   const [project, setProject] = useState<Project | null>(null);
   const [media, setMedia] = useState<MediaAsset[]>([]);
@@ -59,6 +63,10 @@ export default function UploadPage() {
     (project.input_type === "images" && imageCount >= MIN_FINE_INPUT_FRAMES) ||
     (project.input_type === "video" && videoCount === 1 && media.length === 1)
   ));
+  const pointCloudArtifact = useMemo(
+    () => pointCloudArtifactFromViewer(viewer, project),
+    [viewer, project]
+  );
 
   useEffect(() => {
     return () => {
@@ -110,7 +118,7 @@ export default function UploadPage() {
     setError(null);
     const fileList = Array.from(files);
     try {
-      if (inputType === "images" && previewSceneProfile === "mixed_balanced") {
+      if (inputType === "images") {
         const detection = await detectSceneType(fileList);
         if (detection.sceneType === "indoor") {
           setPreviewSceneProfile("indoor_full");
@@ -177,10 +185,12 @@ export default function UploadPage() {
     setBusy(true);
     setError(null);
     try {
-      const options: Record<string, unknown> = {
-        preview_pipeline: project.input_type === "video" ? "lingbot_video_pointcloud_fast" : "litevggt_spz"
-      };
-      if (project.input_type === "images") {
+      const options: Record<string, unknown> = {};
+      if (project.input_type === "video") {
+        options.pipeline = "lingbot_video_pointcloud_fast";
+        options.scene_type = sceneTypeForVideoPreview(previewSceneProfile);
+      } else {
+        options.pipeline = "litevggt_spz";
         options.preview_scene_profile = previewSceneProfile;
         options.scene_type = sceneTypeForProfile(previewSceneProfile);
         options.litevggt_preprocess_mode = "pad";
@@ -272,7 +282,7 @@ export default function UploadPage() {
   }
 
   const activeMessage = task && isActiveTask(task)
-    ? "后端正在处理真实预览任务，完成后会自动加载 SPZ 产物。"
+    ? "后端正在处理真实预览任务，完成后会自动加载预览产物。"
     : viewer?.status === "ready"
       ? "预览产物已就绪。"
       : "上传满足条件的数据后即可启动真实极速预览。";
@@ -307,10 +317,10 @@ export default function UploadPage() {
               <label>标签</label>
               <input className="input" value={tags} onChange={(event) => setTags(event.target.value)} disabled={Boolean(project)} />
             </div>
-            {inputType === "images" ? (
+            {inputType === "images" || inputType === "video" ? (
               <div className="field">
                 <label>场景策略</label>
-                <div className="segmented" style={{ gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
+                <div className="segmented">
                   {PREVIEW_SCENE_PROFILE_OPTIONS.map((option) => (
                     <button
                       className={previewSceneProfile === option.value ? "active" : ""}
@@ -426,11 +436,18 @@ export default function UploadPage() {
               <h2>真实 3D 预览</h2>
               <p className="muted small">{activeMessage}</p>
             </div>
-            {viewer?.status === "ready" ? <span className="status-pill ready">SPZ</span> : <span className="status-pill">{task ? task.status : "idle"}</span>}
+            {viewer?.status === "ready" ? <span className="status-pill ready">{viewer.format === "ply" ? "PLY" : "SPZ"}</span> : <span className="status-pill">{task ? task.status : "idle"}</span>}
           </div>
           <div className="panel-body scrollable" style={{ padding: 0 }}>
             {viewer?.stale ? <div className="notice-box preview-stale">{viewer.message}</div> : null}
-            {viewer?.status === "ready" ? (
+            {viewer?.status === "ready" && pointCloudArtifact ? (
+              <PointCloudPreviewViewer
+                artifact={pointCloudArtifact}
+                pointSize={viewer.viewer_default_point_size ?? 0.00001}
+                downsampleFactor={viewer.viewer_default_downsample_factor ?? 10}
+                confidenceThreshold={viewer.viewer_default_conf_threshold ?? 1.5}
+              />
+            ) : viewer?.status === "ready" ? (
               <SplatViewer
                 modelUrl={viewer.model_url}
                 format={viewer.format}
@@ -499,6 +516,31 @@ async function runUploadPool<T>(items: T[], concurrency: number, worker: (item: 
 
 function mediaResolutionLabel(media: MediaAsset): string {
   return media.width && media.height ? `${media.width} x ${media.height}` : "resolution pending";
+}
+
+function pointCloudArtifactFromViewer(viewer: ViewerConfig | null, project: Project | null): Artifact | null {
+  if (viewer?.status !== "ready") return null;
+  if (viewer.format !== "ply" && viewer.artifact_kind !== "preview_pointcloud_ply") return null;
+  const url = viewer.debug_points_ply_url ?? viewer.download_ply_url;
+  if (!url) return null;
+  return {
+    id: viewer.artifact_id ?? "preview-pointcloud",
+    project_id: project?.id ?? "",
+    task_id: "",
+    kind: viewer.artifact_kind ?? "preview_pointcloud_ply",
+    object_uri: url,
+    file_name: viewer.artifact_file_name ?? "preview_fast.ply",
+    file_size: viewer.file_size ?? 0,
+    format: "ply",
+    metadata: {
+      scene_type: viewer.scene_type,
+      artifact_display: viewer.artifact_display,
+      viewer_default_point_size: viewer.viewer_default_point_size,
+      viewer_default_downsample_factor: viewer.viewer_default_downsample_factor,
+      viewer_default_conf_threshold: viewer.viewer_default_conf_threshold
+    },
+    created_at: project?.updated_at ?? new Date(0).toISOString()
+  };
 }
 
 function TransferProgressBar({ progress }: { progress: (TransferProgress & { fileIndex: number; totalFiles: number }) | null }) {

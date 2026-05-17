@@ -27,7 +27,17 @@ from app.algorithms import license_notice_for, normalize_preview_pipeline, runti
 from app.config import get_settings
 from app.database import SessionLocal, engine, get_db, initialize_database_schema
 from app.fine.fastgs_defaults import DEFAULT_FINE_SCENE_PROFILE, FINE_SCENE_PROFILE_MAX_SIDES
-from app.models import AlgorithmRegistry, Artifact, Feedback, MediaAsset, Project, Task, TaskEvent, UploadSession, User, WorkerHeartbeat, new_id, utc_now
+from app.models import AlgorithmRegistry, Artifact, Feedback, MediaAsset, PipelineParameterDefault, Project, Task, TaskEvent, UploadSession, User, WorkerHeartbeat, new_id, utc_now
+from app.pipeline_parameters import (
+    VALID_PIPELINES,
+    VALID_SCENE_TYPES,
+    defaults_payload,
+    merged_task_options,
+    normalize_parameter_scene_type,
+    pipeline_parameter_schema,
+    sanitize_pipeline_options,
+    system_defaults_for,
+)
 from app.resources import collect_resources
 from app.security import (
     create_access_token,
@@ -79,6 +89,10 @@ class ProjectBulkDeletePayload(BaseModel):
 
 
 class TaskCreatePayload(BaseModel):
+    options: dict[str, Any] = {}
+
+
+class PipelineParameterDefaultsPayload(BaseModel):
     options: dict[str, Any] = {}
 
 
@@ -528,6 +542,11 @@ def normalize_scene_type(value: Any) -> str:
     if scene_type in {"outdoor", "outdoor_full", "outdoor_fast_clean"}:
         return "outdoor"
     raise HTTPException(status_code=400, detail=f"Unsupported scene type: {scene_type}")
+
+
+def normalize_preview_video_scene_type(value: Any) -> str:
+    scene_type = normalize_scene_type(value)
+    return "outdoor" if scene_type == "outdoor" else "indoor"
 
 
 def fine_scene_profile_from_scene_type(scene_type: str) -> str:
@@ -1074,19 +1093,41 @@ def create_preview_task(
     if project.input_type == "images" and not any(item.kind == "image" for item in project.media):
         raise HTTPException(status_code=400, detail="图片预览至少需要 1 张图片")
     payload_options = payload.options or {}
-    pipeline = normalize_preview_pipeline(str(payload_options.get("preview_pipeline") or ""), project.input_type)
-    options = {**payload_options, "preview_pipeline": pipeline, "source_version": project.source_version}
+    default_pipeline = "lingbot_video_pointcloud_fast" if project.input_type == "video" else "litevggt_spz"
+    requested_pipeline = payload_options.get("pipeline") or payload_options.get("preview_pipeline")
+    pipeline = normalize_preview_pipeline(str(requested_pipeline or ""), default_pipeline)
+    scene_for_defaults = normalize_parameter_scene_type(
+        payload_options.get("scene_type")
+        or payload_options.get("preview_scene_type")
+        or payload_options.get("preview_scene_profile"),
+        default="indoor",
+    )
+    if pipeline in VALID_PIPELINES:
+        payload_options = merged_task_options(db, pipeline, scene_for_defaults, payload_options)
+    options = {
+        **payload_options,
+        "pipeline": pipeline,
+        "preview_pipeline": pipeline,
+        "source_version": project.source_version,
+    }
     if project.input_type == "images":
         if pipeline != "litevggt_spz":
             raise HTTPException(status_code=400, detail=f"Unsupported preview pipeline for image input: {pipeline}")
-        options["preview_scene_profile"] = normalize_preview_scene_profile(payload_options.get("preview_scene_profile"))
+        options["scene_type"] = normalize_parameter_scene_type(options.get("scene_type") or options.get("preview_scene_profile"))
+        options["preview_scene_profile"] = normalize_preview_scene_profile(
+            options.get("preview_scene_profile")
+            or ("outdoor_fast_clean" if options["scene_type"] == "outdoor" else "indoor_full")
+        )
     elif project.input_type == "video":
         video_count = sum(1 for item in project.media if item.kind == "video")
         if video_count != 1 or len(project.media) != 1:
             raise HTTPException(status_code=400, detail="Video preview requires exactly one video file")
-        if pipeline not in {"lingbot_video_pointcloud_fast", "lingbot_map_spz"}:
+        if pipeline != "lingbot_video_pointcloud_fast":
             raise HTTPException(status_code=400, detail=f"Unsupported preview pipeline for video input: {pipeline}")
         options.pop("preview_scene_profile", None)
+        options["scene_type"] = normalize_preview_video_scene_type(
+            options.get("scene_type") or options.get("preview_scene_type")
+        )
     else:
         raise HTTPException(status_code=400, detail="Preview input type is unsupported")
     task = Task(
@@ -1148,11 +1189,20 @@ def create_fine_task(
     if str(payload_options.get("fine_edgs_enabled", "")).strip().lower() in {"1", "true", "yes", "on"}:
         raise HTTPException(status_code=400, detail="EDGS/RoMA dense initialization has been removed")
 
-    scene_type = normalize_scene_type(
+    scene_for_defaults = normalize_parameter_scene_type(
         payload_options.get("fine_scene_type")
         or payload_options.get("scene_type")
         or payload_options.get("fine_scene_profile")
-        or payload_options.get("preview_scene_profile")
+        or payload_options.get("preview_scene_profile"),
+        default="indoor",
+    )
+    payload_options = merged_task_options(db, fine_pipeline, scene_for_defaults, payload_options)
+    scene_type = normalize_parameter_scene_type(
+        payload_options.get("fine_scene_type")
+        or payload_options.get("scene_type")
+        or payload_options.get("fine_scene_profile")
+        or payload_options.get("preview_scene_profile"),
+        default=scene_for_defaults,
     )
     fine_scene_profile = normalize_fine_scene_profile(
         payload_options.get("fine_scene_profile")
@@ -1495,11 +1545,14 @@ def project_viewer_payload(project: Project) -> dict[str, Any]:
         if preview_model.kind == "preview_pointcloud_ply":
             point_ply = preview_ply or preview_model
             download_ply = preview_full_ply or point_ply
+            metadata = preview_model.metadata_json or {}
             return {
                 "status": "ready",
                 "mode": "single",
                 "source": "preview",
                 "artifact_id": preview_model.id,
+                "artifact_kind": preview_model.kind,
+                "artifact_file_name": preview_model.file_name,
                 "model_url": None,
                 "download_spz_url": None,
                 "file_size": preview_model.file_size,
@@ -1509,9 +1562,13 @@ def project_viewer_payload(project: Project) -> dict[str, Any]:
                 "download_ply_url": artifact_url(download_ply, download=True) if download_ply else None,
                 "preview_meta_url": artifact_url(preview_meta) if preview_meta else None,
                 "camera_path_url": artifact_url(preview_camera_path) if preview_camera_path else None,
-                "quality_warning": (preview_model.metadata_json or {}).get("quality_warning"),
-                "point_source": (preview_model.metadata_json or {}).get("point_source")
-                or (preview_model.metadata_json or {}).get("lingbot_point_source"),
+                "quality_warning": metadata.get("quality_warning"),
+                "point_source": metadata.get("point_source") or metadata.get("lingbot_point_source"),
+                "scene_type": metadata.get("scene_type"),
+                "artifact_display": metadata.get("artifact_display"),
+                "viewer_default_point_size": metadata.get("viewer_default_point_size"),
+                "viewer_default_downsample_factor": metadata.get("viewer_default_downsample_factor"),
+                "viewer_default_conf_threshold": metadata.get("viewer_default_conf_threshold"),
             }
         return {
             "status": "ready",
@@ -1664,6 +1721,54 @@ def create_feedback(payload: FeedbackPayload, user: User = Depends(get_current_u
     db.add(feedback)
     db.commit()
     return {"ok": True, "id": feedback.id}
+
+
+@app.get("/api/pipeline-parameters/schema")
+def pipeline_parameters_schema() -> dict[str, Any]:
+    return pipeline_parameter_schema()
+
+
+@app.get("/api/admin/pipeline-parameter-defaults")
+def admin_pipeline_parameter_defaults(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return defaults_payload(db)
+
+
+@app.put("/api/admin/pipeline-parameter-defaults/{pipeline}/{scene_type}")
+def save_pipeline_parameter_defaults(
+    pipeline: str,
+    scene_type: str,
+    payload: PipelineParameterDefaultsPayload,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if pipeline not in VALID_PIPELINES:
+        raise HTTPException(status_code=404, detail=f"Unsupported pipeline: {pipeline}")
+    scene = normalize_parameter_scene_type(scene_type)
+    if scene not in VALID_SCENE_TYPES:
+        raise HTTPException(status_code=404, detail=f"Unsupported scene type: {scene_type}")
+    options = sanitize_pipeline_options(pipeline, payload.options or {})
+    if pipeline == "official_fastgs_big" and isinstance(options.get("fine_deblur_enabled"), bool):
+        options["fine_deblur_enabled"] = "auto" if options["fine_deblur_enabled"] else "false"
+    row = db.scalar(
+        select(PipelineParameterDefault).where(
+            PipelineParameterDefault.pipeline == pipeline,
+            PipelineParameterDefault.scene_type == scene,
+        )
+    )
+    if row:
+        row.options = options
+        row.updated_at = utc_now()
+    else:
+        row = PipelineParameterDefault(pipeline=pipeline, scene_type=scene, options=options)
+        db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {
+        "pipeline": row.pipeline,
+        "scene_type": row.scene_type,
+        "options": {**system_defaults_for(row.pipeline, row.scene_type), **(row.options or {})},
+        "updated_at": iso(row.updated_at),
+    }
 
 
 @app.get("/api/algorithms")

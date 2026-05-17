@@ -14,6 +14,7 @@ import {
   LogOut,
   MemoryStick,
   Shield,
+  SlidersHorizontal,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api, clearToken } from "@/lib/api";
@@ -26,6 +27,7 @@ const nav = [
   { href: "/projects", label: "项目控制台", icon: FolderKanban }
 ];
 const adminNav = { href: "/admin", label: "管理", icon: Shield };
+const parameterNav = { href: "/pipeline-parameters", label: "管线参数", icon: SlidersHorizontal };
 
 const RESOURCE_REFRESH_MS = 1000;
 
@@ -120,7 +122,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [user]);
 
   const routeLabel = useMemo(() => getRouteLabel(pathname), [pathname]);
-  const navItems = useMemo(() => user?.role === "admin" ? [...nav, adminNav] : nav, [user?.role]);
+  const navItems = useMemo(() => user?.role === "admin" ? [...nav, parameterNav, adminNav] : nav, [user?.role]);
   const activeTask = tasks[0];
 
   function logout() {
@@ -239,6 +241,7 @@ function getRouteLabel(pathname: string): string {
   if (pathname.startsWith("/upload")) return "离线上传与预览";
   if (pathname.startsWith("/projects/")) return "项目详情";
   if (pathname.startsWith("/projects")) return "项目控制台";
+  if (pathname.startsWith("/pipeline-parameters")) return "管线参数";
   if (pathname.startsWith("/admin")) return "管理面板";
   if (pathname.startsWith("/feedback")) return "问题反馈";
   if (pathname.startsWith("/about")) return "算法合规";

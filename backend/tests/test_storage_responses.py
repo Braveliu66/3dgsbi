@@ -21,10 +21,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app.database import SessionLocal  # noqa: E402
+from app.database import SessionLocal, initialize_database_schema  # noqa: E402
 from app.fine.fastgs_defaults import FINE_ITERATIONS  # noqa: E402
 from app.main import app, storage  # noqa: E402
-from app.models import Artifact, MediaAsset, Task  # noqa: E402
+from app.models import Artifact, MediaAsset, PipelineParameterDefault, Task  # noqa: E402
 from app.task_control import task_cancel_key  # noqa: E402
 
 
@@ -104,6 +104,108 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(response.content, PNG_BYTES[1:4])
             self.assertEqual(response.headers["content-range"], f"bytes 1-3/{len(PNG_BYTES)}")
             self.assertEqual(response.headers["accept-ranges"], "bytes")
+
+    def test_pipeline_parameter_schema_lists_supported_pipelines_and_fields(self) -> None:
+        with TestClient(app) as client:
+            response = client.get("/api/pipeline-parameters/schema")
+            response.raise_for_status()
+            payload = response.json()
+
+            pipelines = {item["pipeline"]: item for item in payload["pipelines"]}
+            self.assertEqual({item["value"] for item in payload["scene_types"]}, {"indoor", "outdoor"})
+            self.assertIn("litevggt_spz", pipelines)
+            self.assertIn("lingbot_video_pointcloud_fast", pipelines)
+            self.assertIn("official_fastgs_big", pipelines)
+            self.assertIn("preview_max_points", {item["key"] for item in pipelines["litevggt_spz"]["fields"]})
+            self.assertIn("preview_lingbot_mask_sky", {item["key"] for item in pipelines["lingbot_video_pointcloud_fast"]["fields"]})
+            self.assertIn("fine_deblur_enabled", {item["key"] for item in pipelines["official_fastgs_big"]["fields"]})
+
+    def test_pipeline_parameter_defaults_are_admin_only_and_filter_unknown_keys(self) -> None:
+        clear_pipeline_defaults()
+        with TestClient(app) as client:
+            admin_headers = auth_headers(client)
+            user_headers = non_admin_headers(client, "pipeline-user")
+
+            denied = client.put(
+                "/api/admin/pipeline-parameter-defaults/litevggt_spz/outdoor",
+                json={"options": {"preview_max_points": 1234}},
+                headers=user_headers,
+            )
+            self.assertEqual(denied.status_code, 403)
+
+            saved = client.put(
+                "/api/admin/pipeline-parameter-defaults/litevggt_spz/outdoor",
+                json={"options": {"preview_max_points": 1234, "unknown_option": True}},
+                headers=admin_headers,
+            )
+            saved.raise_for_status()
+            self.assertEqual(saved.json()["options"]["preview_max_points"], 1234)
+            self.assertNotIn("unknown_option", saved.json()["options"])
+
+            loaded = client.get("/api/admin/pipeline-parameter-defaults", headers=admin_headers)
+            loaded.raise_for_status()
+            self.assertEqual(loaded.json()["defaults"]["litevggt_spz"]["outdoor"]["preview_max_points"], 1234)
+        clear_pipeline_defaults()
+
+    def test_task_options_merge_scene_defaults_and_request_overrides(self) -> None:
+        clear_pipeline_defaults()
+        fake_redis = FakeRedis()
+        with TestClient(app) as client, patch("app.main.get_redis", return_value=fake_redis):
+            headers = auth_headers(client)
+            saved = client.put(
+                "/api/admin/pipeline-parameter-defaults/litevggt_spz/outdoor",
+                json={"options": {"preview_max_points": 1234, "litevggt_target_size": 240}},
+                headers=headers,
+            )
+            saved.raise_for_status()
+            project_id = create_image_project(client, headers, "parameter defaults preview")
+            upload_response = client.post(
+                f"/api/projects/{project_id}/media",
+                files={"file": ("image.png", PNG_BYTES, "image/png")},
+                headers=headers,
+            )
+            upload_response.raise_for_status()
+
+            response = client.post(
+                f"/api/projects/{project_id}/tasks/preview",
+                json={"options": {"scene_type": "outdoor", "litevggt_target_size": 336}},
+                headers=headers,
+            )
+            response.raise_for_status()
+            options = response.json()["options"]
+
+            self.assertEqual(options["scene_type"], "outdoor")
+            self.assertEqual(options["preview_scene_profile"], "outdoor_fast_clean")
+            self.assertEqual(options["preview_max_points"], 1234)
+            self.assertEqual(options["litevggt_target_size"], 336)
+        clear_pipeline_defaults()
+
+    def test_deblur_switch_saves_auto_and_fine_task_uses_it(self) -> None:
+        clear_pipeline_defaults()
+        with TestClient(app) as client, patch("app.main.enqueue_fine_task", return_value=None):
+            headers = auth_headers(client)
+            saved = client.put(
+                "/api/admin/pipeline-parameter-defaults/official_fastgs_big/indoor",
+                json={"options": {"fine_deblur_enabled": True}},
+                headers=headers,
+            )
+            saved.raise_for_status()
+            self.assertEqual(saved.json()["options"]["fine_deblur_enabled"], "auto")
+
+            project_id = create_image_project(client, headers, "deblur auto fine")
+            for index in range(8):
+                upload_response = client.post(
+                    f"/api/projects/{project_id}/media",
+                    files={"file": (f"{index}.png", PNG_BYTES, "image/png")},
+                    headers=headers,
+                )
+                upload_response.raise_for_status()
+
+            response = client.post(f"/api/projects/{project_id}/tasks/fine", json={"options": {"scene_type": "indoor"}}, headers=headers)
+            response.raise_for_status()
+
+            self.assertEqual(response.json()["options"]["fine_deblur_enabled"], "auto")
+        clear_pipeline_defaults()
 
     def test_legacy_local_uri_falls_back_to_database_blob(self) -> None:
         with TestClient(app) as client:
@@ -243,9 +345,9 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(payload["type"], "fine")
             self.assertEqual(payload["status"], "queued")
             self.assertEqual(payload["options"]["fine_pipeline"], "official_fastgs_big")
-            self.assertEqual(payload["options"]["fine_scene_profile"], "mixed_balanced")
-            self.assertEqual(payload["options"]["scene_type"], "auto")
-            self.assertEqual(payload["options"]["fine_scene_type"], "auto")
+            self.assertEqual(payload["options"]["fine_scene_profile"], "indoor_full")
+            self.assertEqual(payload["options"]["scene_type"], "indoor")
+            self.assertEqual(payload["options"]["fine_scene_type"], "indoor")
             self.assertEqual(payload["options"]["source_version"], 8)
             self.assertEqual(payload["options"]["fine_iterations"], FINE_ITERATIONS)
             self.assertNotIn("fine_amb3r_memory_device", payload["options"])
@@ -378,7 +480,8 @@ class StorageResponseTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.json()["options"]["preview_pipeline"], "litevggt_spz")
-            self.assertEqual(response.json()["options"]["preview_scene_profile"], "mixed_balanced")
+            self.assertEqual(response.json()["options"]["preview_scene_profile"], "indoor_full")
+            self.assertEqual(response.json()["options"]["scene_type"], "indoor")
 
     def test_image_preview_accepts_scene_profiles(self) -> None:
         for profile in ("indoor_full", "outdoor_fast_clean"):
@@ -447,9 +550,30 @@ class StorageResponseTests(unittest.TestCase):
 
             self.assertEqual(payload["type"], "preview")
             self.assertEqual(payload["status"], "queued")
+            self.assertEqual(payload["options"]["pipeline"], "lingbot_video_pointcloud_fast")
             self.assertEqual(payload["options"]["preview_pipeline"], "lingbot_video_pointcloud_fast")
+            self.assertEqual(payload["options"]["scene_type"], "indoor")
             self.assertEqual(payload["options"]["source_version"], 1)
             self.assertIn(payload["id"], fake_redis.lists["preview_tasks"])
+
+    def test_video_preview_task_redirects_legacy_lingbot_spz_pipeline(self) -> None:
+        fake_redis = FakeRedis()
+        with TestClient(app) as client, patch("app.main.get_redis", return_value=fake_redis):
+            headers = auth_headers(client)
+            project_id = create_video_project(client, headers, "legacy video preview start")
+            upload_video(client, headers, project_id, b"not-a-real-video")
+
+            response = client.post(
+                f"/api/projects/{project_id}/tasks/preview",
+                json={"options": {"preview_pipeline": "lingbot_map_spz", "scene_type": "outdoor"}},
+                headers=headers,
+            )
+            response.raise_for_status()
+            payload = response.json()
+
+            self.assertEqual(payload["options"]["pipeline"], "lingbot_video_pointcloud_fast")
+            self.assertEqual(payload["options"]["preview_pipeline"], "lingbot_video_pointcloud_fast")
+            self.assertEqual(payload["options"]["scene_type"], "outdoor")
 
     def test_video_preview_task_rejects_missing_or_multiple_videos(self) -> None:
         fake_redis = FakeRedis()
@@ -657,7 +781,15 @@ class StorageResponseTests(unittest.TestCase):
                         file_name="preview_fast.ply",
                         file_size=4,
                         source_version=0,
-                        metadata_json={"point_source": "world_points_from_depth", "format": "ply"},
+                        metadata_json={
+                            "point_source": "world_points_from_depth",
+                            "format": "ply",
+                            "scene_type": "outdoor",
+                            "artifact_display": "pointcloud",
+                            "viewer_default_point_size": 0.00001,
+                            "viewer_default_downsample_factor": 10,
+                            "viewer_default_conf_threshold": 1.5,
+                        },
                     )
                 )
                 db.add(
@@ -702,9 +834,15 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(payload["status"], "ready")
             self.assertEqual(payload["source"], "preview")
             self.assertEqual(payload["format"], "ply")
+            self.assertEqual(payload["artifact_kind"], "preview_pointcloud_ply")
             self.assertIsNone(payload["model_url"])
             self.assertIsNone(payload["download_spz_url"])
             self.assertEqual(payload["point_source"], "world_points_from_depth")
+            self.assertEqual(payload["scene_type"], "outdoor")
+            self.assertEqual(payload["artifact_display"], "pointcloud")
+            self.assertEqual(payload["viewer_default_point_size"], 0.00001)
+            self.assertEqual(payload["viewer_default_downsample_factor"], 10)
+            self.assertEqual(payload["viewer_default_conf_threshold"], 1.5)
             self.assertIn("/api/artifacts/", payload["debug_points_ply_url"])
             self.assertIn("/api/artifacts/", payload["download_ply_url"])
             self.assertIn("/api/artifacts/", payload["preview_meta_url"])
@@ -923,6 +1061,22 @@ def auth_headers(client: TestClient) -> dict[str, str]:
     response.raise_for_status()
     token = response.json()["access_token"]
     return {"Authorization": f"Bearer {token}"}
+
+
+def non_admin_headers(client: TestClient, username: str) -> dict[str, str]:
+    client.post("/api/auth/register", json={"username": username, "password": "pw123456"})
+    response = client.post("/api/auth/login", json={"username": username, "password": "pw123456"})
+    response.raise_for_status()
+    token = response.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+def clear_pipeline_defaults() -> None:
+    initialize_database_schema()
+    with SessionLocal() as db:
+        for row in db.query(PipelineParameterDefault).all():
+            db.delete(row)
+        db.commit()
 
 
 def create_image_project(client: TestClient, headers: dict[str, str], name: str) -> str:
