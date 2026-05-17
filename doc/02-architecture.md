@@ -146,9 +146,11 @@ viewer          Spark 2.0
 - Fine reconstruction accepts ordinary JPG/PNG uploads. EXIF camera parameters are not required; EXIF is used only for orientation correction.
 - Preview LiteVGGT remains isolated under the preview vendor path. Fine SfM metrics include `sfm_backend=colmap_cli` or `pycolmap`, registered image count, and sparse point count.
 - The active fine pipeline is `dash_deblur_group_gs`: existing COLMAP scene construction feeds the embedded DashDeblurGroupGS trainer.
-- Deblurring-3DGS GTnet, DashGaussian scheduling, and non-destructive Group Training live under `worker/trainer/dash_deblur_group_gs`; backend code generates config, runs `train.py`, validates `final.ply`, and converts `final_web.spz`.
+- Deblurring-3DGS GTnet, DashGaussian scheduling, and non-destructive Group Training live under `worker/trainer/dash_deblur_group_gs`; backend code resolves `mix` deblur mode, generates one of four indoor/outdoor motion/defocus presets, runs `train.py`, validates `final.ply`, and converts `final_web.spz`.
 - The backend does not vendor Speedy-Splat, FastGS pruning, duplicate rasterizers, `simple_knn`, or `fused_ssim`.
 - Where earlier planning notes say "FastGS chunk training", this platform now means DashDeblurGroupGS chunk-compatible training on one global COLMAP `sparse/0` coordinate system.
 - Worker Docker builds upstream COLMAP with large-scene commands (`global_mapper`, `hierarchical_mapper`, `model_clusterer`, `model_splitter`) so large-scene behavior is an image guarantee, not a runtime surprise.
+- Local Docker Compose bind-mounts the trainer to `/opt/dash_deblur_group_gs`, so ordinary trainer Python edits are applied by recreating workers rather than rebuilding the image.
+- `birth_iter` and `protect_new_points_iters` are intentionally absent from the fused trainer. They are not part of Deblurring-3DGS/Dash/Group algorithm boundaries.
 
 - `colmap_sparse` is retained only as a legacy fine pipeline alias.

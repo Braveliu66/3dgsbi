@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api, clearToken } from "@/lib/api";
-import { formatTaskEta, isActiveTask, taskStatusLabel, taskTypeLabel } from "@/lib/labels";
+import { effectiveTaskProgress, formatTaskEta, isActiveTask, taskStatusLabel, taskTypeLabel } from "@/lib/labels";
 import { readTrackedTaskIds, TRACKED_TASKS_EVENT, writeTrackedTaskIds } from "@/lib/taskTracking";
 import type { Task, User } from "@/lib/types";
 
@@ -124,6 +124,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const routeLabel = useMemo(() => getRouteLabel(pathname), [pathname]);
   const navItems = useMemo(() => user?.role === "admin" ? [...nav, parameterNav, adminNav] : nav, [user?.role]);
   const activeTask = tasks[0];
+  const activeTaskProgress = effectiveTaskProgress(activeTask);
 
   function logout() {
     clearToken();
@@ -183,26 +184,28 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     <small className="top-task-stage">({taskTypeLabel(activeTask.type)} · {activeTask.current_stage || taskStatusLabel(activeTask.status)})</small>
                   </span>
                   <span className="top-task-meta">
-                    {Math.round(activeTask.progress || 0)}% · {formatTaskEta(activeTask)}
+                    {activeTaskProgress}% · {formatTaskEta(activeTask)}
                     <ChevronDown size={14} />
                   </span>
                   <div className="progress-track top-task-progress" aria-label="任务进度">
-                    <span style={{ width: `${Math.max(0, Math.min(100, activeTask.progress || 0))}%` }} />
+                    <span style={{ width: `${activeTaskProgress}%` }} />
                   </div>
                 </button>
                 {taskOpen ? (
                   <div className="task-popover">
-                    {tasks.map((task) => (
+                    {tasks.map((task) => {
+                      const progress = effectiveTaskProgress(task);
+                      return (
                       <Link className="task-popover-row" href={`/projects/${task.project_id}`} key={task.id} onClick={() => setTaskOpen(false)}>
                         <span className="truncate">
                           <strong>{taskProjectName(task)}</strong> <small>({taskTypeLabel(task.type)} · {task.current_stage || taskStatusLabel(task.status)})</small>
                         </span>
-                        <span className={`status-pill ${task.status}`}>{Math.round(task.progress || 0)}% · {formatTaskEta(task)}</span>
+                        <span className={`status-pill ${task.status}`}>{progress}% · {formatTaskEta(task)}</span>
                         <div className="progress-track" style={{ gridColumn: "1 / -1" }} aria-label="任务进度">
-                          <span style={{ width: `${Math.max(0, Math.min(100, task.progress || 0))}%` }} />
+                          <span style={{ width: `${progress}%` }} />
                         </div>
                       </Link>
-                    ))}
+                    )})}
                   </div>
                 ) : null}
               </>

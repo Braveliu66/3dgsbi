@@ -40,6 +40,11 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn('"diff_gaussian_rasterization"', algorithms_source)
         self.assertIn('"simple_knn._C"', algorithms_source)
 
+    def test_worker_requirements_include_embedded_trainer_dependencies(self) -> None:
+        requirements_source = (WORKSPACE_ROOT / "worker" / "requirements.txt").read_text(encoding="utf-8")
+
+        self.assertIn("configargparse==1.7.1", requirements_source)
+
     def test_worker_dockerfile_bakes_dash_deblur_group_runtime(self) -> None:
         dockerfile_source = (WORKSPACE_ROOT / "worker" / "Dockerfile").read_text(encoding="utf-8")
         compose_source = (WORKSPACE_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
@@ -74,6 +79,11 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("3dgsbi-worker:local", compose_source)
         self.assertIn("BUILDKIT_INLINE_CACHE", compose_source)
         self.assertIn("DASH_DEBLUR_GROUP_REPO: /opt/dash_deblur_group_gs", compose_source)
+        self.assertGreaterEqual(compose_source.count("./backend/app:/app/app"), 3)
+        self.assertIn('"--reload"', compose_source)
+        self.assertIn("./frontend:/app", compose_source)
+        self.assertIn('"next", "dev"', compose_source)
+        self.assertEqual(compose_source.count("./worker/trainer/dash_deblur_group_gs:/opt/dash_deblur_group_gs"), 3)
 
     def test_fine_code_keeps_colmap_boundary_and_training_wrapper(self) -> None:
         fine_root = BACKEND_ROOT / "app" / "fine"
@@ -94,10 +104,16 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertTrue((trainer_root / "submodules" / "simple-knn").exists())
 
         schedule_source = (trainer_root / "utils" / "schedule_utils.py").read_text(encoding="utf-8")
+        gaussian_model_source = (trainer_root / "scene" / "gaussian_model.py").read_text(encoding="utf-8")
         grouping_source = (trainer_root / "gaussians_grouping" / "__init__.py").read_text(encoding="utf-8")
         grouping_method_source = (trainer_root / "gaussians_grouping" / "grouping_method.py").read_text(encoding="utf-8")
         self.assertIn("torch.fft.fft2", schedule_source)
         self.assertIn("get_densify_rate", schedule_source)
+        self.assertIn("get_delayed_expon_lr_func", schedule_source)
+        self.assertIn("return decay(step - decay_from_iter)", schedule_source)
+        self.assertNotIn("birth_iter", gaussian_model_source)
+        self.assertNotIn("protect_new_points_iters", gaussian_model_source)
+        self.assertIn("prune mask has", gaussian_model_source)
         self.assertIn("gaussian_model.prune_points(mask_cache)", grouping_source)
         self.assertIn('"Opacity-weighted"', grouping_method_source)
         self.assertIn("torch.multinomial", grouping_method_source)

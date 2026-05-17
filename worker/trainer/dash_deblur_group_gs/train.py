@@ -137,7 +137,7 @@ def training(dataset, opt, pipe, group_training, testing_iterations, saving_iter
             use_group_now = in_group_window and away_from_pts and on_group_iter
         if use_group_now:
             point_caching = gaussians_grouping_and_caching(iteration, gaussians, group_training, _points_caching=point_caching)
-            print(f"[ITER {iteration}] group_active={group_training.active_count} group_cached={group_training.cached_count} UTR={group_training.UTR}")
+            progress_bar.write(f"[ITER {iteration}] group_active={group_training.active_count} group_cached={group_training.cached_count} UTR={group_training.UTR}")
 
         render_pkg = render(viewpoint_cam, gaussians, pipe, background, deblur=deblur, use_pos=opt.use_pos, 
                             lambda_s=opt.lambda_s, lambda_p=opt.lambda_p, max_clamp=opt.max_clamp, render_size=render_size)
@@ -152,11 +152,11 @@ def training(dataset, opt, pipe, group_training, testing_iterations, saving_iter
         with torch.no_grad():
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
-            if iteration % 100 == 0:
+            if iteration % 200 == 0:
                 Ll2 = l2_loss(image, gt_image)
                 psnr = (-10.0 * np.log(Ll2.cpu()) / np.log(10.0)).item()
                 progress_bar.set_postfix({"PSNR": f"{psnr:.{2}f}"})
-                progress_bar.update(100)
+                progress_bar.update(200)
             if iteration == opt.iterations:
                 progress_bar.close()
 
@@ -164,7 +164,7 @@ def training(dataset, opt, pipe, group_training, testing_iterations, saving_iter
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), dataset.model_path)
             if (iteration in saving_iterations):
                 point_caching = merge_group_cache_if_needed(gaussians, point_caching)
-                print("\n[ITER {}] Saving Gaussians".format(iteration))
+                progress_bar.write("[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
 
             # Densification
@@ -193,7 +193,6 @@ def training(dataset, opt, pipe, group_training, testing_iterations, saving_iter
                             prune_range=opt.prune_range,
                             densify_rate=densify_rate,
                             iteration=iteration,
-                            protect_new_points_iters=opt.protect_new_points_iters,
                         )
                         scheduler.update_momentum(momentum_add)
                     else:
@@ -201,7 +200,7 @@ def training(dataset, opt, pipe, group_training, testing_iterations, saving_iter
                         gaussians.densify_and_prune(opt.densify_grad_threshold, opt.densify_prune_threshold, scene.cameras_extent, size_threshold, opt.densify_with_depth, opt.prune_range)
                         momentum_add = int(gaussians.get_xyz.shape[0]) - n_before
                     point_caching = None
-                    print(f"[ITER {iteration}] render_scale={render_scale} N_GS={gaussians.get_xyz.shape[0]} densify_rate={densify_rate:.4f} momentum_add={momentum_add}")
+                    progress_bar.write(f"[ITER {iteration}] render_scale={render_scale} N_GS={gaussians.get_xyz.shape[0]} densify_rate={densify_rate:.4f} momentum_add={momentum_add}")
 
                 # Point addition
                 if iteration == opt.pts_iter:
@@ -224,7 +223,7 @@ def training(dataset, opt, pipe, group_training, testing_iterations, saving_iter
 
             if (iteration in checkpoint_iterations):
                 point_caching = merge_group_cache_if_needed(gaussians, point_caching)
-                print("\n[ITER {}] Saving Checkpoint".format(iteration))
+                progress_bar.write("[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
     point_caching = merge_group_cache_if_needed(gaussians, point_caching)

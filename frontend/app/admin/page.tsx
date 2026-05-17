@@ -3,7 +3,7 @@
 import { Cpu, Gauge, HardDrive, MemoryStick, PauseCircle, X, type LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api, formatBytes } from "@/lib/api";
-import { formatDateTime, formatEta, projectStatusLabel, taskStatusLabel, taskTypeLabel } from "@/lib/labels";
+import { effectiveTaskProgress, formatDateTime, formatTaskEta, projectStatusLabel, taskStatusLabel, taskTypeLabel } from "@/lib/labels";
 import type { AdminProjectUsage, AdminUserUsage, FeedbackEntry, ResourceSnapshotPoint, User } from "@/lib/types";
 
 const RESOURCE_LIMIT = 60;
@@ -141,7 +141,7 @@ export default function AdminPage() {
                     {project.latest_task ? (
                       <>
                         <span className={`status-pill ${project.latest_task.status}`}>{taskStatusLabel(project.latest_task.status)}</span>
-                        <small>{taskTypeLabel(project.latest_task.type)} · {project.latest_task.progress}% · {formatEta(project.latest_task.eta_seconds)}</small>
+                        <small>{taskTypeLabel(project.latest_task.type)} · {effectiveTaskProgress(project.latest_task)}% · {formatTaskEta(project.latest_task)}</small>
                       </>
                     ) : <span className="muted small">无任务</span>}
                   </span>

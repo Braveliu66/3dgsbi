@@ -85,9 +85,27 @@ class ColmapCliPolicyTests(unittest.TestCase):
         self.assertTrue(indoor.guided_matching)
         self.assertTrue(indoor.estimate_affine_shape)
         self.assertEqual(indoor.mapper, "mapper")
+        self.assertTrue(indoor.use_gpu)
+        self.assertTrue(indoor.ba_use_gpu)
+        self.assertEqual(indoor.gpu_index, "0")
         self.assertIn("vocab_tree", outdoor.matchers)
         self.assertFalse(outdoor.guided_matching)
         self.assertEqual(outdoor.mapper, "global")
+
+    def test_policy_disables_colmap_gpu_when_prefer_gpu_is_false(self) -> None:
+        policy = resolve_colmap_policy(
+            scene_type="indoor",
+            input_type="images",
+            n_images=45,
+            free_vram_gb=0,
+            quality_mode="auto",
+            capture_order="unordered",
+            prefer_gpu=False,
+            gpu_index="-1",
+        )
+
+        self.assertFalse(policy.use_gpu)
+        self.assertFalse(policy.ba_use_gpu)
 
     def test_outdoor_uses_mapper_before_large_scale_global_threshold(self) -> None:
         outdoor = resolve_colmap_policy(

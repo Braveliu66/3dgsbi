@@ -184,7 +184,7 @@
 - 本机单元测试使用 SQLite 和本地对象存储后端，验证认证、权限隔离、任务入队、worker 失败路径和禁止假 artifact。
 - Docker Compose 已覆盖 backend、worker、postgres、redis、minio、frontend；真实算法 bootstrap 仍独立执行，不在 API 启动时下载仓库或权重。
 - 当前成功产物仍只允许来自真实 LiteVGGT → Spark-SPZ 命令输出；未配置算法时任务失败且 artifact 表为空。
-- DashDeblurGroupGS 训练器内置在 `worker/trainer/dash_deblur_group_gs` 并由 worker Dockerfile 复制到 `/opt/dash_deblur_group_gs`，也可由 `DASH_DEBLUR_GROUP_REPO` 显式覆盖；训练失败时不会创建假 artifact。
+- DashDeblurGroupGS 训练器内置在 `worker/trainer/dash_deblur_group_gs`。worker Dockerfile 会复制它用于 CUDA 扩展构建；本地 Docker Compose 会把同一目录 bind mount 到 `/opt/dash_deblur_group_gs`，也可由 `DASH_DEBLUR_GROUP_REPO` 显式覆盖；训练失败时不会创建假 artifact。
 - Worker Dockerfile 从 upstream COLMAP 源码构建运行时，并在 build 阶段要求 `global_mapper`、`hierarchical_mapper`、`model_clusterer`、`model_splitter` 存在，避免运行时才发现 apt COLMAP 能力不足。
 
 ## 7. 2026-05-18 Implementation Update
@@ -192,7 +192,8 @@
 - M6 fine pipeline now uses `colmap_cli` as the default production SfM frontend, with `pycolmap` still available.
 - Fine input contract is JPG/PNG images or extracted video frames. Missing EXIF camera metadata is normal; COLMAP estimates camera/intrinsics and sparse points from images.
 - Preview LiteVGGT remains separate from fine COLMAP and keeps its own runtime/package namespace.
-- GTnet deblur, DashGaussian scheduling, and Group Training live in the embedded DashDeblurGroupGS trainer, not in backend request handling code.
-- Worker dependency goal: one PyTorch/CUDA baseline and one Dockerfile-managed DashDeblurGroupGS checkout. Do not add Speedy-Splat, duplicate renderer pruning paths, Kaolin, Open3D, Gradio, duplicate torch/CUDA, or pip cuDNN.
+- GTnet deblur, DashGaussian scheduling, and Group Training live in the embedded DashDeblurGroupGS trainer, not in backend request handling code. Backend only resolves scene/deblur presets and writes config.
+- Worker dependency goal: one PyTorch/CUDA baseline and one repo-integrated DashDeblurGroupGS trainer. Do not add Speedy-Splat, duplicate renderer pruning paths, Kaolin, Open3D, Gradio, duplicate torch/CUDA, pip cuDNN, or non-native `birth_iter`/`protect_new_points_iters` pruning state.
+- Local Docker Compose bind-mounts backend app code, frontend code, and the embedded trainer. Ordinary Python/TypeScript edits require service recreation, not image rebuild.
 - Earlier FastGS large-scene notes map to the current DashDeblurGroupGS path: global COLMAP first, then chunk-compatible DashDeblurGroupGS training on one shared coordinate system.
 - Tests cover COLMAP routing, DashDeblurGroupGS config/command generation, pipeline aliases, and static runtime checks.

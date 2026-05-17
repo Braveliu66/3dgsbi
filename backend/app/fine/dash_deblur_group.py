@@ -76,7 +76,6 @@ INDOOR_MOTION = {
     "pts_N_intpl": 4,
     "pts_N_pts": 200000,
     "pts_add_bound": 10,
-    "protect_new_points_iters": 1500,
     "dash_enable": True,
     "dash_start_iter": 3000,
     "resolution_mode": "freq",
@@ -125,7 +124,6 @@ OUTDOOR_MOTION = {
     "pts_rate": 1.3,
     "pts_dist": 3,
     "pts_add_bound": 20,
-    "protect_new_points_iters": 2500,
     "dash_start_iter": 5000,
     "dash_max_densify_rate_per_step": 0.10,
     "UTR": 0.75,
@@ -178,7 +176,6 @@ INT_KEYS = {
     "pts_N_intpl",
     "pts_N_pts",
     "pts_add_bound",
-    "protect_new_points_iters",
     "dash_start_iter",
     "max_n_gaussian",
     "dash_max_reso_scale",
@@ -422,16 +419,19 @@ def run_training_process(command: list[str], *, cwd: Path, iterations: int, prog
     tail: list[str] = []
     last_progress = 44
     for line in process.stdout:
-        text = line.rstrip()
-        print(line, end="", flush=True)
-        tail.append(text)
-        tail = tail[-80:]
-        parsed_iter = parse_iteration(text)
-        if parsed_iter is not None and iterations > 0:
-            value = 44 + int(min(1.0, parsed_iter / iterations) * 34)
-            if progress and value > last_progress:
-                last_progress = value
-                progress("fine_training", value, f"{label} iteration {parsed_iter}/{iterations}")
+        for text in split_training_output(line):
+            print(text, flush=True)
+            tail.append(text)
+            tail = tail[-80:]
+            parsed = parse_training_progress(text, iterations)
+            if parsed is not None:
+                parsed_iter, parsed_total = parsed
+                if parsed_iter % 200 != 0 and parsed_iter != parsed_total:
+                    continue
+                value = 44 + int(min(1.0, parsed_iter / parsed_total) * 34)
+                if progress and value >= last_progress:
+                    last_progress = max(last_progress, value)
+                    progress("fine_training", value, text)
     return_code = process.wait()
     if return_code != 0:
         message = "\n".join(tail) or f"{label} exited with {return_code}"
@@ -470,6 +470,23 @@ def parse_iteration(line: str) -> int | None:
         if match:
             return int(match.group(1))
     return None
+
+
+def parse_training_progress(line: str, fallback_iterations: int) -> tuple[int, int] | None:
+    matches = re.findall(r"\b(\d+)\s*/\s*(\d+)\s*\[[^\]]+\]", line)
+    if matches:
+        current, total = matches[-1]
+        return int(current), max(1, int(total))
+    parsed_iter = parse_iteration(line)
+    if parsed_iter is None or fallback_iterations <= 0:
+        return None
+    return parsed_iter, fallback_iterations
+
+
+def split_training_output(line: str) -> list[str]:
+    normalized = line.rstrip("\n").replace("\r", "\n")
+    normalized = re.sub(r"(?<!^)(\[ITER\s+\d+\])", r"\n\1", normalized)
+    return [part.strip() for part in normalized.split("\n") if part.strip()]
 
 
 def read_ply_vertex_count(path: Path) -> int:

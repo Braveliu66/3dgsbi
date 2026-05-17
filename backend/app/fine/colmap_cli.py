@@ -318,7 +318,7 @@ def resolve_colmap_policy(
         domain_size_pooling=dsp,
         use_gpu=bool(prefer_gpu),
         gpu_index=gpu_index or "-1",
-        ba_use_gpu=False,
+        ba_use_gpu=bool(prefer_gpu),
     )
 
 
@@ -474,7 +474,7 @@ def _run_colmap_attempt(
 
     database_path = workspace / "database.db"
     started = time.monotonic()
-    progress("fine_colmap_features", 24, f"extracting COLMAP CLI features from {len(files)} images")
+    progress("fine_colmap_features", 24, f"extracting COLMAP CLI features from {len(files)} images ({_gpu_status(policy)})")
     feature_command = [
         executable,
         "feature_extractor",
@@ -511,7 +511,7 @@ def _run_colmap_attempt(
     _run_colmap_command(feature_command, stage="fine_colmap_features", progress=progress, progress_value=26)
 
     for matcher in policy.matchers:
-        progress("fine_colmap_matching", 30, f"running COLMAP {matcher}_matcher")
+        progress("fine_colmap_matching", 30, f"running COLMAP {matcher}_matcher ({_gpu_status(policy)})")
         matcher_command = [
             executable,
             f"{matcher}_matcher",
@@ -555,7 +555,7 @@ def _run_colmap_attempt(
                 progress_value=34,
             )
 
-    progress("fine_colmap_mapping", 36, f"running COLMAP {policy.mapper} mapper")
+    progress("fine_colmap_mapping", 36, f"running COLMAP {policy.mapper} mapper ({_ba_gpu_status(policy)})")
     if policy.mapper == "hierarchical":
         mapper_command = [
             executable,
@@ -661,10 +661,22 @@ def _run_colmap_attempt(
             "colmap_guided_matching": policy.guided_matching,
             "colmap_estimate_affine_shape": policy.estimate_affine_shape,
             "colmap_domain_size_pooling": policy.domain_size_pooling,
+            "colmap_use_gpu": policy.use_gpu,
             "colmap_gpu_index": policy.gpu_index,
+            "colmap_ba_use_gpu": policy.ba_use_gpu,
             **{f"colmap_analyzer_{key}": value for key, value in analysis.items() if key not in {"registered_images", "registered_ratio", "points3D"}},
         },
     )
+
+
+def _gpu_status(policy: ColmapPolicy) -> str:
+    state = "on" if policy.use_gpu else "off"
+    return f"gpu={state}, gpu_index={policy.gpu_index}"
+
+
+def _ba_gpu_status(policy: ColmapPolicy) -> str:
+    state = "on" if policy.ba_use_gpu else "off"
+    return f"ba_gpu={state}, gpu_index={policy.gpu_index}"
 
 
 def analyze_model(executable: str, model_path: Path, total_images: int) -> dict[str, Any]:

@@ -18,7 +18,7 @@ from typing import Any
 import redis
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import func, inspect, select, text
 from sqlalchemy.orm import Session, selectinload
@@ -1887,6 +1887,31 @@ def admin_tasks(_: User = Depends(require_admin), db: Session = Depends(get_db))
     return {"tasks": [task_dict(item) for item in tasks]}
 
 
+@app.get("/api/tasks/{task_id}/log")
+def task_log(task_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    task = db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    project = db.get(Project, task.project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if user.role != "admin" and project.owner_id != user.id:
+        raise HTTPException(status_code=403, detail="Task access denied")
+    from app.worker import task_log_path
+
+    path = task_log_path(task.id)
+    if path.exists() and path.is_file():
+        return FileResponse(path, media_type="text/plain; charset=utf-8")
+    artifact = db.scalar(
+        select(Artifact)
+        .where(Artifact.task_id == task.id, Artifact.kind == "task_log")
+        .order_by(Artifact.created_at.desc())
+    )
+    if artifact:
+        return StreamingResponse(storage.iter_bytes(artifact.object_uri), media_type="text/plain; charset=utf-8")
+    return PlainTextResponse("\n".join(task.logs or []), media_type="text/plain; charset=utf-8")
+
+
 @app.get("/api/admin/projects")
 def admin_projects(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, Any]:
     projects = db.scalars(
@@ -1982,6 +2007,7 @@ def admin_task_summary(task: Task) -> dict[str, Any]:
         "worker_id": task.worker_id,
         "current_stage": task.current_stage,
         "eta_seconds": task.eta_seconds,
+        "logs": task.logs or [],
         "created_at": iso(task.created_at),
         "started_at": iso(task.started_at),
         "finished_at": iso(task.finished_at),

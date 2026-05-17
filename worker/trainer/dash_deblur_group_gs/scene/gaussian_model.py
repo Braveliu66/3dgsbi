@@ -59,7 +59,6 @@ class GaussianModel:
         self.spatial_lr_scale = 0
         self.deblur = deblur
         self.current_iteration = 0
-        self.birth_iter = torch.empty(0, device="cuda", dtype=torch.long)
         self.setup_functions()
 
     def create_GTnet(self, hidden=2, width=64, pos_delta=0, num_moments=4):
@@ -154,7 +153,6 @@ class GaussianModel:
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
-        self.birth_iter = torch.zeros((self.get_xyz.shape[0]), device="cuda", dtype=torch.long)
 
 
     def training_setup(self, training_args):
@@ -306,6 +304,8 @@ class GaussianModel:
         return optimizable_tensors
 
     def prune_points(self, mask):
+        if mask.shape[0] != self.get_xyz.shape[0]:
+            raise RuntimeError(f"prune mask has {mask.shape[0]} points, but GaussianModel has {self.get_xyz.shape[0]}")
         valid_points_mask = ~mask
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
 
@@ -319,7 +319,6 @@ class GaussianModel:
 
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
-        self.birth_iter = self.birth_iter[valid_points_mask]
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -364,8 +363,6 @@ class GaussianModel:
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
-        new_birth = torch.full((new_xyz.shape[0],), int(getattr(self, "current_iteration", 0)), device="cuda", dtype=torch.long)
-        self.birth_iter = torch.cat([self.birth_iter, new_birth], dim=0)
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
@@ -448,7 +445,6 @@ class GaussianModel:
         prune_range=None,
         densify_rate=1.0,
         iteration=None,
-        protect_new_points_iters=1500,
     ):
         if iteration is not None:
             self.current_iteration = iteration

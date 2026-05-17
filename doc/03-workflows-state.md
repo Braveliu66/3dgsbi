@@ -159,9 +159,12 @@ Fine workflow now runs:
 4. Run the COLMAP CLI path by default. The worker image builds upstream COLMAP with `global_mapper`, `hierarchical_mapper`, `model_clusterer`, and `model_splitter`.
 5. Select indoor/outdoor COLMAP policies by image count, input type, quality mode, GPU memory, and reconstruction feedback. Outdoor large scenes prefer `global_mapper`; only missing CLI support falls back to `mapper`.
 6. Write a COLMAP-compatible scene with `images/` and `sparse/0`.
-7. Generate a DashDeblurGroupGS config from the selected scene/deblur/Dash/Group options.
-8. Train DashDeblurGroupGS from the COLMAP scene and surface progress from training logs.
-9. Export standard `final.ply`, transcode `final_web.spz`, write `final_viewer_meta.json`, and write `metrics.json`.
+7. Resolve `fine_deblur_mode=mix` to `motion` or `defocus` from blur analysis, unless the user explicitly selected `motion`, `defocus`, or `sharp`.
+8. Generate one of four DashDeblurGroupGS configs: `indoor_motion`, `indoor_defocus`, `outdoor_motion`, or `outdoor_defocus`.
+9. Train DashDeblurGroupGS from the COLMAP scene and surface progress from training logs.
+10. Export standard `final.ply`, transcode `final_web.spz`, write `final_viewer_meta.json`, and write `metrics.json`.
 
 `colmap_sparse` is now only a legacy fine pipeline alias. The default fine pipeline is `dash_deblur_group_gs`. The deprecated `fine_sfm_backend=litevggt` fine option remains unsupported; preview LiteVGGT is unchanged.
+
+The trainer is mounted at `/opt/dash_deblur_group_gs` in local Docker Compose, so Python trainer edits are picked up after recreating the workers. The removed `protect_new_points_iters` and `birth_iter` fields are not part of the workflow.
 

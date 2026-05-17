@@ -121,8 +121,6 @@ class OptimizationParams(ParamGroup):
         self.dash_max_densify_rate_per_step = 0.10
         self.dash_start_significance_factor = 4
 
-        self.protect_new_points_iters = 1500
-
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):

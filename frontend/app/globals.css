@@ -854,6 +854,9 @@ p { line-height: 1.55; }
   border-style: solid;
   border-color: rgba(166, 63, 53, 0.24);
   background: var(--danger-soft);
+  max-width: calc(100vw - 32px);
+  max-height: min(50vh, 420px);
+  overflow: auto;
   white-space: pre-wrap;
 }
 
@@ -1591,6 +1594,8 @@ p { line-height: 1.55; }
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 12px;
   line-height: 1.55;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .modal-backdrop {
@@ -1648,6 +1653,7 @@ p { line-height: 1.55; }
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 12px;
   line-height: 1.6;
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 

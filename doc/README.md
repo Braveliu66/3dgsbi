@@ -33,10 +33,12 @@
 
 ## 2026-05-18 Image Fine COLMAP/DashDeblurGroup Notes
 
-- Image fine `dash_deblur_group_gs` defaults to the existing COLMAP CLI initialization, writes a COLMAP-compatible `images/` and `sparse/0` scene, then runs the embedded trainer from `worker/trainer/dash_deblur_group_gs` copied to `/opt/dash_deblur_group_gs`. `DASH_DEBLUR_GROUP_REPO` is only for explicit compatible trainer overrides.
+- `10-fine-pipeline.md` is the source of truth for the current fine reconstruction implementation.
+- Image fine `dash_deblur_group_gs` defaults to the existing COLMAP CLI initialization, writes a COLMAP-compatible `images/` and `sparse/0` scene, then runs the embedded trainer from `worker/trainer/dash_deblur_group_gs` mounted at `/opt/dash_deblur_group_gs` in local Docker Compose. `DASH_DEBLUR_GROUP_REPO` is only for explicit compatible trainer overrides.
 - `fine_sfm_backend=colmap_cli` is the implementation default; `fine_sfm_backend=colmap` is accepted as an alias and `pycolmap` remains available.
 - `colmap_sparse` is only a legacy fine pipeline alias.
 - Preview LiteVGGT keeps separate speed-oriented defaults with fewer frames and points.
 - Docker and task-specific downloads must prefer `https://hf-mirror.com`.
+- `birth_iter` and `protect_new_points_iters` were removed from the fused trainer and must not appear in generated configs.
 
 

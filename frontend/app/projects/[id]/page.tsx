@@ -18,6 +18,7 @@ export default function ProjectDetailPage() {
   const [viewer, setViewer] = useState<ViewerConfig | null>(null);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [logTask, setLogTask] = useState<Task | null>(null);
+  const [fullTaskLogs, setFullTaskLogs] = useState<Record<string, string>>({});
   const [selectedMedia, setSelectedMedia] = useState<NonNullable<Project["media"]>[number] | null>(null);
   const [showMedia, setShowMedia] = useState(false);
   const [brokenThumbIds, setBrokenThumbIds] = useState<Set<string>>(() => new Set());
@@ -62,6 +63,8 @@ export default function ProjectDetailPage() {
   const videoCount = media.filter((item) => item.kind === "video").length;
   const tasks = project?.tasks ?? [];
   const logs = latestTask?.logs ?? [];
+  const latestLogText = latestTask ? fullTaskLogs[latestTask.id] : "";
+  const latestLogLines = latestLogText ? latestLogText.split(/\r?\n/) : logs;
   const canStartFine = Boolean(project && !isActiveTask(latestTask) && (
     (project.input_type === "images" && imageCount >= 3) ||
     (project.input_type === "video" && videoCount === 1 && media.length === 1)
@@ -90,14 +93,30 @@ export default function ProjectDetailPage() {
       top: latestLogRef.current.scrollHeight,
       behavior: "smooth"
     });
-  }, [latestTask?.id, logs.length, logs.at(-1)]);
+  }, [latestTask?.id, latestLogText, logs.length, logs.at(-1)]);
 
   useEffect(() => {
     modalLogRef.current?.scrollTo({
       top: modalLogRef.current.scrollHeight,
       behavior: "smooth"
     });
-  }, [logTask?.id, logTask?.logs?.length, logTask?.logs?.at(-1)]);
+  }, [logTask?.id, fullTaskLogs[logTask?.id ?? ""], logTask?.logs?.length, logTask?.logs?.at(-1)]);
+
+  useEffect(() => {
+    if (!latestTask) return;
+    void refreshTaskLog(latestTask.id);
+    if (!isActiveTask(latestTask)) return;
+    const timer = window.setInterval(() => void refreshTaskLog(latestTask.id), 2000);
+    return () => window.clearInterval(timer);
+  }, [latestTask?.id, latestTask?.status, logs.length, logs.at(-1)]);
+
+  useEffect(() => {
+    if (!logTask) return;
+    void refreshTaskLog(logTask.id);
+    if (!isActiveTask(logTask)) return;
+    const timer = window.setInterval(() => void refreshTaskLog(logTask.id), 2000);
+    return () => window.clearInterval(timer);
+  }, [logTask?.id, logTask?.status, logTask?.logs?.length, logTask?.logs?.at(-1)]);
 
   async function cancelTask(task: Task) {
     setBusy(true);
@@ -109,6 +128,15 @@ export default function ProjectDetailPage() {
       setError(err instanceof Error ? err.message : "取消任务失败");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function refreshTaskLog(taskId: string) {
+    try {
+      const text = await api.taskLog(taskId);
+      setFullTaskLogs((current) => current[taskId] === text ? current : { ...current, [taskId]: text });
+    } catch {
+      return;
     }
   }
 
@@ -460,11 +488,11 @@ export default function ProjectDetailPage() {
                 ) : <div className="empty-state">暂无任务</div>}
               </section>
 
-              {logs.length ? (
+              {latestLogLines.length ? (
                 <section className="stack">
                   <h3>任务日志</h3>
                   <div className="log-console" ref={latestLogRef}>
-                    {logs.map((line, index) => <div key={`${index}-${line}`}>{line}</div>)}
+                    {latestLogLines.map((line, index) => <div key={`${index}-${line}`}>{line}</div>)}
                   </div>
                 </section>
               ) : null}
@@ -491,7 +519,7 @@ export default function ProjectDetailPage() {
             </div>
             <div className="panel-body scrollable stack">
               {logTask.error_message ? <div className="error-box">{logTask.error_message}</div> : null}
-              <pre className="code-view" ref={modalLogRef}>{formatTaskLog(logTask)}</pre>
+              <pre className="code-view" ref={modalLogRef}>{formatTaskLog(logTask, fullTaskLogs[logTask.id])}</pre>
             </div>
           </section>
         </div>
@@ -526,7 +554,8 @@ function mediaResolutionLabel(media: MediaAsset): string {
   return media.width && media.height ? `${media.width} x ${media.height}` : "resolution pending";
 }
 
-function formatTaskLog(task: Task): string {
+function formatTaskLog(task: Task, fullLog?: string): string {
+  if (fullLog && fullLog.trim()) return fullLog;
   const lines = [...(task.logs ?? [])];
   if (task.metrics && Object.keys(task.metrics).length > 0) {
     lines.push("metrics:");

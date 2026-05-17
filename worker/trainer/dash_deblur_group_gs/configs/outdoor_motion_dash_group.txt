@@ -24,7 +24,6 @@ pts_dist = 3
 pts_N_intpl = 4
 pts_N_pts = 200000
 pts_add_bound = 20
-protect_new_points_iters = 2500
 dash_enable = True
 dash_start_iter = 5000
 resolution_mode = freq

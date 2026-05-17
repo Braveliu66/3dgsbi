@@ -58,7 +58,7 @@ export function formatTaskEta(task?: Task | null): string {
 }
 
 export function estimateTaskEtaSeconds(task: Pick<Task, "progress" | "eta_seconds" | "logs" | "created_at" | "started_at">): number | null {
-  const progress = Math.max(0, Math.min(99, Number(task.progress || 0)));
+  const progress = Math.max(0, Math.min(99, effectiveTaskProgress(task)));
   if (progress <= 0) return task.eta_seconds ?? null;
   const logEstimate = estimateEtaFromLogs(task, progress);
   if (logEstimate !== null) return logEstimate;
@@ -69,6 +69,15 @@ export function estimateTaskEtaSeconds(task: Pick<Task, "progress" | "eta_second
     return Math.max(0, Math.round((elapsedSeconds * (100 - progress)) / progress));
   }
   return task.eta_seconds ?? null;
+}
+
+export function effectiveTaskProgress(task?: (Pick<Task, "progress" | "logs"> & Partial<Pick<Task, "status">>) | null): number {
+  if (!task) return 0;
+  if ("status" in task && task.status === "succeeded") return 100;
+  const stored = Math.max(0, Math.min(100, Number(task.progress || 0)));
+  const logged = latestLogProgress(task.logs ?? []);
+  if (logged === null) return Math.round(stored);
+  return Math.round(Math.max(stored, logged));
 }
 
 export function formatDateTime(value?: string | null): string {
@@ -94,10 +103,15 @@ export function formatEta(seconds?: number | null): string {
 }
 
 function estimateEtaFromLogs(task: Pick<Task, "logs" | "created_at" | "started_at">, currentProgress: number): number | null {
-  const points = (task.logs ?? []).map(parseTimedProgressLog).filter((item): item is { time: number; progress: number } => Boolean(item));
+  const directEta = latestLogEta(task.logs ?? []);
+  if (directEta !== null) return directEta;
+  const points = (task.logs ?? []).map(parseTimedProgressLog).filter((item): item is { time: number; progress: number; etaSeconds: number | null } => Boolean(item));
+  const latestEta = [...points].reverse().find((point) => point.etaSeconds !== null)?.etaSeconds;
+  if (latestEta !== undefined) return latestEta;
   if (points.length >= 2) {
-    const first = points[0];
-    const last = points[points.length - 1];
+    const window = points.slice(-8);
+    const first = window.find((point) => point.progress < window[window.length - 1].progress) ?? window[0];
+    const last = window[window.length - 1];
     const progressDelta = last.progress - first.progress;
     const secondsDelta = (last.time - first.time) / 1000;
     if (progressDelta > 0 && secondsDelta > 0) {
@@ -117,14 +131,54 @@ function estimateEtaFromLogs(task: Pick<Task, "logs" | "created_at" | "started_a
   return null;
 }
 
-function parseTimedProgressLog(line: string): { time: number; progress: number } | null {
+function latestLogProgress(logs: string[]): number | null {
+  for (let index = logs.length - 1; index >= 0; index -= 1) {
+    const point = parseProgressLog(logs[index]);
+    if (point !== null) return point.progress;
+  }
+  return null;
+}
+
+function latestLogEta(logs: string[]): number | null {
+  for (let index = logs.length - 1; index >= 0; index -= 1) {
+    const eta = parseEtaSeconds(logs[index]);
+    if (eta !== null) return eta;
+  }
+  return null;
+}
+
+function parseTimedProgressLog(line: string): { time: number; progress: number; etaSeconds: number | null } | null {
   const time = parseLogTime(line);
   if (time === null) return null;
+  const progressPoint = parseProgressLog(line);
+  if (!progressPoint) return null;
+  return { time, progress: progressPoint.progress, etaSeconds: parseEtaSeconds(line) };
+}
+
+function parseProgressLog(line: string): { progress: number } | null {
   const progressMatch = line.match(/(?:progress\s*[=:]\s*(\d{1,3})(?:\.\d+)?|(\d{1,3})(?:\.\d+)?\s*%)/i);
   const progressValue = progressMatch?.[1] ?? progressMatch?.[2];
   const progress = progressValue ? Number(progressValue) : NaN;
   if (!Number.isFinite(progress) || progress < 0 || progress > 100) return null;
-  return { time, progress };
+  return { progress };
+}
+
+function parseEtaSeconds(line: string): number | null {
+  const match = line.match(/\beta_seconds\s*=\s*(\d+)/i);
+  if (match) {
+    const value = Number(match[1]);
+    return Number.isFinite(value) ? value : null;
+  }
+  const tqdm = line.match(/\[[^\]<]*<([^,\]]+)/);
+  return tqdm ? parseDurationSeconds(tqdm[1].trim()) : null;
+}
+
+function parseDurationSeconds(value: string): number | null {
+  const parts = value.split(":");
+  if (parts.length < 1 || parts.length > 3) return null;
+  const numbers = parts.map((part) => Number(part));
+  if (numbers.some((part) => !Number.isFinite(part))) return null;
+  return numbers.reduce((total, part) => total * 60 + part, 0);
 }
 
 function parseLogTime(line: string): number | null {

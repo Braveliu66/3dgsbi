@@ -347,6 +347,7 @@ Fine tasks accept uploaded JPG/PNG images without EXIF camera metadata. Valid ta
 - `dash_enable`, `dash_start_iter`, `resolution_mode`, and `densify_mode` control DashGaussian scheduling.
 - `Grouping`, `UTR`, `grouping_from_iter`, `grouping_until_iter`, and `grouping_interval` control non-destructive Group Training.
 - `fine_trainer_repo` can point at a compatible DashDeblurGroupGS checkout; empty uses the embedded trainer or `DASH_DEBLUR_GROUP_REPO`.
+- `protect_new_points_iters` is removed and must not be sent by the UI/API. It is not part of the fused trainer contract.
 
 Fine `metrics.json` now includes:
 
@@ -359,7 +360,13 @@ Fine `metrics.json` now includes:
   "fine_training_backend": "dash_deblur_group_gs",
   "fine_training_flavor": "dash_deblur_group",
   "fine_deblur_mode": "mix",
+  "fine_deblur_mode_requested": "mix",
+  "fine_deblur_mode_effective": "motion",
+  "deblur_auto_confidence": "high",
   "deblur": 1,
+  "colmap_use_gpu": true,
+  "colmap_ba_use_gpu": true,
+  "colmap_gpu_index": "0",
   "dash_enable": true,
   "dash_start_iter": 3000,
   "Grouping": true,

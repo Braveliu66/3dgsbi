@@ -33,7 +33,7 @@ DashDeblurGroupGS 的 `diff_gaussian_rasterization` 和 `simple_knn` 扩展从�
 
 ```powershell
 git submodule update --init --recursive
-docker compose build worker-preview
+docker compose build worker-preview worker-fine
 ```
 
 构建缓存默认启用：
@@ -75,8 +75,16 @@ model_splitter
 构建和启动：
 
 ```powershell
-docker compose up --build
+docker compose up -d
 ```
+
+For local development, Compose bind-mounts the backend app, frontend app, and embedded fine trainer. After ordinary Python/TypeScript/trainer edits, recreate services without rebuilding:
+
+```powershell
+docker compose up -d --force-recreate backend worker-preview worker-fine frontend
+```
+
+Rebuild only when Dockerfile, requirements, CUDA extensions, system packages, base images, or trainer submodules change. Do not clean `.docker-build-cache/`, Docker builder cache, or the local `3dgsbi-worker:local` image unless you intentionally want COLMAP/CUDA extensions to compile again.
 
 ## 本地开发
 

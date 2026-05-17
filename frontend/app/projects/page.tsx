@@ -4,7 +4,7 @@ import Link from "next/link";
 import { FilePlus2, Image, Search, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api, formatBytes, mediaThumbnailUrl } from "@/lib/api";
-import { formatDateTime, formatTaskEta, inputTypeLabel, projectStatusLabel, taskTypeLabel } from "@/lib/labels";
+import { effectiveTaskProgress, formatDateTime, formatTaskEta, inputTypeLabel, projectStatusLabel, taskTypeLabel } from "@/lib/labels";
 import type { Project, ProjectStatus, Task } from "@/lib/types";
 
 export default function ProjectsPage() {
@@ -209,7 +209,7 @@ function projectCover(project: Project, brokenCoverIds: Set<string>): { mediaId:
 
 function ProjectTrainingProgress({ task }: { task: Task | null }) {
   if (!task) return null;
-  const progress = Math.max(0, Math.min(100, Math.round(task.progress || 0)));
+  const progress = effectiveTaskProgress(task);
   return (
     <div className="project-training">
       <div className="row between small">

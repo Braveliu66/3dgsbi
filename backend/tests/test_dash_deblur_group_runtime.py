@@ -112,6 +112,7 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         self.assertIn("dash_enable = True", text)
         self.assertIn("Grouping = True", text)
         self.assertIn("grouping_method = Opacity-weighted", text)
+        self.assertNotIn("protect_new_points_iters", text)
 
     def test_build_training_command_uses_colmap_scene_and_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import socket
 import time
@@ -432,15 +433,17 @@ def ensure_fine_weights(db, task: Task, project: Project, started: float, pipeli
 def update_task(db, task: Task, project: Project, stage: str, progress: int, started: float, *logs: str) -> None:
     task.current_stage = stage
     task.progress = max(task.progress or 0, progress)
-    task.eta_seconds = estimate_fine_eta(task, started)
+    parsed_eta = eta_from_progress_logs(logs)
+    task.eta_seconds = parsed_eta if parsed_eta is not None else estimate_fine_eta(task, started)
     if logs:
         task.logs = append_log(task.logs, *logs)
-    print(
-        "[fine-worker] progress "
-        f"task_id={task.id} project_id={project.id} stage={stage} progress={task.progress} "
-        f"eta_seconds={task.eta_seconds} messages={list(logs)}",
-        flush=True,
-    )
+    if not is_raw_training_progress(stage, logs):
+        print(
+            "[fine-worker] progress "
+            f"task_id={task.id} project_id={project.id} stage={stage} progress={task.progress} "
+            f"eta_seconds={task.eta_seconds} messages={list(logs)}",
+            flush=True,
+        )
     emit(db, project.id, "task_progress", task_payload(task), task.id)
     db.commit()
 
@@ -476,6 +479,35 @@ def estimate_fine_eta(task: Task, started: float) -> int | None:
     if progress < 20:
         return int(by_expected)
     return int(max(0, by_progress * 0.45 + by_expected * 0.55))
+
+
+def eta_from_progress_logs(logs: tuple[str, ...]) -> int | None:
+    for line in reversed(logs):
+        match = re.search(r"\[[^\]<]*<([^,\]]+)", line)
+        if not match:
+            continue
+        seconds = parse_duration_seconds(match.group(1).strip())
+        if seconds is not None:
+            return seconds
+    return None
+
+
+def is_raw_training_progress(stage: str, logs: tuple[str, ...]) -> bool:
+    return stage == "fine_training" and any("Training progress:" in line for line in logs)
+
+
+def parse_duration_seconds(value: str) -> int | None:
+    parts = value.split(":")
+    if not 1 <= len(parts) <= 3:
+        return None
+    try:
+        numbers = [int(part) for part in parts]
+    except ValueError:
+        return None
+    seconds = 0
+    for number in numbers:
+        seconds = seconds * 60 + number
+    return max(0, seconds)
 
 
 def read_bool(value: Any, fallback: bool) -> bool:

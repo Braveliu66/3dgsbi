@@ -91,6 +91,7 @@ export interface AdminTaskSummary {
   worker_id?: string | null;
   current_stage: string;
   eta_seconds?: number | null;
+  logs?: string[];
   created_at: string;
   started_at?: string | null;
   finished_at?: string | null;

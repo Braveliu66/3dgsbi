@@ -31,6 +31,7 @@ addict==2.4.0
 timm==0.6.7
 wandb==0.19.8
 lpips==0.1.4
+configargparse==1.7.1
 pytorch-msssim==1.0.0
 plyfile==1.1
 rich==13.9.4

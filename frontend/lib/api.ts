@@ -91,6 +91,24 @@ async function request<T>(path: string, init?: ApiRequestInit, base = API_BASE):
   return (await response.json()) as T;
 }
 
+async function requestText(path: string, init?: ApiRequestInit, base = API_BASE): Promise<string> {
+  const { auth = true, ...fetchInit } = init ?? {};
+  const token = auth ? getToken() : null;
+  const response = await fetch(`${base}${path}`, {
+    ...fetchInit,
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...fetchInit.headers
+    },
+    cache: "no-store"
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new ApiError(readErrorMessage(text, `${response.status} ${response.statusText}`), response.status, response.statusText);
+  }
+  return response.text();
+}
+
 function readErrorMessage(text: string, fallback: string): string {
   if (!text) return fallback;
   try {
@@ -652,6 +670,7 @@ export const api = {
   startFine: (projectId: string, options: Record<string, unknown> = {}) =>
     request<Task>(`/api/projects/${projectId}/tasks/fine`, { method: "POST", body: JSON.stringify({ options }) }),
   task: (id: string) => request<Task>(`/api/tasks/${id}`),
+  taskLog: (id: string) => requestText(`/api/tasks/${id}/log`),
   cancelTask: (id: string) => request<Task>(`/api/tasks/${id}/cancel`, { method: "POST" }),
   artifacts: (projectId: string) => request<{ artifacts: Artifact[] }>(`/api/projects/${projectId}/artifacts`),
   artifactDownloadUrl: (artifactId: string) => request<{ url: string; expires_in_seconds: number }>(`/api/artifacts/${artifactId}/download-url`),

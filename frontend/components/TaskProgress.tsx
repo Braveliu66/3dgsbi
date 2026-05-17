@@ -1,10 +1,10 @@
 import type { Task } from "@/lib/types";
-import { formatTaskEta, taskStatusLabel, taskTypeLabel } from "@/lib/labels";
+import { effectiveTaskProgress, formatTaskEta, taskStatusLabel, taskTypeLabel } from "@/lib/labels";
 
 export function TaskProgress({ task }: { task?: Task | null }) {
   if (!task) return <div className="empty-state">暂无运行任务</div>;
 
-  const progress = Math.max(0, Math.min(100, task.progress || 0));
+  const progress = effectiveTaskProgress(task);
   return (
     <div className={`task-progress ${task.status}`}>
       <div className="row between">
