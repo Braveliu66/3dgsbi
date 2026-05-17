@@ -16,6 +16,7 @@ from app.config import get_settings
 from app.database import SessionLocal, initialize_database_schema
 from app.fine.runner import PIPELINE_NAME, normalize_fine_pipeline, run_fine_pipeline
 from app.fine.types import FineContext, FineFailure
+from app.fine.video_preprocess import preprocess_fine_video
 from app.models import Artifact, Project, Task, utc_now
 from app.preview.image_preprocess import normalize_image_directory
 from app.preview.weights import ModelDownloadError, download_model_weights, weights_for_pipeline
@@ -322,6 +323,15 @@ def upload_fine_artifacts(
 
 def prepare_fine_inputs(db, task: Task, project: Project, work_dir: Path, started: float) -> tuple[str, Path, Path | None, dict[str, Any], str]:
     options = task.options or {}
+    pipeline = normalize_fine_pipeline(str(options.get("fine_pipeline") or PIPELINE_NAME))
+    if pipeline != PIPELINE_NAME:
+        raise FineFailure("UNSUPPORTED_FINE_PIPELINE", f"Fine reconstruction only supports {PIPELINE_NAME}")
+    if read_bool(options.get("fine_edgs_enabled"), False):
+        raise FineFailure("UNSUPPORTED_FINE_OPTION", "EDGS/RoMA dense initialization has been removed from this worker image")
+    option_input_type = str(options.get("input_type") or project.input_type).strip().lower()
+    if option_input_type != project.input_type:
+        raise FineFailure("FINE_INPUT_TYPE_MISMATCH", f"fine input_type {option_input_type} does not match project input_type {project.input_type}")
+
     if project.input_type == "images":
         image_count = sum(1 for media in project.media if media.kind == "image")
         print(
@@ -331,11 +341,6 @@ def prepare_fine_inputs(db, task: Task, project: Project, work_dir: Path, starte
         )
         if image_count < 8:
             raise FineFailure("INSUFFICIENT_IMAGES", "FastGS-Big fine reconstruction requires an image project with at least 8 images")
-        pipeline = normalize_fine_pipeline(str(options.get("fine_pipeline") or PIPELINE_NAME))
-        if pipeline != PIPELINE_NAME:
-            raise FineFailure("UNSUPPORTED_FINE_PIPELINE", f"Image fine reconstruction only supports {PIPELINE_NAME}")
-        if read_bool(options.get("fine_edgs_enabled"), False):
-            raise FineFailure("UNSUPPORTED_FINE_OPTION", "EDGS/RoMA dense initialization has been removed from this worker image")
         input_dir = download_media(project, work_dir)
         update_task(db, task, project, "input_downloaded", 12, started, f"downloaded {len(project.media)} media files")
         max_side = read_positive_int(options.get("fine_image_max_side"), settings.fine_image_max_side)
@@ -354,10 +359,37 @@ def prepare_fine_inputs(db, task: Task, project: Project, work_dir: Path, starte
             started,
             f"normalized {normalized.output_count} images to RGB JPEG, max side {normalized.max_side}px",
         )
-        return pipeline, normalized.output_dir, None, normalized.metrics(), "checking official FastGS-Big runtime"
+        return pipeline, normalized.output_dir, None, {**normalized.metrics(), "fine_input_type": "images"}, "checking official FastGS-Big runtime"
 
     if project.input_type == "video":
-        raise FineFailure("UNSUPPORTED_FINE_INPUT", "Video fine reconstruction is disabled; use video preview instead")
+        videos = [media for media in project.media if media.kind == "video"]
+        if len(videos) != 1 or len(project.media) != 1:
+            raise FineFailure("UNSUPPORTED_FINE_INPUT", "Video fine reconstruction requires exactly one video file")
+        print(
+            "[fine-worker] preparing video fine input "
+            f"project_id={project.id} video={videos[0].file_name} work_dir={work_dir}",
+            flush=True,
+        )
+        video_path = download_single_video(videos[0], work_dir)
+        update_task(db, task, project, "input_downloaded", 12, started, "downloaded video file")
+        scene_type = str(options.get("fine_scene_type") or options.get("scene_type") or "indoor").strip().lower()
+        result = preprocess_fine_video(
+            video_path,
+            work_dir / "input_video_frames",
+            scene_type=scene_type,
+            quality_mode=str(options.get("quality_mode") or "auto"),
+            progress=lambda stage, progress, message: update_task(db, task, project, stage, progress, started, message),
+        )
+        update_task(
+            db,
+            task,
+            project,
+            "input_ready",
+            16,
+            started,
+            f"extracted and filtered {result.metrics['video_kept_frames']} video frames for fine reconstruction",
+        )
+        return pipeline, result.output_dir, video_path, result.metrics, "checking official FastGS-Big runtime"
 
     raise FineFailure("UNSUPPORTED_FINE_INPUT", f"Unsupported fine reconstruction input type: {project.input_type}")
 

@@ -465,9 +465,15 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(payload["type"], "fine")
             self.assertEqual(payload["status"], "queued")
             self.assertEqual(payload["options"]["fine_pipeline"], "official_fastgs_big")
+            self.assertEqual(payload["options"]["fine_sfm_backend"], "colmap_cli")
+            self.assertEqual(payload["options"]["quality_mode"], "auto")
+            self.assertEqual(payload["options"]["camera_distortion"], "undistorted")
+            self.assertTrue(payload["options"]["prefer_gpu"])
+            self.assertTrue(payload["options"]["fastgs_target"])
             self.assertEqual(payload["options"]["fine_scene_profile"], "indoor_full")
             self.assertEqual(payload["options"]["scene_type"], "indoor")
             self.assertEqual(payload["options"]["fine_scene_type"], "indoor")
+            self.assertEqual(payload["options"]["input_type"], "images")
             self.assertEqual(payload["options"]["source_version"], 8)
             self.assertEqual(payload["options"]["fine_iterations"], FINE_ITERATIONS)
             self.assertNotIn("fine_amb3r_memory_device", payload["options"])
@@ -520,7 +526,7 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(options["fine_scene_type"], "outdoor")
             self.assertEqual(options["fine_scene_profile"], "outdoor_fast_clean")
 
-    def test_fine_task_preserves_explicit_pycolmap_options(self) -> None:
+    def test_fine_task_preserves_explicit_colmap_cli_options(self) -> None:
         with TestClient(app) as client, patch("app.main.enqueue_fine_task", return_value=None):
             headers = auth_headers(client)
             project_id = create_image_project(client, headers, "explicit pycolmap options")
@@ -542,6 +548,48 @@ class StorageResponseTests(unittest.TestCase):
 
             self.assertEqual(payload["options"]["fine_sfm_backend"], "colmap")
             self.assertEqual(payload["options"]["fine_colmap_threads"], 4)
+
+    def test_fine_task_rejects_invalid_scene_type_auto(self) -> None:
+        with TestClient(app) as client, patch("app.main.enqueue_fine_task", return_value=None):
+            headers = auth_headers(client)
+            project_id = create_image_project(client, headers, "invalid fine scene")
+            for index in range(8):
+                upload_response = client.post(
+                    f"/api/projects/{project_id}/media",
+                    files={"file": (f"{index}.png", PNG_BYTES, "image/png")},
+                    headers=headers,
+                )
+                upload_response.raise_for_status()
+
+            response = client.post(
+                f"/api/projects/{project_id}/tasks/fine",
+                json={"options": {"scene_type": "auto"}},
+                headers=headers,
+            )
+
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("Unsupported scene_type", response.text)
+
+    def test_fine_task_rejects_input_type_mismatch(self) -> None:
+        with TestClient(app) as client, patch("app.main.enqueue_fine_task", return_value=None):
+            headers = auth_headers(client)
+            project_id = create_image_project(client, headers, "input type mismatch")
+            for index in range(8):
+                upload_response = client.post(
+                    f"/api/projects/{project_id}/media",
+                    files={"file": (f"{index}.png", PNG_BYTES, "image/png")},
+                    headers=headers,
+                )
+                upload_response.raise_for_status()
+
+            response = client.post(
+                f"/api/projects/{project_id}/tasks/fine",
+                json={"options": {"input_type": "video", "scene_type": "indoor"}},
+                headers=headers,
+            )
+
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("input_type must match", response.text)
 
     def test_fine_task_rejects_edgs_option(self) -> None:
         with TestClient(app) as client, patch("app.main.enqueue_fine_task", return_value=None):
@@ -646,16 +694,21 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(response.status_code, 400)
             self.assertIn("Unsupported preview scene profile", response.text)
 
-    def test_video_fine_task_is_disabled(self) -> None:
+    def test_video_fine_task_is_enabled(self) -> None:
         with TestClient(app) as client, patch("app.main.enqueue_fine_task", return_value=None):
             headers = auth_headers(client)
             project_id = create_video_project(client, headers, "direct video fine start")
             upload_video(client, headers, project_id, b"not-a-real-video")
 
-            response = client.post(f"/api/projects/{project_id}/tasks/fine", json={"options": {}}, headers=headers)
+            response = client.post(f"/api/projects/{project_id}/tasks/fine", json={"options": {"scene_type": "indoor"}}, headers=headers)
 
-            self.assertEqual(response.status_code, 400)
-            self.assertIn("Video fine reconstruction is disabled", response.text)
+            response.raise_for_status()
+            payload = response.json()
+            self.assertEqual(payload["type"], "fine")
+            self.assertEqual(payload["status"], "queued")
+            self.assertEqual(payload["options"]["input_type"], "video")
+            self.assertEqual(payload["options"]["scene_type"], "indoor")
+            self.assertEqual(payload["options"]["fine_sfm_backend"], "colmap_cli")
 
     def test_video_preview_task_uses_lingbot_pipeline(self) -> None:
         fake_redis = FakeRedis()

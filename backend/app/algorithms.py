@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -83,8 +84,8 @@ ALGORITHMS: list[dict[str, Any]] = [
         "weight_paths": [],
         "commands": {},
         "source_type": "system",
-        "license_notice": "Image fine reconstruction uses pycolmap/COLMAP initialization and vendored official FastGS-Big training code.",
-        "notes": "Default image fine reconstruction pipeline: JPG/PNG normalization, pycolmap/COLMAP sparse scene, vendored official FastGS-Big train.py with optional GTnet blur-aware training, and Spark SPZ conversion.",
+        "license_notice": "Fine reconstruction uses COLMAP CLI/pycolmap initialization and vendored official FastGS-Big training code.",
+        "notes": "Default fine reconstruction pipeline: image or video-frame normalization, COLMAP CLI sparse scene, optional FastGS chunk training, PLY merge, and Spark SPZ conversion.",
     },
     {
         "name": "Deblurring-3DGS GTnet",
@@ -351,6 +352,8 @@ def extension_pair_status() -> dict[str, Any]:
 def fine_runtime_status() -> dict[str, Any]:
     torch_status = torch_info()
     spark_status = spark_converter_status()
+    colmap_status = colmap_cli_status()
+    ffmpeg_status = executable_status("ffmpeg", ["-version"])
     modules = {
         "pycolmap": import_check("pycolmap"),
         "diff_gaussian_rasterization_fastgs": import_check("diff_gaussian_rasterization_fastgs"),
@@ -361,14 +364,75 @@ def fine_runtime_status() -> dict[str, Any]:
         torch_status.get("available")
         and torch_status.get("cuda_available")
         and spark_status.get("available")
+        and colmap_status.get("available")
+        and ffmpeg_status.get("available")
         and all(item.get("available") for item in modules.values())
     )
     return {
         "available": available,
         "torch_cuda": torch_status,
         "spark_spz": spark_status,
+        "colmap_cli": colmap_status,
+        "ffmpeg": ffmpeg_status,
         **modules,
-        "error": None if available else "CUDA torch/Spark SPZ/pycolmap/diff_gaussian_rasterization_fastgs/simple_knn/fused_ssim check failed",
+        "error": None if available else "CUDA torch/Spark SPZ/COLMAP CLI/ffmpeg/pycolmap/diff_gaussian_rasterization_fastgs/simple_knn/fused_ssim check failed",
+    }
+
+
+def executable_status(command: str, args: list[str]) -> dict[str, Any]:
+    executable = shutil.which(command)
+    if not executable:
+        return {"available": False, "error": f"{command} executable was not found in PATH"}
+    try:
+        completed = subprocess.run(
+            [executable, *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+    except Exception as exc:
+        return {"available": False, "path": executable, "error": str(exc)}
+    return {
+        "available": completed.returncode == 0,
+        "path": executable,
+        "returncode": completed.returncode,
+        "version": (completed.stdout or "").splitlines()[0] if completed.stdout else None,
+        "error": None if completed.returncode == 0 else (completed.stdout or "").strip()[:500],
+    }
+
+
+def colmap_cli_status() -> dict[str, Any]:
+    status = executable_status("colmap", ["help"])
+    if not status.get("available"):
+        return status
+    executable = status["path"]
+    try:
+        completed = subprocess.run(
+            [executable, "help"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+    except Exception as exc:
+        return {"available": False, "path": executable, "error": str(exc)}
+    help_text = completed.stdout or ""
+    required = {"global_mapper", "hierarchical_mapper", "model_clusterer", "model_splitter"}
+    missing = sorted(command for command in required if command not in help_text)
+    return {
+        "available": completed.returncode == 0 and not missing,
+        "path": executable,
+        "returncode": completed.returncode,
+        "required_commands": sorted(required),
+        "missing_commands": missing,
+        "error": None if completed.returncode == 0 and not missing else f"missing COLMAP CLI commands: {', '.join(missing)}",
     }
 
 

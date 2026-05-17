@@ -49,7 +49,7 @@ RUN --mount=type=cache,id=three-dgs-worker-apt-cache,target=/var/cache/apt,shari
     mkdir -p /var/cache/apt/archives/partial /var/lib/apt/lists/partial && \
     apt-get update && apt-get install -y --no-install-recommends \
     git ca-certificates curl gnupg xz-utils build-essential cmake ninja-build libeigen3-dev \
-    ffmpeg libgl1 libglib2.0-0 libsm6 libxrender1 libxext6 && \
+    ffmpeg colmap libgl1 libglib2.0-0 libsm6 libxrender1 libxext6 && \
     if ! find /usr/local/cuda/include /usr/include /usr -path '*/cudnn.h' -print -quit 2>/dev/null | grep -q .; then \
       apt-get update && apt-get install -y --no-install-recommends libcudnn9-dev-cuda-12; \
     fi && \

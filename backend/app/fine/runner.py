@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -30,8 +31,9 @@ from app.fine.fastgs_defaults import (
     FASTGS_DEBLUR_MODE,
     FASTGS_RESOLUTION,
 )
+from app.fine.colmap_cli import build_colmap_cli_scene, build_fastgs_chunks, merge_gaussian_ply_chunks
 from app.fine.option_utils import read_float, read_int
-from app.fine.official_fastgs_big_trainer import train_official_fastgs_big
+from app.fine.official_fastgs_big_trainer import OfficialFastGSTrainResult, train_official_fastgs_big
 from app.fine.preprocess import build_pycolmap_scene, prepare_fine_images
 from app.fine.types import FineContext, FineFailure, FineResult
 from app.fine.viewer_meta import read_ply_xyz_bounds, write_far_noise_filtered_ply, write_final_viewer_meta_json, write_scaled_viewer_ply
@@ -121,7 +123,7 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
     print(
         "[fine-runner] resolved training params "
         f"iterations={iterations} blur_mode={blur_mode} fine_scene_profile={fine_scene_profile} image_max_side={image_max_side} "
-        f"sfm_backend={ctx.options.get('fine_sfm_backend') or 'pycolmap'} colmap_features={colmap_features} "
+        f"sfm_backend={ctx.options.get('fine_sfm_backend') or 'colmap_cli'} colmap_features={colmap_features} "
         f"colmap_max_size={colmap_max_size} colmap_threads={colmap_threads} colmap_matcher={colmap_matcher}",
         flush=True,
     )
@@ -170,8 +172,12 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         "fine_deblur_mode_source": deblur_mode_source,
         "fine_deblur_blur_registry": str(blur_registry_path),
         "fine_deblur_blurred_views_only": ctx.options.get("fine_deblur_blurred_views_only") or FASTGS_DEBLUR_BLURRED_VIEWS_ONLY,
-        "fine_train_resolution": ctx.options.get("fine_train_resolution") or min(image_max_side, FASTGS_RESOLUTION),
+        "fine_train_resolution": ctx.options.get("fine_train_resolution")
+        or scene_result.metrics.get("fastgs_policy_resolution")
+        or min(image_max_side, FASTGS_RESOLUTION),
     }
+    if "fine_data_device" not in ctx.options and scene_result.metrics.get("fastgs_policy_data_device"):
+        train_options["fine_data_device"] = scene_result.metrics["fastgs_policy_data_device"]
     print(
         "[fine-runner] gaussian training start "
         f"scene_dir={scene_result.scene_dir} output_dir={output_dir} iterations={iterations} "
@@ -179,13 +185,7 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         flush=True,
     )
 
-    train_result = train_official_fastgs_big(
-        scene_dir=scene_result.scene_dir,
-        output_dir=output_dir,
-        iterations=iterations,
-        options=train_options,
-        progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
-    )
+    train_result = train_fastgs_with_optional_chunks(ctx, scene_result, output_dir, iterations, train_options)
     print(
         "[fine-runner] gaussian training complete "
         f"ply_path={train_result.ply_path} metrics={_format_for_log(train_result.metrics)}",
@@ -270,6 +270,7 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         "source_version": ctx.source_version,
         "source_commits": SOURCE_COMMITS_FINE,
         "artifact_converter": "Spark SPZ",
+        "fine_input_type": ctx.options.get("input_type") or ("video" if ctx.input_video else "images"),
         "input_images": image_count,
         "training_images": len(image_files(train_input_dir)),
         "fine_scene_profile": fine_scene_profile,
@@ -309,6 +310,244 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
     )
 
 
+def train_fastgs_with_optional_chunks(
+    ctx: FineContext,
+    scene_result,
+    output_dir: Path,
+    iterations: int,
+    train_options: dict[str, Any],
+) -> OfficialFastGSTrainResult:
+    chunking_enabled = scene_result.backend == "colmap_cli" and read_bool(train_options.get("fastgs_target"), True)
+    if not chunking_enabled:
+        result = train_fastgs_with_oom_fallback(
+            scene_result.scene_dir,
+            output_dir,
+            iterations,
+            train_options,
+            progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
+        )
+        result.metrics.update({"fastgs_chunk_count": 1, "fastgs_chunk_merge_policy": "none"})
+        return result
+
+    target_images = read_int(
+        scene_result.metrics.get("fastgs_policy_chunk_target_images"),
+        max(1, scene_result.registered_images or scene_result.image_count),
+        minimum=1,
+        maximum=10_000,
+    )
+    overlap_ratio = read_float(
+        scene_result.metrics.get("fastgs_policy_overlap_ratio"),
+        0.25,
+        minimum=0.0,
+        maximum=0.60,
+    )
+    chunk_result = build_fastgs_chunks(
+        scene_result.scene_dir,
+        ctx.work_dir / "fine_fastgs_chunks",
+        scene_type=fastgs_chunk_scene_type(train_options),
+        n_images=scene_result.registered_images or scene_result.image_count,
+        target_images=target_images,
+        overlap_ratio=overlap_ratio,
+        progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
+    )
+    chunk_dirs = chunk_result.chunk_scene_dirs
+    if len(chunk_dirs) <= 1:
+        results, split_metrics = train_fastgs_chunk_or_split(
+            ctx,
+            chunk_dirs[0],
+            output_dir,
+            iterations,
+            train_options,
+            chunk_index=0,
+            scene_type=fastgs_chunk_scene_type(train_options),
+        )
+        if len(results) > 1:
+            merged_ply = output_dir / "final_raw.ply"
+            merged_vertices = merge_gaussian_ply_chunks([Path(item.ply_path) for item in results], merged_ply)
+            return OfficialFastGSTrainResult(
+                ply_path=merged_ply,
+                iterations=iterations,
+                metrics={
+                    **chunk_result.metrics,
+                    **split_metrics,
+                    "fastgs_chunk_count": len(results),
+                    "fastgs_chunk_merge_policy": "ply_vertex_concat",
+                    "fastgs_merged_vertex_count": merged_vertices,
+                    "fastgs_merged_ply": str(merged_ply),
+                },
+            )
+        result = results[0]
+        result.metrics.update({**chunk_result.metrics, "fastgs_chunk_merge_policy": "none"})
+        return result
+
+    chunk_train_root = output_dir / "chunks"
+    chunk_plys: list[Path] = []
+    chunk_metrics: dict[str, Any] = dict(chunk_result.metrics)
+    for index, chunk_scene_dir in enumerate(chunk_dirs):
+        ctx_progress(
+            ctx,
+            "fine_fastgs_chunk_training",
+            44,
+            f"training FastGS chunk {index + 1}/{len(chunk_dirs)}",
+        )
+        results, split_metrics = train_fastgs_chunk_or_split(
+            ctx,
+            chunk_scene_dir,
+            chunk_train_root / f"chunk_{index:03d}",
+            iterations,
+            train_options,
+            chunk_index=index,
+            scene_type=fastgs_chunk_scene_type(train_options),
+        )
+        chunk_metrics.update(split_metrics)
+        for result_index, result in enumerate(results):
+            chunk_plys.append(Path(result.ply_path))
+            metric_key = f"fastgs_chunk_{index:03d}" if len(results) == 1 else f"fastgs_chunk_{index:03d}_{result_index:02d}"
+            chunk_metrics[f"{metric_key}_ply"] = str(result.ply_path)
+            chunk_metrics[f"{metric_key}_metrics"] = result.metrics
+
+    merged_ply = output_dir / "final_raw.ply"
+    merged_vertices = merge_gaussian_ply_chunks(chunk_plys, merged_ply)
+    chunk_metrics.update(
+        {
+            "fastgs_chunk_count": len(chunk_plys),
+            "fastgs_chunk_merge_policy": "ply_vertex_concat",
+            "fastgs_merged_vertex_count": merged_vertices,
+            "fastgs_merged_ply": str(merged_ply),
+        }
+    )
+    return OfficialFastGSTrainResult(ply_path=merged_ply, iterations=iterations, metrics=chunk_metrics)
+
+
+def train_fastgs_chunk_or_split(
+    ctx: FineContext,
+    scene_dir: Path,
+    output_dir: Path,
+    iterations: int,
+    options: dict[str, Any],
+    *,
+    chunk_index: int,
+    scene_type: str,
+    depth: int = 0,
+) -> tuple[list[OfficialFastGSTrainResult], dict[str, Any]]:
+    try:
+        result = train_fastgs_with_oom_fallback(
+            scene_dir,
+            output_dir,
+            iterations,
+            options,
+            progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
+        )
+        return [result], {}
+    except FineFailure as exc:
+        if exc.code != "FASTGS_TRAIN_FAILED" or not is_fastgs_oom_message(exc.message) or depth >= 1:
+            raise
+        n_images = len(image_files(scene_dir / "images"))
+        if n_images < 16:
+            raise
+        split_root = output_dir.parent / f"{output_dir.name}_oom_split"
+        split_result = build_fastgs_chunks(
+            scene_dir,
+            split_root,
+            scene_type=scene_type,
+            n_images=n_images,
+            target_images=max(1, math.ceil(n_images / 2)),
+            overlap_ratio=0.15 if scene_type == "outdoor" else 0.25,
+            progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
+        )
+        if len(split_result.chunk_scene_dirs) <= 1:
+            raise
+        results: list[OfficialFastGSTrainResult] = []
+        metrics: dict[str, Any] = {
+            f"fastgs_chunk_{chunk_index:03d}_oom_split_count": len(split_result.chunk_scene_dirs),
+            f"fastgs_chunk_{chunk_index:03d}_oom_split_root": str(split_root),
+        }
+        for subindex, sub_scene_dir in enumerate(split_result.chunk_scene_dirs):
+            sub_results, sub_metrics = train_fastgs_chunk_or_split(
+                ctx,
+                sub_scene_dir,
+                output_dir.parent / f"{output_dir.name}_split_{subindex:02d}",
+                iterations,
+                options,
+                chunk_index=chunk_index,
+                scene_type=scene_type,
+                depth=depth + 1,
+            )
+            results.extend(sub_results)
+            metrics.update(sub_metrics)
+        return results, metrics
+
+
+def train_fastgs_with_oom_fallback(
+    scene_dir: Path,
+    output_dir: Path,
+    iterations: int,
+    options: dict[str, Any],
+    *,
+    progress,
+) -> OfficialFastGSTrainResult:
+    attempts = fastgs_oom_attempt_options(options)
+    last_failure: FineFailure | None = None
+    for index, attempt_options in enumerate(attempts, start=1):
+        try:
+            result = train_official_fastgs_big(
+                scene_dir=scene_dir,
+                output_dir=output_dir,
+                iterations=iterations,
+                options=attempt_options,
+                progress=progress,
+            )
+            result.metrics["fastgs_oom_retry_count"] = index - 1
+            return result
+        except FineFailure as exc:
+            if exc.code != "FASTGS_TRAIN_FAILED" or not is_fastgs_oom_message(exc.message):
+                raise
+            last_failure = exc
+            print(
+                "[fine-runner] FastGS chunk training hit OOM; retrying with lower memory options "
+                f"attempt={index} scene_dir={scene_dir} output_dir={output_dir}",
+                flush=True,
+            )
+            if output_dir.exists():
+                shutil.rmtree(output_dir)
+    assert last_failure is not None
+    raise last_failure
+
+
+def fastgs_oom_attempt_options(options: dict[str, Any]) -> list[dict[str, Any]]:
+    base = dict(options)
+    attempts = [base]
+    cpu_options = {**base, "fine_data_device": "cpu"}
+    if str(base.get("fine_data_device") or "").strip().lower() != "cpu":
+        attempts.append(cpu_options)
+    current_resolution = read_int(base.get("fine_train_resolution"), FASTGS_RESOLUTION, minimum=1, maximum=16_384)
+    for resolution in (1440, 1280, 960):
+        if current_resolution > resolution:
+            attempts.append({**cpu_options, "fine_train_resolution": resolution})
+    unique: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    for item in attempts:
+        key = (
+            str(item.get("fine_data_device") or ""),
+            read_int(item.get("fine_train_resolution"), current_resolution, minimum=1, maximum=16_384),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique
+
+
+def is_fastgs_oom_message(message: str) -> bool:
+    lowered = str(message or "").lower()
+    return any(token in lowered for token in ("out of memory", "cuda", "cublas", "cudnn", "alloc"))
+
+
+def fastgs_chunk_scene_type(options: dict[str, Any]) -> str:
+    value = str(options.get("scene_type") or options.get("fine_scene_type") or options.get("fine_scene_profile") or "").strip().lower()
+    return "outdoor" if value in {"outdoor", "outdoor_full", "outdoor_fast_clean"} else "indoor"
+
+
 def build_scene(
     ctx: FineContext,
     input_dir: Path,
@@ -326,7 +565,7 @@ def build_scene(
     min_sparse_points: int = COLMAP_MIN_SPARSE_POINTS,
     min_registered_ratio: float | None = None,
 ):
-    sfm_backend = str(ctx.options.get("fine_sfm_backend") or "pycolmap").strip().lower()
+    sfm_backend = str(ctx.options.get("fine_sfm_backend") or "colmap_cli").strip().lower()
     print(
         "[fine-runner] scene build start "
         f"requested_sfm_backend={sfm_backend} input_dir={input_dir} scene_dir={scene_dir} "
@@ -334,8 +573,33 @@ def build_scene(
         f"matcher={matcher} min_sparse_points={min_sparse_points}",
         flush=True,
     )
-    if sfm_backend not in {"pycolmap", "colmap"}:
+    if sfm_backend not in {"pycolmap", "colmap", "colmap_cli"}:
         raise FineFailure("UNSUPPORTED_FINE_SFM_BACKEND", f"Unsupported fine SfM backend: {sfm_backend}")
+    if sfm_backend in {"colmap", "colmap_cli"}:
+        input_type = str(ctx.options.get("input_type") or ("video" if getattr(ctx, "input_video", None) else "images")).strip().lower()
+        result = build_colmap_cli_scene(
+            input_dir,
+            scene_dir,
+            scene_type=str(ctx.options.get("fine_scene_type") or ctx.options.get("scene_type") or "indoor"),
+            input_type=input_type,
+            quality_mode=str(ctx.options.get("quality_mode") or "auto"),
+            capture_order=str(ctx.options.get("fine_capture_order") or "auto"),
+            prefer_gpu=read_bool(ctx.options.get("prefer_gpu"), True),
+            gpu_index=str(ctx.options.get("fine_colmap_gpu_index") or "").strip() or None,
+            min_registered_ratio=min_registered_ratio,
+            progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
+        )
+        result.metrics["sfm_min_sparse_points"] = min_sparse_points
+        result.metrics["sfm_target_sparse_points"] = COLMAP_TARGET_SPARSE_POINTS
+        point_count = int(result.point_count or 0)
+        if min_sparse_points > 0 and point_count < min_sparse_points:
+            raise FineFailure(
+                "SFM_SPARSE_POINTS_TOO_LOW",
+                f"COLMAP CLI produced {point_count} sparse points, below quality gate {min_sparse_points}",
+            )
+        if sfm_backend == "colmap":
+            result.metrics["sfm_backend_requested_alias"] = "colmap_maps_to_colmap_cli"
+        return result
 
     retryable_sfm_codes = {"COLMAP_RECONSTRUCTION_FAILED", "COLMAP_RECONSTRUCTION_INCOMPLETE"}
     try:

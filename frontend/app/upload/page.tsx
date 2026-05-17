@@ -4,7 +4,6 @@ import Link from "next/link";
 import { AlertTriangle, CheckCircle2, Eye, FileUp, Film, FolderOpen, Images, Loader2, Play, RefreshCw, Trash2, Wand2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, formatBytes, mediaFileUrl, mediaThumbnailUrl } from "@/lib/api";
-import { detectSceneType } from "@/lib/sceneDetection";
 import type { TransferProgress } from "@/lib/api";
 import { formatDateTime, inputTypeLabel, isActiveTask, projectStatusLabel } from "@/lib/labels";
 import { rememberTaskId } from "@/lib/taskTracking";
@@ -14,11 +13,11 @@ import { SplatViewer } from "@/components/SplatViewer";
 import { TaskProgress } from "@/components/TaskProgress";
 
 const MIN_INPUT_FRAMES = 1;
-const MIN_FINE_INPUT_FRAMES = 3;
+const MIN_FINE_INPUT_FRAMES = 8;
 const MAX_INPUT_FRAMES = 800;
 const UPLOAD_FILE_CONCURRENCY = 6;
 type PreviewSceneProfile = "indoor_full" | "outdoor_fast_clean";
-type SceneType = "auto" | "indoor" | "outdoor";
+type SceneType = "indoor" | "outdoor";
 const PREVIEW_SCENE_PROFILE_OPTIONS: Array<{ value: PreviewSceneProfile; label: string }> = [
   { value: "indoor_full", label: "室内" },
   { value: "outdoor_fast_clean", label: "户外" }
@@ -118,14 +117,6 @@ export default function UploadPage() {
     setError(null);
     const fileList = Array.from(files);
     try {
-      if (inputType === "images") {
-        const detection = await detectSceneType(fileList);
-        if (detection.sceneType === "indoor") {
-          setPreviewSceneProfile("indoor_full");
-        } else if (detection.sceneType === "outdoor") {
-          setPreviewSceneProfile("outdoor_fast_clean");
-        }
-      }
       const active = await ensureProject();
       const existingMedia = active.id === project?.id ? media : active.media ?? [];
       const uploadBaseOrder = Math.max(-1, ...existingMedia.map((item, index) => item.client_order ?? index)) + 1;
@@ -258,12 +249,16 @@ export default function UploadPage() {
     setError(null);
     try {
       const options: Record<string, unknown> = {};
-      if (project.input_type === "images") {
-        options.fine_scene_profile = previewSceneProfile;
-        options.fine_scene_type = sceneTypeForProfile(previewSceneProfile);
-        options.scene_type = sceneTypeForProfile(previewSceneProfile);
-        options.preserve_aspect_ratio = true;
-      }
+      const sceneType = sceneTypeForProfile(previewSceneProfile);
+      options.input_type = project.input_type;
+      options.fine_scene_profile = previewSceneProfile;
+      options.fine_scene_type = sceneType;
+      options.scene_type = sceneType;
+      options.quality_mode = "auto";
+      options.camera_distortion = "undistorted";
+      options.prefer_gpu = true;
+      options.fastgs_target = true;
+      options.preserve_aspect_ratio = true;
       const next = await api.startFine(project.id, options);
       rememberTaskId(next.id);
       setTask(next);

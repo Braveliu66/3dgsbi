@@ -561,6 +561,48 @@ def fine_scene_profile_from_scene_type(scene_type: str) -> str:
     return DEFAULT_FINE_SCENE_PROFILE
 
 
+def normalize_fine_task_scene_type(value: Any, default: str = "indoor") -> str:
+    raw = value if value not in {None, ""} else default
+    scene_type = str(raw).strip().lower()
+    if scene_type in {"indoor", "inside", "indoor_full"}:
+        return "indoor"
+    if scene_type in {"outdoor", "outside", "outdoor_full", "outdoor_fast_clean"}:
+        return "outdoor"
+    raise HTTPException(status_code=400, detail=f"Unsupported scene_type for fine reconstruction: {scene_type}")
+
+
+def normalize_fine_quality_mode(value: Any) -> str:
+    mode = str(value or "auto").strip().lower()
+    if mode not in {"auto", "quality", "speed"}:
+        raise HTTPException(status_code=400, detail=f"Unsupported quality_mode: {mode}")
+    return mode
+
+
+def normalize_fine_camera_distortion(value: Any) -> str:
+    distortion = str(value or "undistorted").strip().lower()
+    if distortion != "undistorted":
+        raise HTTPException(status_code=400, detail=f"Unsupported camera_distortion: {distortion}")
+    return distortion
+
+
+def normalize_fine_capture_order(value: Any) -> str:
+    capture_order = str(value or "auto").strip().lower()
+    if capture_order not in {"auto", "unordered", "sequential"}:
+        raise HTTPException(status_code=400, detail=f"Unsupported fine_capture_order: {capture_order}")
+    return capture_order
+
+
+def normalize_bool_option(value: Any, fallback: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return fallback
+
+
 def request_worker_cancel(task: Task) -> None:
     try:
         request_task_cancel(get_redis(), task.id, task.type)
@@ -1187,24 +1229,26 @@ def create_fine_task(
     active_task = next((item for item in project.tasks if item.status in {"queued", "running"}), None)
     if active_task:
         raise HTTPException(status_code=409, detail="Project already has an active task")
+    payload_options = dict(payload.options or {})
+    option_input_type = payload_options.get("input_type")
+    if option_input_type is not None and str(option_input_type).strip().lower() != project.input_type:
+        raise HTTPException(status_code=400, detail="fine input_type must match project input_type")
+
     image_count = sum(1 for item in project.media if item.kind == "image")
     video_count = sum(1 for item in project.media if item.kind == "video")
     if project.input_type == "images" and image_count < 8:
         raise HTTPException(status_code=400, detail="FastGS-Big fine reconstruction requires at least 8 images")
     if project.input_type == "video" and (video_count != 1 or len(project.media) != 1):
         raise HTTPException(status_code=400, detail="Video fine reconstruction requires exactly one video file")
-    if project.input_type == "video":
-        raise HTTPException(status_code=400, detail="Video fine reconstruction is disabled; use video preview instead")
     if project.input_type not in {"images", "video"}:
         raise HTTPException(status_code=400, detail="Fine reconstruction input type is unsupported")
 
     fine_pipeline = "official_fastgs_big"
-    eta_seconds = settings.fine_expected_seconds_images
-    payload_options = payload.options or {}
+    eta_seconds = settings.fine_expected_seconds_video if project.input_type == "video" else settings.fine_expected_seconds_images
     if str(payload_options.get("fine_edgs_enabled", "")).strip().lower() in {"1", "true", "yes", "on"}:
         raise HTTPException(status_code=400, detail="EDGS/RoMA dense initialization has been removed")
 
-    scene_for_defaults = normalize_parameter_scene_type(
+    scene_for_defaults = normalize_fine_task_scene_type(
         payload_options.get("fine_scene_type")
         or payload_options.get("scene_type")
         or payload_options.get("fine_scene_profile")
@@ -1212,7 +1256,7 @@ def create_fine_task(
         default="indoor",
     )
     payload_options = merged_task_options(db, fine_pipeline, scene_for_defaults, payload_options)
-    scene_type = normalize_parameter_scene_type(
+    scene_type = normalize_fine_task_scene_type(
         payload_options.get("fine_scene_type")
         or payload_options.get("scene_type")
         or payload_options.get("fine_scene_profile")
@@ -1227,10 +1271,18 @@ def create_fine_task(
     options = {
         **payload_options,
         "fine_pipeline": fine_pipeline,
+        "input_type": project.input_type,
         "scene_type": scene_type,
         "fine_scene_type": scene_type,
         "fine_scene_profile": fine_scene_profile,
+        "quality_mode": normalize_fine_quality_mode(payload_options.get("quality_mode")),
+        "camera_distortion": normalize_fine_camera_distortion(payload_options.get("camera_distortion")),
+        "prefer_gpu": normalize_bool_option(payload_options.get("prefer_gpu"), True),
+        "fastgs_target": normalize_bool_option(payload_options.get("fastgs_target"), True),
+        "fine_capture_order": normalize_fine_capture_order(payload_options.get("fine_capture_order")),
+        "fine_sfm_backend": str(payload_options.get("fine_sfm_backend") or "colmap_cli").strip().lower(),
         "source_version": project.source_version,
+        "fine_expected_seconds": eta_seconds,
         "fine_iterations": int(payload_options.get("fine_iterations") or settings.fine_iterations),
     }
     task = Task(

@@ -36,6 +36,8 @@ class FineRuntimeTests(unittest.TestCase):
         fine_status_block = algorithms_source.split("def fine_runtime_status", 1)[1].split("def ", 1)[0]
 
         self.assertIn("pycolmap", fine_status_block)
+        self.assertIn("colmap_cli", fine_status_block)
+        self.assertIn("ffmpeg", fine_status_block)
         self.assertIn("diff_gaussian_rasterization_fastgs", fine_status_block)
         self.assertIn("simple_knn", fine_status_block)
         self.assertIn("fused_ssim", fine_status_block)
@@ -98,6 +100,7 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("/etc/ld.so.conf.d/pytorch.conf", dockerfile)
         self.assertIn("retry_git", dockerfile)
         self.assertIn("libeigen3-dev", dockerfile)
+        self.assertIn("colmap", dockerfile)
         self.assertNotIn("test -f /usr/include/eigen3/Eigen/Sparse", dockerfile)
         self.assertNotIn('"/usr/include/eigen3"', dockerfile)
         self.assertNotIn("submodule update --init --recursive VSLAM/thirdparty/eigen", dockerfile)
@@ -161,12 +164,13 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertNotIn("run_video_artdeco_speed3r_pipeline", runner_source)
         self.assertIn("Unsupported fine pipeline", runner_source)
 
-    def test_fine_worker_rejects_video_inputs(self) -> None:
+    def test_fine_worker_accepts_video_inputs(self) -> None:
         source = (BACKEND_ROOT / "app" / "fine_worker.py").read_text(encoding="utf-8")
 
         self.assertIn('project.input_type == "images"', source)
         self.assertIn('project.input_type == "video"', source)
-        self.assertIn("Video fine reconstruction is disabled", source)
+        self.assertIn("preprocess_fine_video", source)
+        self.assertNotIn("Video fine reconstruction is disabled", source)
         self.assertNotIn("ensure_video_artdeco_weights", source)
 
     def test_video_fine_pipeline_raises_unsupported(self) -> None:
@@ -431,15 +435,15 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertEqual(summary.deblur_trigger_reason, "default_mixed")
         self.assertTrue(deblur_mlp_enabled_by_default(summary.mode, {}))
 
-    def test_sfm_defaults_to_pycolmap(self) -> None:
+    def test_sfm_defaults_to_colmap_cli(self) -> None:
         _, SceneBuildResult, _, build_scene, *_ = import_fine_runtime()
-        expected = SceneBuildResult(Path("scene"), "pycolmap", 8, 8, 100, {"sfm_backend": "pycolmap"})
+        expected = SceneBuildResult(Path("scene"), "colmap_cli", 8, 8, 100, {"sfm_backend": "colmap_cli"})
         ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={}, progress=None)
-        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_pycolmap_scene", return_value=expected) as pycolmap:
+        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_colmap_cli_scene", return_value=expected) as colmap_cli:
             result = build_scene(ctx, Path(tmp), Path(tmp) / "scene", 8192, 1600, 8)
 
-        self.assertEqual(result.backend, "pycolmap")
-        pycolmap.assert_called_once()
+        self.assertEqual(result.backend, "colmap_cli")
+        colmap_cli.assert_called_once()
 
     def test_build_scene_rejects_litevggt_for_image_fine(self) -> None:
         *_, build_scene, _, _ = import_fine_runtime()
@@ -461,16 +465,16 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertNotIn("sfm_backend_requested", result.metrics)
         pycolmap.assert_called_once()
 
-    def test_colmap_backend_alias_maps_to_pycolmap(self) -> None:
+    def test_colmap_backend_alias_maps_to_colmap_cli(self) -> None:
         _, SceneBuildResult, _, build_scene, *_ = import_fine_runtime()
-        expected = SceneBuildResult(Path("scene"), "pycolmap", 3, 3, 42, {"sfm_backend": "pycolmap"})
+        expected = SceneBuildResult(Path("scene"), "colmap_cli", 3, 3, 42, {"sfm_backend": "colmap_cli"})
         ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={"fine_sfm_backend": "colmap"}, progress=None)
-        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_pycolmap_scene", return_value=expected) as pycolmap:
+        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_colmap_cli_scene", return_value=expected) as colmap_cli:
             result = build_scene(ctx, Path(tmp), Path(tmp) / "scene", 8192, 1600, 8)
 
-        self.assertEqual(result.backend, "pycolmap")
-        self.assertEqual(result.metrics["sfm_backend_requested_alias"], "colmap_maps_to_pycolmap")
-        pycolmap.assert_called_once()
+        self.assertEqual(result.backend, "colmap_cli")
+        self.assertEqual(result.metrics["sfm_backend_requested_alias"], "colmap_maps_to_colmap_cli")
+        colmap_cli.assert_called_once()
 
     def test_removed_fine_sfm_backends_are_unsupported(self) -> None:
         *_, build_scene, _, _ = import_fine_runtime()
