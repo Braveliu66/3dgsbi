@@ -1,0 +1,6 @@
+[submodule "worker/trainer/dash_deblur_group_gs/submodules/diff-gaussian-rasterization"]
+	path = worker/trainer/dash_deblur_group_gs/submodules/diff-gaussian-rasterization
+	url = https://github.com/graphdeco-inria/diff-gaussian-rasterization.git
+[submodule "worker/trainer/dash_deblur_group_gs/submodules/simple-knn"]
+	path = worker/trainer/dash_deblur_group_gs/submodules/simple-knn
+	url = https://gitlab.inria.fr/bkerbl/simple-knn.git
