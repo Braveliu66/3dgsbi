@@ -59,6 +59,9 @@ from app.fine.fastgs_defaults import (
     FASTGS_SHFEATURE_LR,
     FASTGS_SIZE_PRUNE_FROM_ITER,
     FASTGS_SIZE_PRUNE_MAX_SCREEN_SIZE,
+    FASTGS_VCD_BLEND_ALPHA,
+    FASTGS_VCD_SCORE_THRESH,
+    FASTGS_VCP_BLUR_PROTECT_WEIGHT,
 )
 from app.fine.deblur_schedule import profile_for_hint
 from app.fine.option_utils import read_float, read_int
@@ -114,6 +117,9 @@ def train_official_fastgs_big(
     mult = read_float(options.get("fine_mult"), FASTGS_MULT, minimum=0.01, maximum=10.0)
     loss_thresh = read_float(options.get("fine_fastgs_loss_thresh"), FASTGS_LOSS_THRESH, minimum=0.0, maximum=1.0)
     sample_cameras = read_int(options.get("fine_fastgs_sample_cameras"), FASTGS_SAMPLE_CAMERAS, minimum=1, maximum=32)
+    vcd_blend_alpha = read_float(options.get("fine_fastgs_vcd_blend_alpha"), FASTGS_VCD_BLEND_ALPHA, minimum=0.0, maximum=1.0)
+    vcd_score_thresh = read_float(options.get("fine_fastgs_vcd_score_thresh"), FASTGS_VCD_SCORE_THRESH, minimum=0.0, maximum=1.0)
+    vcp_blur_protect_weight = read_float(options.get("fine_fastgs_vcp_blur_protect_weight"), FASTGS_VCP_BLUR_PROTECT_WEIGHT, minimum=0.0, maximum=1.0)
     lambda_dssim = read_float(options.get("fine_lambda_dssim"), FASTGS_LAMBDA_DSSIM, minimum=0.0, maximum=1.0)
     highfeature_lr = _optional_float(options, "fine_highfeature_lr", fallback=FASTGS_HIGHFEATURE_LR, minimum=1e-7, maximum=1.0)
     lowfeature_lr = _optional_float(options, "fine_lowfeature_lr", fallback=FASTGS_LOWFEATURE_LR, minimum=1e-7, maximum=1.0)
@@ -228,6 +234,12 @@ def train_official_fastgs_big(
         str(loss_thresh),
         "--fastgs_sample_cameras",
         str(sample_cameras),
+        "--fastgs_vcd_blend_alpha",
+        str(vcd_blend_alpha),
+        "--fastgs_vcd_score_thresh",
+        str(vcd_score_thresh),
+        "--fastgs_vcp_blur_protect_weight",
+        str(vcp_blur_protect_weight),
         "--grad_thresh",
         str(grad_thresh),
         "--grad_abs_thresh",
@@ -379,6 +391,9 @@ def train_official_fastgs_big(
         "percent_dense": percent_dense,
         "loss_thresh": loss_thresh,
         "fastgs_sample_cameras": sample_cameras,
+        "fastgs_vcd_blend_alpha": vcd_blend_alpha,
+        "fastgs_vcd_score_thresh": vcd_score_thresh,
+        "fastgs_vcp_blur_protect_weight": vcp_blur_protect_weight,
         "grad_thresh": grad_thresh,
         "grad_abs_thresh": grad_abs_thresh,
         "dense": dense,

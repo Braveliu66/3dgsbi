@@ -41,11 +41,11 @@ except Exception as exc:  # pragma: no cover - local dependency guard
 class LiteVGGTOfficialPathTests(unittest.TestCase):
     def test_quality_settings_follow_frame_count_profiles(self) -> None:
         cases = [
-            (8, 448, 1.0, "small"),
-            (32, 392, 1.0, "medium"),
-            (80, 336, 1.0, "large"),
-            (200, 308, 1.0, "xlarge"),
-            (400, 280, 1.0, "huge"),
+            (8, 518, 0.42, "official"),
+            (32, 518, 0.42, "official"),
+            (80, 518, 0.42, "official"),
+            (200, 518, 0.42, "official"),
+            (400, 518, 0.42, "official"),
         ]
 
         for frame_count, target_size, keep_ratio, profile in cases:
@@ -68,7 +68,7 @@ class LiteVGGTOfficialPathTests(unittest.TestCase):
 
         self.assertEqual(settings.target_size, 294)
         self.assertAlmostEqual(settings.keep_ratio, 0.95)
-        self.assertEqual(settings.quality_profile, "huge")
+        self.assertEqual(settings.quality_profile, "official")
         self.assertEqual(settings.keep_ratio_source, "user")
         self.assertEqual(settings.target_size_source, "user")
 
@@ -121,7 +121,7 @@ class LiteVGGTOfficialPathTests(unittest.TestCase):
 
         self.assertEqual(len(selected), 16)
         self.assertEqual(selected[0], files[0])
-        self.assertEqual(selected[-1], files[-1])
+        self.assertEqual(selected[-1], files[15])
         self.assertEqual(selected, sorted(selected, key=lambda path: path.name))
 
     def test_select_aligned_frames_respects_max_input_frames_as_upper_bound(self) -> None:
@@ -509,7 +509,7 @@ class LiteVGGTAdapterTests(unittest.TestCase):
         output_spz.write_bytes(b"spz")
         return 9
 
-    def test_adapter_uses_scene_coverage_preview_defaults_and_outputs_raw_ply(self) -> None:
+    def test_adapter_uses_official_pad_preview_defaults_and_outputs_raw_ply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             ctx = self._make_context(root)
@@ -525,20 +525,20 @@ class LiteVGGTAdapterTests(unittest.TestCase):
             ):
                 result = litevggt_adapter.run(ctx)
 
-        self.assertEqual(run.call_args.kwargs["keep_ratio"], 0.85)
-        self.assertEqual(run.call_args.kwargs["target_size"], 476)
-        self.assertEqual(run.call_args.kwargs["max_input_frames"], 240)
-        self.assertEqual(run.call_args.kwargs["max_points"], 5_000_000)
+        self.assertEqual(run.call_args.kwargs["keep_ratio"], 0.18)
+        self.assertEqual(run.call_args.kwargs["target_size"], 320)
+        self.assertIsNone(run.call_args.kwargs["max_input_frames"])
+        self.assertEqual(run.call_args.kwargs["max_points"], 15_000_000)
         self.assertIsNone(run.call_args.kwargs["depth_conf_thresh"])
         self.assertEqual(run.call_args.kwargs["preprocess_mode"], "pad")
         self.assertEqual(run.call_args.kwargs["inference_mode"], "single")
         self.assertEqual(run.call_args.kwargs["chunk_size"], 64)
         self.assertEqual(run.call_args.kwargs["overlap"], 16)
-        self.assertEqual(run.call_args.kwargs["loop_closure"], True)
-        self.assertEqual(run.call_args.kwargs["selection_strategy"], "scene_coverage")
-        self.assertEqual(run.call_args.kwargs["axis_trim_low_quantile"], 0.005)
-        self.assertEqual(run.call_args.kwargs["axis_trim_high_quantile"], 0.995)
-        self.assertEqual(run.call_args.kwargs["spatial_keep_quantile"], 0.985)
+        self.assertEqual(run.call_args.kwargs["loop_closure"], False)
+        self.assertEqual(run.call_args.kwargs["selection_strategy"], "global_confidence")
+        self.assertEqual(run.call_args.kwargs["axis_trim_low_quantile"], 0.0)
+        self.assertEqual(run.call_args.kwargs["axis_trim_high_quantile"], 1.0)
+        self.assertEqual(run.call_args.kwargs["spatial_keep_quantile"], 1.0)
         self.assertEqual(run.call_args.kwargs["output_ply"].name, "preview_points.ply")
         self.assertEqual(run.call_args.kwargs["output_meta_json"].name, "preview_meta.json")
 
@@ -574,18 +574,18 @@ class LiteVGGTAdapterTests(unittest.TestCase):
             ):
                 result = litevggt_adapter.run(ctx)
 
-        self.assertEqual(run.call_args.kwargs["keep_ratio"], 0.25)
-        self.assertEqual(run.call_args.kwargs["target_size"], 476)
-        self.assertEqual(run.call_args.kwargs["max_input_frames"], 240)
-        self.assertEqual(run.call_args.kwargs["max_points"], 5_000_000)
-        self.assertEqual(run.call_args.kwargs["inference_mode"], "single")
+        self.assertIsNone(run.call_args.kwargs["keep_ratio"])
+        self.assertIsNone(run.call_args.kwargs["target_size"])
+        self.assertIsNone(run.call_args.kwargs["max_input_frames"])
+        self.assertEqual(run.call_args.kwargs["max_points"], 1_500_000)
+        self.assertEqual(run.call_args.kwargs["inference_mode"], "auto")
         self.assertEqual(run.call_args.kwargs["chunk_size"], 48)
-        self.assertEqual(run.call_args.kwargs["overlap"], 12)
-        self.assertEqual(run.call_args.kwargs["loop_closure"], True)
+        self.assertEqual(run.call_args.kwargs["overlap"], 4)
+        self.assertEqual(run.call_args.kwargs["loop_closure"], False)
         self.assertEqual(run.call_args.kwargs["selection_strategy"], "global_confidence")
-        self.assertEqual(run.call_args.kwargs["axis_trim_low_quantile"], 0.02)
-        self.assertEqual(run.call_args.kwargs["axis_trim_high_quantile"], 0.98)
-        self.assertEqual(run.call_args.kwargs["spatial_keep_quantile"], 0.98)
+        self.assertEqual(run.call_args.kwargs["axis_trim_low_quantile"], 0.01)
+        self.assertEqual(run.call_args.kwargs["axis_trim_high_quantile"], 0.985)
+        self.assertEqual(run.call_args.kwargs["spatial_keep_quantile"], 0.965)
         self.assertEqual(result.metrics["preview_scene_profile"], "outdoor_fast_clean")
 
     def test_adapter_low_level_options_override_scene_profile_defaults(self) -> None:
@@ -655,14 +655,14 @@ class LiteVGGTAdapterTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["preprocess_mode"], "pad")
         self.assertEqual(run.call_args.kwargs["max_points"], 1234)
         self.assertEqual(run.call_args.kwargs["max_input_frames"], 12)
-        self.assertEqual(run.call_args.kwargs["selection_strategy"], "scene_coverage")
+        self.assertEqual(run.call_args.kwargs["selection_strategy"], "global_confidence")
         self.assertEqual(run.call_args.kwargs["inference_mode"], "ignored")
         self.assertEqual(run.call_args.kwargs["chunk_size"], 24)
         self.assertEqual(run.call_args.kwargs["overlap"], 16)
-        self.assertEqual(run.call_args.kwargs["loop_closure"], True)
-        self.assertEqual(run.call_args.kwargs["axis_trim_low_quantile"], 0.005)
-        self.assertEqual(run.call_args.kwargs["axis_trim_high_quantile"], 0.995)
-        self.assertEqual(run.call_args.kwargs["spatial_keep_quantile"], 0.985)
+        self.assertEqual(run.call_args.kwargs["loop_closure"], False)
+        self.assertEqual(run.call_args.kwargs["axis_trim_low_quantile"], 0.0)
+        self.assertEqual(run.call_args.kwargs["axis_trim_high_quantile"], 1.0)
+        self.assertEqual(run.call_args.kwargs["spatial_keep_quantile"], 1.0)
         self.assertEqual(
             sorted(run.call_args.kwargs),
             [

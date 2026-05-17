@@ -9,6 +9,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from sqlalchemy import select
+
 
 TMP = tempfile.TemporaryDirectory()
 TMP_PATH = Path(TMP.name)
@@ -23,6 +25,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app.database import SessionLocal, initialize_database_schema  # noqa: E402
 from app.fine.fastgs_defaults import FINE_ITERATIONS  # noqa: E402
+from app.litevggt_defaults import LITEVGGT_DEFAULTS_PRESET_KEY, LITEVGGT_OFFICIAL_PAD_PRESET  # noqa: E402
 from app.main import app, storage  # noqa: E402
 from app.models import Artifact, MediaAsset, PipelineParameterDefault, Task  # noqa: E402
 from app.task_control import task_cancel_key  # noqa: E402
@@ -118,7 +121,11 @@ class StorageResponseTests(unittest.TestCase):
             self.assertIn("official_fastgs_big", pipelines)
             self.assertIn("preview_max_points", {item["key"] for item in pipelines["litevggt_spz"]["fields"]})
             self.assertIn("preview_lingbot_mask_sky", {item["key"] for item in pipelines["lingbot_video_pointcloud_fast"]["fields"]})
-            self.assertIn("fine_deblur_enabled", {item["key"] for item in pipelines["official_fastgs_big"]["fields"]})
+            fastgs_keys = {item["key"] for item in pipelines["official_fastgs_big"]["fields"]}
+            self.assertIn("fine_deblur_enabled", fastgs_keys)
+            self.assertIn("fine_fastgs_vcd_blend_alpha", fastgs_keys)
+            self.assertIn("fine_fastgs_vcd_score_thresh", fastgs_keys)
+            self.assertIn("fine_fastgs_vcp_blur_protect_weight", fastgs_keys)
 
     def test_pipeline_parameter_defaults_are_admin_only_and_filter_unknown_keys(self) -> None:
         clear_pipeline_defaults()
@@ -141,6 +148,15 @@ class StorageResponseTests(unittest.TestCase):
             saved.raise_for_status()
             self.assertEqual(saved.json()["options"]["preview_max_points"], 1234)
             self.assertNotIn("unknown_option", saved.json()["options"])
+            with SessionLocal() as db:
+                row = db.scalar(
+                    select(PipelineParameterDefault).where(
+                        PipelineParameterDefault.pipeline == "litevggt_spz",
+                        PipelineParameterDefault.scene_type == "outdoor",
+                    )
+                )
+                self.assertIsNotNone(row)
+                self.assertEqual(row.options[LITEVGGT_DEFAULTS_PRESET_KEY], LITEVGGT_OFFICIAL_PAD_PRESET)
 
             loaded = client.get("/api/admin/pipeline-parameter-defaults", headers=admin_headers)
             loaded.raise_for_status()
@@ -180,7 +196,57 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(options["litevggt_target_size"], 336)
         clear_pipeline_defaults()
 
-    def test_deblur_switch_saves_auto_and_fine_task_uses_it(self) -> None:
+    def test_litevggt_stale_saved_defaults_without_preset_marker_are_ignored(self) -> None:
+        clear_pipeline_defaults()
+        with SessionLocal() as db:
+            db.add(
+                PipelineParameterDefault(
+                    pipeline="litevggt_spz",
+                    scene_type="indoor",
+                    options={
+                        "litevggt_keep_ratio": 0.55,
+                        "preview_max_points": 5_000_000,
+                        "litevggt_target_size": 476,
+                        "litevggt_point_selection_strategy": "scene_coverage",
+                    },
+                )
+            )
+            db.commit()
+
+        fake_redis = FakeRedis()
+        with TestClient(app) as client, patch("app.main.get_redis", return_value=fake_redis):
+            headers = auth_headers(client)
+            loaded = client.get("/api/admin/pipeline-parameter-defaults", headers=headers)
+            loaded.raise_for_status()
+            defaults = loaded.json()["defaults"]["litevggt_spz"]["indoor"]
+            self.assertEqual(defaults["litevggt_keep_ratio"], 0.38)
+            self.assertEqual(defaults["preview_max_points"], 2_200_000)
+            self.assertEqual(defaults["litevggt_target_size"], 336)
+            self.assertEqual(defaults["litevggt_point_selection_strategy"], "scene_coverage")
+
+            project_id = create_image_project(client, headers, "stale litevggt defaults preview")
+            upload_response = client.post(
+                f"/api/projects/{project_id}/media",
+                files={"file": ("image.png", PNG_BYTES, "image/png")},
+                headers=headers,
+            )
+            upload_response.raise_for_status()
+
+            response = client.post(
+                f"/api/projects/{project_id}/tasks/preview",
+                json={"options": {"scene_type": "indoor"}},
+                headers=headers,
+            )
+            response.raise_for_status()
+            options = response.json()["options"]
+            self.assertEqual(options["litevggt_keep_ratio"], 0.38)
+            self.assertEqual(options["preview_max_points"], 2_200_000)
+            self.assertEqual(options["litevggt_target_size"], 336)
+            self.assertEqual(options["litevggt_point_selection_strategy"], "scene_coverage")
+            self.assertEqual(options["litevggt_parameter_sources"]["litevggt_target_size"], "system_default")
+        clear_pipeline_defaults()
+
+    def test_deblur_switch_saves_true_and_fine_task_uses_it(self) -> None:
         clear_pipeline_defaults()
         with TestClient(app) as client, patch("app.main.enqueue_fine_task", return_value=None):
             headers = auth_headers(client)
@@ -190,7 +256,7 @@ class StorageResponseTests(unittest.TestCase):
                 headers=headers,
             )
             saved.raise_for_status()
-            self.assertEqual(saved.json()["options"]["fine_deblur_enabled"], "auto")
+            self.assertEqual(saved.json()["options"]["fine_deblur_enabled"], "true")
 
             project_id = create_image_project(client, headers, "deblur auto fine")
             for index in range(8):
@@ -204,7 +270,7 @@ class StorageResponseTests(unittest.TestCase):
             response = client.post(f"/api/projects/{project_id}/tasks/fine", json={"options": {"scene_type": "indoor"}}, headers=headers)
             response.raise_for_status()
 
-            self.assertEqual(response.json()["options"]["fine_deblur_enabled"], "auto")
+            self.assertEqual(response.json()["options"]["fine_deblur_enabled"], "true")
         clear_pipeline_defaults()
 
     def test_legacy_local_uri_falls_back_to_database_blob(self) -> None:

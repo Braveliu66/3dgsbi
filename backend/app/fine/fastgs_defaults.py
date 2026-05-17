@@ -165,17 +165,25 @@ FASTGS_LAMBDA_DSSIM = 0.2
 # 质量优先可试 0.05；默认 0.1 比较平衡。
 FASTGS_LOSS_THRESH = 0.1
 
+# Deblur-aware VCD blends FastGS multi-view error with base Gaussian gradients.
+FASTGS_VCD_BLEND_ALPHA = 0.6
+FASTGS_VCD_SCORE_THRESH = 0.3
+
+# Deblur-aware VCP lowers score-based prune pressure in regions where GTnet
+# predicts stronger training-time blur. Opacity/scale prune are not protected.
+FASTGS_VCP_BLUR_PROTECT_WEIGHT = 0.65
+
 # clone 类型 densify 梯度阈值。
 # 越低越容易 clone/加密，点更多，细节可能更好但更慢/更易飞点。
-FASTGS_GRAD_THRESH = 0.001
+FASTGS_GRAD_THRESH = 0.0007
 
 # split 类型 densify 的绝对梯度阈值。
 # 越低越容易 split；0.00035 是较常用平衡值。
-FASTGS_GRAD_ABS_THRESH = 0.0005
+FASTGS_GRAD_ABS_THRESH = 0.00035
 
 # FastGS densify_grad_threshold。
 # 质量优先建议 0.0002；motion blur 场景可以试 0.0005。
-FASTGS_DENSIFY_GRAD_THRESHOLD = 0.0002
+FASTGS_DENSIFY_GRAD_THRESHOLD = 0.00015
 
 # 每隔多少 iter 做一次 densify 检查。
 # 100 表示每 100 轮加密/剪枝判断一次。
@@ -199,7 +207,7 @@ FASTGS_DENSIFY_FROM_ITER = 500
 # densify 到第几轮结束。
 # 15000 对 30000 轮训练是质量优先设置。
 # 点云少/细节不足时可以到 18000 或 20000。
-FASTGS_DENSIFY_UNTIL_ITER = 24_000
+FASTGS_DENSIFY_UNTIL_ITER = 26_000
 
 # VCD/VCP 采样多少个相机计算多视角 score。
 # 12 对你这种少图场景等于基本全采样，比较稳。
@@ -236,22 +244,22 @@ FASTGS_LATE_PRUNE_UNTIL_ITER = 30_000
 
 # late prune 的 opacity 阈值。
 # 0.005 是轻剪；0.02 以上会更强，可能剪掉远端细节。
-FASTGS_LATE_PRUNE_MIN_OPACITY = 0.005
+FASTGS_LATE_PRUNE_MIN_OPACITY = 0.003
 
 # late prune 的 score 阈值。
 # 1.0 基本最保守；0.95/0.98 会更积极剪。
-FASTGS_LATE_PRUNE_SCORE_THRESH = 0.95
+FASTGS_LATE_PRUNE_SCORE_THRESH = 0.97
 FASTGS_LATE_PRUNE_MAX_WORLD_SCALE_RATIO = 0.12
-FASTGS_LATE_PRUNE_MAX_FRACTION = 0.03
+FASTGS_LATE_PRUNE_MAX_FRACTION = 0.02
 
 # final prune 的 opacity 阈值。
 # 0.001 很轻，质量优先推荐。
 # 如果飞点很多可试 0.003 或 0.005，但可能损失细节。
-FASTGS_FINAL_PRUNE_MIN_OPACITY = 0.005
+FASTGS_FINAL_PRUNE_MIN_OPACITY = 0.003
 # final prune 的 score 阈值。
 # 1.0 最保守，尽量不按 score 剪。
 # 如果后处理飞点很多，可试 0.98 或 0.95。
-FASTGS_FINAL_PRUNE_SCORE_THRESH = 0.90
+FASTGS_FINAL_PRUNE_SCORE_THRESH = 0.95
 FASTGS_FINAL_PRUNE_MAX_WORLD_SCALE_RATIO = 0.10
 
 
@@ -260,16 +268,15 @@ FASTGS_FINAL_PRUNE_MAX_WORLD_SCALE_RATIO = 0.10
 # ============================================================
 
 # Deblur 开关。
-# auto 表示根据 blur detection / mode 自动决定是否启用。
-# true 表示强制启用，false 表示关闭。
-FASTGS_DEBLUR_ENABLED = "auto"
+# 默认统一启用 GTnet；清晰图像由 transform 正则压向恒等变换。
+# false 表示显式关闭。
+FASTGS_DEBLUR_ENABLED = "true"
 
 # Deblur 模式。
 # defocus: 失焦/景深糊，最稳，不使用 position moments。
 # motion: 运动模糊/拖影，使用位置扰动。
-# mixed: defocus + motion 都开，最强但最容易软/飞点。
-# 如果检测结果是 defocus，建议改成 "defocus"，不要默认 mixed。
-FASTGS_DEBLUR_MODE = "defocus"
+# mixed: defocus + motion 都开；默认不再按检测结果切换模式。
+FASTGS_DEBLUR_MODE = "mixed"
 
 # blur registry 路径。
 # 空字符串表示由 pipeline 自动生成/传入。
@@ -289,7 +296,7 @@ FASTGS_DEBLUR_SCHEDULE_PROFILE = "quality"
 # Deblur warmup 轮数。
 # 7000 表示前 7000 轮不走 Deblur，先用普通 FastGS 稳定几何和加密。
 # 对 30000 轮来说 7000 偏保守但稳定；想更早去模糊可用 3000~5000。
-FASTGS_DEBLUR_WARMUP_ITERS = 5_000
+FASTGS_DEBLUR_WARMUP_ITERS = 3_000
 
 # Deblur motion/mixed 的 moments 数量。
 # motion/mixed 模式下通常会多次 rasterize，5 质量高但慢。
@@ -315,8 +322,7 @@ FASTGS_DEBLUR_LAMBDA_S = 0.015
 
 # position/motion blur 强度。
 # motion/mixed 用 0.01。
-# defocus 模式建议设 0.0。
-FASTGS_DEBLUR_LAMBDA_P = 0.0
+FASTGS_DEBLUR_LAMBDA_P = 0.01
 
 # GTnet 对 scale/rotation delta 的最大 clamp。
 # 1.1 表示训练时最多把 Gaussian 扩到 1.1 倍左右。
@@ -325,8 +331,7 @@ FASTGS_DEBLUR_MAX_CLAMP = 1.08
 
 # position delta 最大位移。
 # motion/mixed 用 0.02。
-# defocus 模式建议设 0.0。
-FASTGS_DEBLUR_MAX_POSITION_DELTA = 0.0
+FASTGS_DEBLUR_MAX_POSITION_DELTA = 0.02
 
 # GTnet transform 正则权重。
 # 0.0: GTnet 自由度最大，去模糊强，但可能更容易飞点。
@@ -340,10 +345,8 @@ FASTGS_DEBLUR_TRANSFORM_REG_WEIGHT = 0.003
 FASTGS_DEBLUR_XYZ_LR_SCALE = 0.1
 
 # 是否只有 blurred 图像走 Deblur。
-# true: 只有 registry 中 blurred=true 的图片走 Deblur，清晰图走普通 FastGS。
-# false: 所有图片都走 Deblur，适合官方那种全模糊数据集。
-# 你的业务数据通常建议 true。
-FASTGS_DEBLUR_BLURRED_VIEWS_ONLY = "true"
+# 默认 false：所有训练图像都走 Deblur，不再用 registry 预判模糊类型。
+FASTGS_DEBLUR_BLURRED_VIEWS_ONLY = "false"
 
 # Keep GTnet as a training-time blur renderer only.  The final stage disables
 # deblur and fine-tunes ordinary Gaussians from clear frames for PLY/SPZ export.

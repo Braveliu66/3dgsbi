@@ -32,6 +32,7 @@ from app.fine.fastgs_defaults import (
     FASTGS_LATE_PRUNE_FROM_ITER,
     FASTGS_LATE_PRUNE_INTERVAL,
     FASTGS_LATE_PRUNE_UNTIL_ITER,
+    FASTGS_VCP_BLUR_PROTECT_WEIGHT,
 )
 from app.fine.deblur_schedule import (
     DeblurFastGSSchedule,
@@ -45,6 +46,7 @@ from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+from scene.blur_kernel import compute_blur_indicator
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -67,12 +69,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     blur_registry = load_blur_registry(getattr(opt, "deblur_blur_registry", ""))
     if deblur_state.enabled:
         opt.deblur_warmup_iters = min(max(0, int(opt.deblur_warmup_iters)), max(0, int(opt.iterations) - 1))
-        blurred_views_only = str(getattr(opt, "deblur_blurred_views_only", "true")).strip().lower() not in {"0", "false", "no", "off"}
-        if blurred_views_only and not blur_registry:
-            print(
-                "[Deblur][WARN] deblur is enabled but no blur registry was loaded. "
-                "Sharp/Deblur view routing will not force all training views through deblur."
-            )
     deblur_schedule = build_deblur_training_schedule(opt, deblur_state)
     print(
         "[DeblurSchedule] "
@@ -202,22 +198,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         viewpoint_cam = viewpoint_stack.pop(rand_idx)
         _ = viewpoint_indices.pop(rand_idx)
         if deblur_state.enabled and not deblur_loss_active:
-            clear_cameras = [
-                cam for cam in scene.getTrainCameras().copy()
-                if is_sharp_score_view(cam, blur_registry)
-            ]
-            if clear_cameras:
-                viewpoint_cam = clear_cameras[randint(0, len(clear_cameras) - 1)]
+            train_cameras = scene.getTrainCameras().copy()
+            if train_cameras:
+                viewpoint_cam = train_cameras[randint(0, len(train_cameras) - 1)]
         if sharp_refine_active and option_bool(
             getattr(opt, "deblur_sharp_refine_clear_only", "true"),
             True,
         ):
-            clear_cameras = [
-                cam for cam in scene.getTrainCameras().copy()
-                if is_sharp_score_view(cam, blur_registry)
-            ]
-            if clear_cameras:
-                viewpoint_cam = clear_cameras[randint(0, len(clear_cameras) - 1)]
+            train_cameras = scene.getTrainCameras().copy()
+            if train_cameras:
+                viewpoint_cam = train_cameras[randint(0, len(train_cameras) - 1)]
 
         # Render
         if (iteration - 1) == debug_from:
@@ -273,8 +263,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     if camlist:
                         sharp_score_sample_count += len(camlist)
                         _, pruning_score = compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, opt)
+                        blur_indicator = compute_blur_indicator(
+                            deblur_state,
+                            gaussians.get_xyz,
+                            gaussians.get_scaling,
+                            gaussians.get_rotation,
+                            [camera.camera_center for camera in camlist],
+                        )
                     else:
                         sharp_score_skipped_steps += 1
+                        blur_indicator = None
                     final_max_world_scale = scale_limit_from_extent(
                         scene.cameras_extent,
                         getattr(opt, "fastgs_final_prune_max_world_scale_ratio", 0.0),
@@ -284,6 +282,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         pruning_score = pruning_score,
                         score_thresh = opt.fastgs_final_prune_score_thresh,
                         max_world_scale = final_max_world_scale,
+                        blur_indicator = blur_indicator,
+                        blur_protect_weight = getattr(opt, "fastgs_vcp_blur_protect_weight", FASTGS_VCP_BLUR_PROTECT_WEIGHT),
                     )
                     deblur_final_pruned = True
                     print(f"\n[ITER {iteration}] FastGS final prune complete {final_prune_metrics}")
@@ -389,6 +389,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if camlist:
                     sharp_score_sample_count += len(camlist)
                     _, pruning_score = compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, opt)                    
+                    blur_indicator = compute_blur_indicator(
+                        deblur_state,
+                        gaussians.get_xyz,
+                        gaussians.get_scaling,
+                        gaussians.get_rotation,
+                        [camera.camera_center for camera in camlist],
+                    )
                     late_max_world_scale = scale_limit_from_extent(
                         scene.cameras_extent,
                         getattr(opt, "fastgs_late_prune_max_world_scale_ratio", 0.0),
@@ -400,6 +407,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         max_world_scale = late_max_world_scale,
                         use_score = scene_profile.name != "indoor",
                         use_scale = scene_profile.name != "indoor",
+                        blur_indicator = blur_indicator,
+                        blur_protect_weight = getattr(opt, "fastgs_vcp_blur_protect_weight", FASTGS_VCP_BLUR_PROTECT_WEIGHT),
                     )
                     before_prune_count = int(gaussians.get_xyz.shape[0])
                     safe_prune_mask = runtime_schedule.safe_prune_mask(
@@ -448,10 +457,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     # scene.save(iteration)
     print(f"Gaussian number: {gaussians._xyz.shape[0]}")
     print(f"Training time: {total_time}")
+    final_metrics = collect_final_metrics(
+        dataset.model_path,
+        opt.iterations,
+        scene,
+        gaussians,
+        pipe,
+        background,
+        opt.mult,
+        total_time,
+    )
     if deblur_state.enabled and deblur_photometric_views == 0:
         raise RuntimeError(
             "Deblur was enabled, but no training view used deblur render. "
-            "Check deblur_blurred_views_only, blur_registry, and image_name matching."
+            "Check deblur warmup, sharp refine, and total iteration settings."
         )
     write_deblur_metrics(
         dataset.model_path,
@@ -474,6 +493,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         last_deblur_reg,
         opt,
         deblur_schedule,
+        final_metrics,
     )
 
 
@@ -496,49 +516,15 @@ def load_blur_registry(path):
     return {}
 
 
-def is_deblur_view(viewpoint_camera, blur_registry, opt):
-    blurred_views_only = str(getattr(opt, "deblur_blurred_views_only", "true")).strip().lower() not in {"0", "false", "no", "off"}
-    if not blurred_views_only:
-        return True
-    entry = blur_registry_entry(viewpoint_camera, blur_registry)
-    if not entry:
-        return False
-    return bool(entry.get("blurred")) and not bool(entry.get("rejected"))
+def is_deblur_view(_viewpoint_camera, _blur_registry, _opt):
+    return True
 
 
-def sample_sharp_score_cameras(scene, blur_registry, opt):
-    cameras = [
-        camera
-        for camera in scene.getTrainCameras().copy()
-        if is_sharp_score_view(camera, blur_registry)
-    ]
+def sample_sharp_score_cameras(scene, _blur_registry, opt):
+    cameras = scene.getTrainCameras().copy()
     if not cameras:
         return []
     return sampling_cameras(cameras, opt.fastgs_sample_cameras)
-
-
-def is_sharp_score_view(viewpoint_camera, blur_registry):
-    if not blur_registry:
-        return True
-    entry = blur_registry_entry(viewpoint_camera, blur_registry)
-    if not entry:
-        return True
-    return not bool(entry.get("blurred")) and not bool(entry.get("rejected"))
-
-
-def blur_registry_entry(viewpoint_camera, blur_registry):
-    image_name = str(getattr(viewpoint_camera, "image_name", ""))
-    candidates = [
-        image_name,
-        f"{image_name}.jpg",
-        f"{image_name}.jpeg",
-        f"{image_name}.png",
-    ]
-    for candidate in candidates:
-        entry = blur_registry.get(candidate)
-        if isinstance(entry, dict):
-            return entry
-    return None
 
 
 def set_xyz_learning_rate(gaussians, lr):
@@ -669,6 +655,157 @@ def schedule_late_prune_active(iteration, schedule):
     return int(schedule["late_prune_from"]) <= iteration < int(schedule["late_prune_until"])
 
 
+def collect_final_metrics(model_path, iteration, scene, gaussians, pipe, background, mult, training_seconds):
+    metrics = {
+        "training_time_seconds": round(float(training_seconds), 3),
+        "training_time_minutes": round(float(training_seconds) / 60.0, 3),
+        "final_gaussians": int(gaussians.get_xyz.shape[0]),
+    }
+    metrics.update(storage_metrics(model_path, iteration))
+
+    try:
+        metrics.update(evaluate_render_quality(scene, gaussians, pipe, background, mult))
+    except Exception as exc:
+        metrics["final_quality_metrics_error"] = str(exc)
+        print(f"[FINAL METRICS][WARN] failed to compute quality metrics: {exc}")
+
+    try:
+        speed_cameras = select_final_eval_cameras(scene)[1]
+        metrics.update(measure_render_speed(speed_cameras, gaussians, pipe, background, mult))
+    except Exception as exc:
+        metrics["final_render_speed_error"] = str(exc)
+        print(f"[FINAL METRICS][WARN] failed to compute render speed: {exc}")
+
+    print_final_metrics(metrics)
+    return metrics
+
+
+def select_final_eval_cameras(scene):
+    test_cameras = scene.getTestCameras()
+    if test_cameras:
+        return "test", test_cameras
+    return "train", scene.getTrainCameras()
+
+
+def evaluate_render_quality(scene, gaussians, pipe, background, mult):
+    split, cameras = select_final_eval_cameras(scene)
+    if not cameras:
+        return {
+            "final_eval_split": split,
+            "final_eval_images": 0,
+            "final_psnr": None,
+            "final_ssim": None,
+            "final_lpips": None,
+        }
+
+    from lpipsPyTorch.modules.lpips import LPIPS
+
+    lpips_model = LPIPS(net_type="vgg").to("cuda").eval()
+    l1_total = 0.0
+    psnr_total = 0.0
+    ssim_total = 0.0
+    lpips_total = 0.0
+    with torch.no_grad():
+        for viewpoint in cameras:
+            image = torch.clamp(render_fastgs(viewpoint, gaussians, pipe, background, mult)["render"], 0.0, 1.0)
+            gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+            image_batch = image.unsqueeze(0)
+            gt_batch = gt_image.unsqueeze(0)
+            l1_total += float(l1_loss(image, gt_image).mean().item())
+            psnr_total += float(psnr(image_batch, gt_batch).mean().item())
+            ssim_total += float(fast_ssim(image_batch, gt_batch).mean().item())
+            lpips_total += float(lpips_model(image_batch, gt_batch).mean().item())
+
+    count = len(cameras)
+    torch.cuda.empty_cache()
+    return {
+        "final_eval_split": split,
+        "final_eval_images": count,
+        "final_l1": round(l1_total / count, 6),
+        "final_psnr": round(psnr_total / count, 6),
+        "final_ssim": round(ssim_total / count, 6),
+        "final_lpips": round(lpips_total / count, 6),
+    }
+
+
+def measure_render_speed(cameras, gaussians, pipe, background, mult):
+    if not cameras:
+        return {
+            "final_render_frames": 0,
+            "final_render_fps": None,
+            "final_render_time_ms": None,
+        }
+
+    with torch.no_grad():
+        render_fastgs(cameras[0], gaussians, pipe, background, mult)["render"]
+        torch.cuda.synchronize()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for viewpoint in cameras:
+            render_fastgs(viewpoint, gaussians, pipe, background, mult)["render"]
+        end.record()
+        torch.cuda.synchronize()
+
+    elapsed_ms = float(start.elapsed_time(end))
+    frame_count = len(cameras)
+    render_time_ms = elapsed_ms / max(frame_count, 1)
+    fps = 1000.0 / render_time_ms if render_time_ms > 0 else None
+    return {
+        "final_render_frames": frame_count,
+        "final_render_total_ms": round(elapsed_ms, 3),
+        "final_render_time_ms": round(render_time_ms, 3),
+        "final_render_fps": round(fps, 3) if fps is not None else None,
+    }
+
+
+def storage_metrics(model_path, iteration):
+    metrics = {
+        "final_ply_path": None,
+        "final_ply_bytes": None,
+        "final_ply_mb": None,
+        "final_model_dir_bytes": None,
+        "final_model_dir_mb": None,
+    }
+    if not model_path:
+        return metrics
+
+    final_ply = os.path.join(model_path, "point_cloud", f"iteration_{iteration}", "point_cloud.ply")
+    if os.path.exists(final_ply):
+        ply_bytes = os.path.getsize(final_ply)
+        metrics["final_ply_path"] = final_ply
+        metrics["final_ply_bytes"] = int(ply_bytes)
+        metrics["final_ply_mb"] = round(ply_bytes / (1024.0 * 1024.0), 3)
+
+    total_bytes = 0
+    for root, _dirs, files in os.walk(model_path):
+        for filename in files:
+            path = os.path.join(root, filename)
+            try:
+                total_bytes += os.path.getsize(path)
+            except OSError:
+                pass
+    metrics["final_model_dir_bytes"] = int(total_bytes)
+    metrics["final_model_dir_mb"] = round(total_bytes / (1024.0 * 1024.0), 3)
+    return metrics
+
+
+def print_final_metrics(metrics):
+    print(
+        "[FINAL METRICS] "
+        f"split={metrics.get('final_eval_split')} "
+        f"images={metrics.get('final_eval_images')} "
+        f"PSNR={metrics.get('final_psnr')} "
+        f"SSIM={metrics.get('final_ssim')} "
+        f"LPIPS={metrics.get('final_lpips')} "
+        f"FPS={metrics.get('final_render_fps')} "
+        f"render_ms={metrics.get('final_render_time_ms')} "
+        f"final_ply_mb={metrics.get('final_ply_mb')} "
+        f"model_dir_mb={metrics.get('final_model_dir_mb')} "
+        f"training_time_s={metrics.get('training_time_seconds')}"
+    )
+
+
 def write_deblur_metrics(
     model_path,
     gaussians,
@@ -690,6 +827,7 @@ def write_deblur_metrics(
     last_deblur_reg,
     opt,
     deblur_schedule=None,
+    final_metrics=None,
 ):
     if not model_path:
         return
@@ -729,9 +867,13 @@ def write_deblur_metrics(
         "fastgs_late_prune_max_world_scale_ratio": getattr(opt, "fastgs_late_prune_max_world_scale_ratio", None),
         "fastgs_late_prune_max_fraction": getattr(opt, "fastgs_late_prune_max_fraction", None),
         "fastgs_final_prune_max_world_scale_ratio": getattr(opt, "fastgs_final_prune_max_world_scale_ratio", None),
+        "fastgs_vcd_blend_alpha": getattr(opt, "fastgs_vcd_blend_alpha", None),
+        "fastgs_vcd_score_thresh": getattr(opt, "fastgs_vcd_score_thresh", None),
+        "fastgs_vcp_blur_protect_weight": getattr(opt, "fastgs_vcp_blur_protect_weight", None),
         "deblur_last_transform_regularization": last_deblur_reg,
         "deblur_schedule": deblur_schedule or {},
         "final_gaussians": int(gaussians.get_xyz.shape[0]),
+        **(final_metrics or {}),
         **deblur_state.metrics(),
     }
     path = os.path.join(model_path, "fastgs_deblur_metrics.json")

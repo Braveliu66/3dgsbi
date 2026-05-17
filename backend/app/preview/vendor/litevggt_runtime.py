@@ -257,24 +257,11 @@ def reset_litevggt_model_cache_for_tests() -> None:
 
 def resolve_litevggt_quality_settings(frame_count: int, options: dict[str, Any] | None = None) -> LiteVGGTQualitySettings:
     options = options or {}
-    frame_count = int(frame_count)
+    _ = int(frame_count)
 
-    if frame_count <= 16:
-        profile = "small"
-        target_size = 448
-    elif frame_count <= 48:
-        profile = "medium"
-        target_size = 392
-    elif frame_count <= 128:
-        profile = "large"
-        target_size = 336
-    elif frame_count <= 256:
-        profile = "xlarge"
-        target_size = 308
-    else:
-        profile = "huge"
-        target_size = 280
-    keep_ratio = 1.0
+    profile = "official"
+    target_size = 518
+    keep_ratio = 0.42
 
     target_size_source = "auto"
     if options.get("target_size") is not None:
@@ -348,7 +335,10 @@ def resolve_litevggt_frame_selection(
     if usable <= 0:
         return LiteVGGTFrameSelection([], np.empty((0,), dtype=np.int32), max(1, requested_stride), stride_source, effective_budget)
 
-    selected_indices = _evenly_select_indices(candidate_indices, usable)
+    if requested_stride <= 0 and (max_frames is None or max_frames >= total):
+        selected_indices = candidate_indices[:usable]
+    else:
+        selected_indices = _evenly_select_indices(candidate_indices, usable)
     selected_files = [files[index] for index in selected_indices]
     if requested_stride > 0:
         effective_stride = requested_stride
@@ -629,9 +619,14 @@ def load_litevggt_padded_image(path: Path, target_size: int) -> tuple[np.ndarray
         raise PreviewFailure("LITEVGGT_INVALID_IMAGE_SHAPE", f"invalid image dimensions: {path}")
 
     target_size = _align_litevggt_target_size(target_size)
-    scale = target_size / float(max(width, height))
-    resized_width = max(1, min(target_size, int(round(width * scale))))
-    resized_height = max(1, min(target_size, int(round(height * scale))))
+    if width >= height:
+        resized_width = target_size
+        resized_height = _align_litevggt_target_size(height * (target_size / float(width)))
+    else:
+        resized_height = target_size
+        resized_width = _align_litevggt_target_size(width * (target_size / float(height)))
+    resized_width = max(1, min(target_size, resized_width))
+    resized_height = max(1, min(target_size, resized_height))
     image = image.resize((resized_width, resized_height), Image.Resampling.BICUBIC)
 
     canvas = np.ones((target_size, target_size, 3), dtype=np.float32)
@@ -664,7 +659,7 @@ def run_litevggt_reconstruction(
     edge_keep_ratio: float = 0.0,
     axis_trim_low_quantile: float = 0.0,
     axis_trim_high_quantile: float = 1.0,
-    selection_strategy: str = "scene_coverage",
+    selection_strategy: str = "global_confidence",
     **_unused_options,
 ) -> LiteVGGTReconstruction:
     import torch
@@ -769,7 +764,7 @@ def run_litevggt_reconstruction(
                 axis_trim_high_quantile=axis_trim_high_quantile,
             )
 
-            point_selection_strategy = str(selection_strategy or "scene_coverage").strip().lower()
+            point_selection_strategy = str(selection_strategy or "global_confidence").strip().lower()
             if point_selection_strategy in {"global", "global_confidence"}:
                 selected_points, selected_colors, selected_confidence, point_frame_indices = select_points_by_confidence(
                     points,
@@ -803,6 +798,12 @@ def run_litevggt_reconstruction(
             intrinsic_array = intrinsic.squeeze(0).detach().float().cpu().numpy()
             selected_count = int(selected_points.shape[0])
             peak_mb = int(torch.cuda.max_memory_allocated() / 1024 / 1024) if torch.cuda.is_available() else 0
+            frame_selection_metric = (
+                "official_prefix_aligned"
+                if frame_selection_result.frame_stride_source == "auto"
+                and (max_input_frames is None or max_input_frames >= original_frame_count)
+                else "bounded_even_selection"
+            )
             return LiteVGGTReconstruction(
                 files=files,
                 frame_indices=np.asarray(frame_indices, dtype=np.int32),
@@ -820,7 +821,7 @@ def run_litevggt_reconstruction(
                     "aligned_frame_count": int(len(files)),
                     "litevggt_pose_frame_count": int(w2c_array.shape[0]),
                     "skipped_frame_count": int(original_frame_count - len(files)),
-                    "frame_selection": "scene_coverage",
+                    "frame_selection": frame_selection_metric,
                     "litevggt_frame_stride": int(frame_selection_result.frame_stride),
                     "litevggt_frame_stride_source": frame_selection_result.frame_stride_source,
                     "litevggt_frame_budget": int(frame_selection_result.frame_budget),
@@ -1714,7 +1715,7 @@ def run_litevggt_pointcloud_windowed(
     min_scene_change: float = 0.0,
     window_voxel_diag_ratio: float = 0.0,
     final_voxel_diag_ratio: float = 0.0,
-    selection_strategy: str = "scene_coverage",
+    selection_strategy: str = "global_confidence",
     axis_trim_low_quantile: float = 0.0,
     axis_trim_high_quantile: float = 1.0,
     spatial_keep_quantile: float = 1.0,
@@ -1836,7 +1837,7 @@ def run_litevggt_pointcloud_windowed(
     window_alignment_fallback_count = 0
     window_alignment_rejected_count = 0
     model_cache_metrics: dict[str, Any] = {}
-    point_selection_metric = str(selection_strategy or "scene_coverage").strip().lower()
+    point_selection_metric = str(selection_strategy or "global_confidence").strip().lower()
     quality = resolve_litevggt_quality_settings(len(files), {"target_size": target_size, "keep_ratio": keep_ratio})
     window_point_budget = max(1, int(np.ceil(max(1, int(max_points)) / max(1, len(windows)) * 1.25))) if max_points > 0 else 0
 

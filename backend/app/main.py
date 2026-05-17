@@ -29,13 +29,16 @@ from app.database import SessionLocal, engine, get_db, initialize_database_schem
 from app.fine.fastgs_defaults import DEFAULT_FINE_SCENE_PROFILE, FINE_SCENE_PROFILE_MAX_SIDES
 from app.models import AlgorithmRegistry, Artifact, Feedback, MediaAsset, PipelineParameterDefault, Project, Task, TaskEvent, UploadSession, User, WorkerHeartbeat, new_id, utc_now
 from app.pipeline_parameters import (
+    effective_saved_defaults_for,
     VALID_PIPELINES,
     VALID_SCENE_TYPES,
     defaults_payload,
     merged_task_options,
+    merged_task_options_with_sources,
     normalize_parameter_scene_type,
     pipeline_parameter_schema,
     sanitize_pipeline_options,
+    stored_defaults_for,
     system_defaults_for,
 )
 from app.resources import collect_resources
@@ -1103,7 +1106,18 @@ def create_preview_task(
         default="indoor",
     )
     if pipeline in VALID_PIPELINES:
-        payload_options = merged_task_options(db, pipeline, scene_for_defaults, payload_options)
+        payload_options, parameter_sources = merged_task_options_with_sources(
+            db,
+            pipeline,
+            scene_for_defaults,
+            payload_options,
+        )
+        if pipeline == "litevggt_spz":
+            payload_options["litevggt_parameter_sources"] = {
+                key: value
+                for key, value in parameter_sources.items()
+                if key.startswith("litevggt_") or key.startswith("preview_") or key == "scene_type"
+            }
     options = {
         **payload_options,
         "pipeline": pipeline,
@@ -1748,7 +1762,8 @@ def save_pipeline_parameter_defaults(
         raise HTTPException(status_code=404, detail=f"Unsupported scene type: {scene_type}")
     options = sanitize_pipeline_options(pipeline, payload.options or {})
     if pipeline == "official_fastgs_big" and isinstance(options.get("fine_deblur_enabled"), bool):
-        options["fine_deblur_enabled"] = "auto" if options["fine_deblur_enabled"] else "false"
+        options["fine_deblur_enabled"] = "true" if options["fine_deblur_enabled"] else "false"
+    stored_options = stored_defaults_for(pipeline, options)
     row = db.scalar(
         select(PipelineParameterDefault).where(
             PipelineParameterDefault.pipeline == pipeline,
@@ -1756,17 +1771,20 @@ def save_pipeline_parameter_defaults(
         )
     )
     if row:
-        row.options = options
+        row.options = stored_options
         row.updated_at = utc_now()
     else:
-        row = PipelineParameterDefault(pipeline=pipeline, scene_type=scene, options=options)
+        row = PipelineParameterDefault(pipeline=pipeline, scene_type=scene, options=stored_options)
         db.add(row)
     db.commit()
     db.refresh(row)
     return {
         "pipeline": row.pipeline,
         "scene_type": row.scene_type,
-        "options": {**system_defaults_for(row.pipeline, row.scene_type), **(row.options or {})},
+        "options": {
+            **system_defaults_for(row.pipeline, row.scene_type),
+            **effective_saved_defaults_for(row.pipeline, row.options),
+        },
         "updated_at": iso(row.updated_at),
     }
 

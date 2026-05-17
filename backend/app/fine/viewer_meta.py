@@ -317,11 +317,11 @@ def camera_fov_y_degrees(camera: Any) -> float | None:
 
 
 FAR_NOISE_PROFILE_FACTORS = {
-    "indoor_full": 1.25,
-    "mixed_balanced": 1.45,
-    "outdoor_fast_clean": 1.85,
+    "indoor_full": 1.15,
+    "mixed_balanced": 1.25,
+    "outdoor_fast_clean": 1.60,
 }
-FAR_NOISE_LOW_OPACITY = 0.03
+FAR_NOISE_LOW_OPACITY = 0.04
 
 
 def _ply_opacity_to_probability(values: np.ndarray) -> np.ndarray:

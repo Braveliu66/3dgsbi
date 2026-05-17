@@ -6,6 +6,12 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.litevggt_defaults import (
+    LITEVGGT_DEFAULTS_PRESET_KEY,
+    litevggt_effective_saved_defaults,
+    litevggt_stored_defaults,
+    litevggt_system_defaults,
+)
 from app.fine.fastgs_defaults import (
     FASTGS_DATA_DEVICE,
     FASTGS_DENSE,
@@ -13,6 +19,9 @@ from app.fine.fastgs_defaults import (
     FASTGS_DENSIFY_FROM_ITER,
     FASTGS_DENSIFY_UNTIL_ITER,
     FASTGS_FEATURE_LR,
+    FASTGS_FINAL_PRUNE_MAX_WORLD_SCALE_RATIO,
+    FASTGS_FINAL_PRUNE_MIN_OPACITY,
+    FASTGS_FINAL_PRUNE_SCORE_THRESH,
     FASTGS_GRAD_ABS_THRESH,
     FASTGS_GRAD_THRESH,
     FASTGS_HIGHFEATURE_LR,
@@ -41,6 +50,9 @@ from app.fine.fastgs_defaults import (
     FASTGS_SIZE_PRUNE_FROM_ITER,
     FASTGS_SIZE_PRUNE_MAX_SCREEN_SIZE,
     FASTGS_SIZE_PRUNE_MAX_WORLD_SCALE_RATIO,
+    FASTGS_VCD_BLEND_ALPHA,
+    FASTGS_VCD_SCORE_THRESH,
+    FASTGS_VCP_BLUR_PROTECT_WEIGHT,
     FASTGS_DEBLUR_AUTO_SCHEDULE,
     FASTGS_DEBLUR_BLURRED_VIEWS_ONLY,
     FASTGS_DEBLUR_ENABLED,
@@ -69,6 +81,8 @@ from app.models import PipelineParameterDefault
 
 VALID_PIPELINES = {"litevggt_spz", "lingbot_video_pointcloud_fast", "official_fastgs_big"}
 VALID_SCENE_TYPES = {"indoor", "outdoor"}
+PIPELINE_DEFAULTS_PRESET_KEY = "_pipeline_defaults_preset"
+FASTGS_DEFAULTS_PRESET = "fastgs_scene_defaults_2026_05_17_v1"
 
 SCENE_PROFILES = {
     "indoor": {"preview_scene_profile": "indoor_full", "fine_scene_profile": "indoor_full"},
@@ -76,62 +90,8 @@ SCENE_PROFILES = {
 }
 
 LITEVGGT_DEFAULTS: dict[str, dict[str, Any]] = {
-    "indoor": {
-        "scene_type": "indoor",
-        "preview_scene_profile": "indoor_full",
-        "preview_image_max_side": 518,
-        "preview_image_jpeg_quality": 90,
-        "litevggt_keep_ratio": 0.55,
-        "preview_max_points": 3_000_000,
-        "litevggt_max_input_frames": 240,
-        "litevggt_target_size": 240,
-        "litevggt_frame_stride": None,
-        "litevggt_depth_conf_thresh": None,
-        "litevggt_preprocess_mode": "pad",
-        "litevggt_inference_mode": "single",
-        "litevggt_chunk_size": 48,
-        "litevggt_overlap": 8,
-        "litevggt_loop_closure": True,
-        "litevggt_keyframe_target": None,
-        "litevggt_min_frame_gap": 2,
-        "litevggt_min_scene_change": 0.065,
-        "litevggt_window_voxel_diag_ratio": 1 / 700,
-        "litevggt_final_voxel_diag_ratio": 1 / 700,
-        "litevggt_point_selection_strategy": "scene_coverage",
-        "litevggt_axis_trim_low_quantile": 0.02,
-        "litevggt_axis_trim_high_quantile": 0.90,
-        "litevggt_spatial_keep_quantile": 0.975,
-        "preview_fixed_splat_radius_scale": 0.22,
-        "preview_fixed_splat_opacity": 0.55,
-    },
-    "outdoor": {
-        "scene_type": "outdoor",
-        "preview_scene_profile": "outdoor_fast_clean",
-        "preview_image_max_side": 518,
-        "preview_image_jpeg_quality": 90,
-        "litevggt_keep_ratio": 0.25,
-        "preview_max_points": 4_000_000,
-        "litevggt_max_input_frames": 240,
-        "litevggt_target_size": 476,
-        "litevggt_frame_stride": None,
-        "litevggt_depth_conf_thresh": None,
-        "litevggt_preprocess_mode": "pad",
-        "litevggt_inference_mode": "single",
-        "litevggt_chunk_size": 48,
-        "litevggt_overlap": 8,
-        "litevggt_loop_closure": True,
-        "litevggt_keyframe_target": 240,
-        "litevggt_min_frame_gap": 3,
-        "litevggt_min_scene_change": 3.0,
-        "litevggt_window_voxel_diag_ratio": 1 / 350,
-        "litevggt_final_voxel_diag_ratio": 1 / 450,
-        "litevggt_point_selection_strategy": "global_confidence",
-        "litevggt_axis_trim_low_quantile": 0.001,
-        "litevggt_axis_trim_high_quantile": 0.995,
-        "litevggt_spatial_keep_quantile": 0.99,
-        "preview_fixed_splat_radius_scale": 0.22,
-        "preview_fixed_splat_opacity": 0.55,
-    },
+    "indoor": litevggt_system_defaults("indoor"),
+    "outdoor": litevggt_system_defaults("outdoor"),
 }
 
 LINGBOT_DEFAULTS: dict[str, dict[str, Any]] = {
@@ -220,6 +180,9 @@ FASTGS_DEFAULTS: dict[str, dict[str, Any]] = {
         "fine_lambda_dssim": FASTGS_LAMBDA_DSSIM,
         "fine_fastgs_loss_thresh": FASTGS_LOSS_THRESH,
         "fine_fastgs_sample_cameras": FASTGS_SAMPLE_CAMERAS,
+        "fine_fastgs_vcd_blend_alpha": FASTGS_VCD_BLEND_ALPHA,
+        "fine_fastgs_vcd_score_thresh": FASTGS_VCD_SCORE_THRESH,
+        "fine_fastgs_vcp_blur_protect_weight": FASTGS_VCP_BLUR_PROTECT_WEIGHT,
         "fine_fastgs_size_prune_from_iter": FASTGS_SIZE_PRUNE_FROM_ITER,
         "fine_fastgs_size_prune_max_screen_size": FASTGS_SIZE_PRUNE_MAX_SCREEN_SIZE,
         "fine_fastgs_size_prune_max_world_scale_ratio": FASTGS_SIZE_PRUNE_MAX_WORLD_SCALE_RATIO,
@@ -231,9 +194,9 @@ FASTGS_DEFAULTS: dict[str, dict[str, Any]] = {
         "fine_fastgs_late_prune_score_thresh": FASTGS_LATE_PRUNE_SCORE_THRESH,
         "fine_fastgs_late_prune_max_world_scale_ratio": FASTGS_LATE_PRUNE_MAX_WORLD_SCALE_RATIO,
         "fine_fastgs_late_prune_max_fraction": FASTGS_LATE_PRUNE_MAX_FRACTION,
-        "fine_fastgs_final_prune_min_opacity": 0.005,
-        "fine_fastgs_final_prune_score_thresh": 0.90,
-        "fine_fastgs_final_prune_max_world_scale_ratio": 0.10,
+        "fine_fastgs_final_prune_min_opacity": FASTGS_FINAL_PRUNE_MIN_OPACITY,
+        "fine_fastgs_final_prune_score_thresh": FASTGS_FINAL_PRUNE_SCORE_THRESH,
+        "fine_fastgs_final_prune_max_world_scale_ratio": FASTGS_FINAL_PRUNE_MAX_WORLD_SCALE_RATIO,
         "fine_deblur_enabled": FASTGS_DEBLUR_ENABLED,
         "fine_deblur_mode": FASTGS_DEBLUR_MODE,
         "fine_deblur_auto_schedule": FASTGS_DEBLUR_AUTO_SCHEDULE,
@@ -259,6 +222,162 @@ FASTGS_DEFAULTS: dict[str, dict[str, Any]] = {
     }
     for scene_type in VALID_SCENE_TYPES
 }
+
+FASTGS_DEFAULTS["indoor"].update(
+    {
+        "scene_type": "indoor",
+        "fine_scene_type": "indoor",
+        "fine_scene_profile": "indoor_full",
+        "fine_image_max_side": 1500,
+        "fine_train_resolution": 1500,
+        "fine_iterations": 32_000,
+        "fine_data_device": "cuda",
+        "fine_colmap_max_image_size": 1500,
+        "fine_sift_max_num_features": 24_000,
+        "fine_colmap_matcher": "auto",
+        "fine_colmap_threads": 16,
+        "fine_min_registered_ratio": 0.60,
+        "fine_blur_reject_ratio": 0.08,
+        "fine_position_lr_init": 0.00016,
+        "fine_position_lr_final": 0.0000016,
+        "fine_position_lr_delay_mult": 0.01,
+        "fine_position_lr_max_steps": 32_000,
+        "fine_feature_lr": 0.0025,
+        "fine_shfeature_lr": 0.005,
+        "fine_highfeature_lr": 0.018,
+        "fine_lowfeature_lr": 0.0025,
+        "fine_opacity_lr": 0.025,
+        "fine_scaling_lr": 0.004,
+        "fine_rotation_lr": 0.001,
+        "fine_percent_dense": 0.0015,
+        "fine_dense": 0.006,
+        "fine_grad_thresh": 0.0007,
+        "fine_grad_abs_thresh": 0.00030,
+        "fine_densify_grad_threshold": 0.00014,
+        "fine_densification_interval": 100,
+        "fine_densify_from_iter": 500,
+        "fine_densify_until_iter": 24_000,
+        "fine_opacity_reset_interval": 100_000,
+        "fine_mult": 0.70,
+        "fine_lambda_dssim": 0.20,
+        "fine_fastgs_loss_thresh": 0.075,
+        "fine_fastgs_sample_cameras": 12,
+        "fine_fastgs_size_prune_from_iter": 3_000,
+        "fine_fastgs_size_prune_max_screen_size": 12,
+        "fine_fastgs_size_prune_max_world_scale_ratio": 0.12,
+        "fine_fastgs_late_prune_enabled": True,
+        "fine_fastgs_late_prune_interval": 4_000,
+        "fine_fastgs_late_prune_from_iter": 28_000,
+        "fine_fastgs_late_prune_until_iter": 32_000,
+        "fine_fastgs_late_prune_min_opacity": 0.004,
+        "fine_fastgs_late_prune_score_thresh": 0.96,
+        "fine_fastgs_late_prune_max_world_scale_ratio": 0.10,
+        "fine_fastgs_late_prune_max_fraction": 0.025,
+        "fine_fastgs_final_prune_min_opacity": 0.004,
+        "fine_fastgs_final_prune_score_thresh": 0.92,
+        "fine_fastgs_final_prune_max_world_scale_ratio": 0.08,
+        "fine_deblur_enabled": "true",
+        "fine_deblur_mode": "mixed",
+        "fine_deblur_auto_schedule": "true",
+        "fine_deblur_schedule_profile": "quality",
+        "fine_deblur_late_densify_enabled": "false",
+        "fine_deblur_warmup_iters": 5_000,
+        "fine_deblur_extra_points_enabled": "false",
+        "fine_deblur_sharp_refine_enabled": "true",
+        "fine_deblur_sharp_refine_from_iter": 28_000,
+        "fine_deblur_sharp_refine_clear_only": "false",
+        "fine_deblur_topology_sharp_only": "true",
+        "fine_deblur_num_moments": 4,
+        "fine_deblur_gtnet_lr": 0.001,
+        "fine_deblur_hidden": 3,
+        "fine_deblur_width": 64,
+        "fine_deblur_lambda_s": 0.012,
+        "fine_deblur_lambda_p": 0.006,
+        "fine_deblur_max_clamp": 1.08,
+        "fine_deblur_max_position_delta": 0.012,
+        "fine_deblur_transform_reg_weight": 0.003,
+        "fine_deblur_xyz_lr_scale": 0.12,
+        "fine_deblur_blurred_views_only": "true",
+    }
+)
+
+FASTGS_DEFAULTS["outdoor"].update(
+    {
+        "scene_type": "outdoor",
+        "fine_scene_type": "outdoor",
+        "fine_scene_profile": "outdoor_fast_clean",
+        "fine_image_max_side": 1080,
+        "fine_train_resolution": 1080,
+        "fine_iterations": 24_000,
+        "fine_data_device": "cuda",
+        "fine_colmap_max_image_size": 1080,
+        "fine_sift_max_num_features": 16_000,
+        "fine_colmap_matcher": "auto",
+        "fine_colmap_threads": 16,
+        "fine_min_registered_ratio": 0.55,
+        "fine_blur_reject_ratio": 0.12,
+        "fine_position_lr_init": 0.00013,
+        "fine_position_lr_final": 0.0000013,
+        "fine_position_lr_delay_mult": 0.01,
+        "fine_position_lr_max_steps": 24_000,
+        "fine_feature_lr": 0.0025,
+        "fine_shfeature_lr": 0.004,
+        "fine_highfeature_lr": 0.015,
+        "fine_lowfeature_lr": 0.0025,
+        "fine_opacity_lr": 0.022,
+        "fine_scaling_lr": 0.0035,
+        "fine_rotation_lr": 0.001,
+        "fine_percent_dense": 0.001,
+        "fine_dense": 0.004,
+        "fine_grad_thresh": 0.0010,
+        "fine_grad_abs_thresh": 0.00050,
+        "fine_densify_grad_threshold": 0.00022,
+        "fine_densification_interval": 120,
+        "fine_densify_from_iter": 500,
+        "fine_densify_until_iter": 16_000,
+        "fine_opacity_reset_interval": 100_000,
+        "fine_mult": 0.65,
+        "fine_lambda_dssim": 0.20,
+        "fine_fastgs_loss_thresh": 0.11,
+        "fine_fastgs_sample_cameras": 8,
+        "fine_fastgs_size_prune_from_iter": 2_500,
+        "fine_fastgs_size_prune_max_screen_size": 10,
+        "fine_fastgs_size_prune_max_world_scale_ratio": 0.08,
+        "fine_fastgs_late_prune_enabled": True,
+        "fine_fastgs_late_prune_interval": 3_000,
+        "fine_fastgs_late_prune_from_iter": 20_000,
+        "fine_fastgs_late_prune_until_iter": 24_000,
+        "fine_fastgs_late_prune_min_opacity": 0.008,
+        "fine_fastgs_late_prune_score_thresh": 0.90,
+        "fine_fastgs_late_prune_max_world_scale_ratio": 0.06,
+        "fine_fastgs_late_prune_max_fraction": 0.04,
+        "fine_fastgs_final_prune_min_opacity": 0.008,
+        "fine_fastgs_final_prune_score_thresh": 0.88,
+        "fine_fastgs_final_prune_max_world_scale_ratio": 0.06,
+        "fine_deblur_enabled": "true",
+        "fine_deblur_mode": "mixed",
+        "fine_deblur_auto_schedule": "true",
+        "fine_deblur_schedule_profile": "balanced",
+        "fine_deblur_late_densify_enabled": "false",
+        "fine_deblur_warmup_iters": 4_000,
+        "fine_deblur_extra_points_enabled": "false",
+        "fine_deblur_sharp_refine_enabled": "true",
+        "fine_deblur_sharp_refine_from_iter": 21_000,
+        "fine_deblur_sharp_refine_clear_only": "false",
+        "fine_deblur_topology_sharp_only": "true",
+        "fine_deblur_num_moments": 3,
+        "fine_deblur_gtnet_lr": 0.001,
+        "fine_deblur_hidden": 3,
+        "fine_deblur_width": 64,
+        "fine_deblur_lambda_s": 0.010,
+        "fine_deblur_lambda_p": 0.004,
+        "fine_deblur_max_clamp": 1.06,
+        "fine_deblur_max_position_delta": 0.008,
+        "fine_deblur_transform_reg_weight": 0.005,
+        "fine_deblur_xyz_lr_scale": 0.08,
+        "fine_deblur_blurred_views_only": "true",
+    }
+)
 
 SYSTEM_DEFAULTS = {
     "litevggt_spz": LITEVGGT_DEFAULTS,
@@ -306,7 +425,7 @@ def litevggt_fields() -> list[dict[str, Any]]:
         field("litevggt_frame_stride", "固定抽帧步长", "nullable_number", "输入抽帧", "例如 2 表示隔帧取样；空值表示交给关键帧策略。", min=1, max=10000, step=1),
         field("litevggt_depth_conf_thresh", "深度置信度阈值", "nullable_number", "点云过滤", "丢弃低置信度深度点；空值表示使用运行时默认逻辑。", min=-100, max=100, step=0.01),
         field("litevggt_preprocess_mode", "预处理模式", "select", "输入预处理", "pad 保留完整画面，crop 裁剪到目标比例。", options=["pad", "crop"]),
-        field("litevggt_inference_mode", "推理模式", "select", "推理策略", "single 一次处理全部帧；chunk/window 用于长序列或显存不足场景。", options=["single", "chunk", "window"]),
+        field("litevggt_inference_mode", "推理模式", "select", "推理策略", "auto 使用运行时默认路径；single 一次处理全部帧；windowed 用于长序列或显存不足场景。", options=["auto", "single", "windowed"]),
         field("litevggt_chunk_size", "chunk 帧数", "number", "推理策略", "分块推理时每块帧数，越大上下文更完整但更占显存。", min=1, max=512, step=1),
         field("litevggt_overlap", "chunk 重叠帧数", "number", "推理策略", "相邻 chunk 的重叠帧数，越大连续性更好但计算更多。", min=0, max=512, step=1),
         field("litevggt_loop_closure", "回环一致性", "boolean", "推理策略", "开启后有利于环绕拍摄/闭环场景结构一致。"),
@@ -359,6 +478,12 @@ def fastgs_fields() -> list[dict[str, Any]]:
         field("fine_iterations", "训练轮数", "number", "训练基础", "FastGS-Big 总训练轮数。", min=5000, max=60000, step=100),
         field("fine_train_resolution", "训练分辨率", "number", "训练基础", "FastGS 训练分辨率参数 -r。", min=1, max=16384, step=1),
         field("fine_data_device", "数据设备", "select", "训练基础", "训练数据放置设备。cuda 更快但显存占用更高。", options=["cuda", "cpu"]),
+        field("fine_colmap_max_image_size", "COLMAP 最大边长", "number", "COLMAP", "COLMAP 特征提取和建图输入图像最大边长。", min=512, max=4096, step=1),
+        field("fine_sift_max_num_features", "SIFT 最大特征数", "number", "COLMAP", "每张图最多提取的 SIFT 特征数。", min=1024, max=32768, step=1),
+        field("fine_colmap_matcher", "COLMAP matcher", "select", "COLMAP", "auto 根据图片数量选择；exhaustive 更稳；sequential 更快。", options=["auto", "exhaustive", "sequential"]),
+        field("fine_colmap_threads", "COLMAP 线程数", "number", "COLMAP", "COLMAP 特征提取、匹配和建图使用的线程数。", min=1, max=32, step=1),
+        field("fine_min_registered_ratio", "最小注册比例", "nullable_number", "COLMAP", "COLMAP 最小成功注册图片比例；空值使用运行时默认。", min=0.30, max=0.95, step=0.01),
+        field("fine_blur_reject_ratio", "模糊剔除比例", "number", "输入预处理", "精修前剔除最模糊图片的比例。", min=0, max=0.45, step=0.01),
         field("fine_position_lr_init", "位置初始学习率", "number", "学习率", "Gaussian xyz 初始学习率。", min=1e-8, max=1, step=0.00001),
         field("fine_position_lr_final", "位置最终学习率", "number", "学习率", "训练后期位置微调学习率。", min=1e-9, max=1, step=0.000001),
         field("fine_position_lr_delay_mult", "位置 LR delay", "number", "学习率", "前期位置学习率延迟倍率。", min=0, max=1, step=0.001),
@@ -383,6 +508,9 @@ def fastgs_fields() -> list[dict[str, Any]]:
         field("fine_lambda_dssim", "DSSIM 权重", "number", "Loss", "总 loss 中 DSSIM 权重。", min=0, max=1, step=0.01),
         field("fine_fastgs_loss_thresh", "FastGS loss 阈值", "number", "FastGS", "VCD/VCP loss 阈值。", min=0, max=1, step=0.01),
         field("fine_fastgs_sample_cameras", "采样相机数", "number", "FastGS", "VCD/VCP 多视角 score 使用的相机数。", min=1, max=32, step=1),
+        field("fine_fastgs_vcd_blend_alpha", "VCD error 权重", "number", "FastGS", "VCD 双信号中多视误差信号的权重。", min=0, max=1, step=0.01),
+        field("fine_fastgs_vcd_score_thresh", "VCD 混合阈值", "number", "FastGS", "VCD error/gradient 混合分数阈值。", min=0, max=1, step=0.01),
+        field("fine_fastgs_vcp_blur_protect_weight", "VCP 模糊保护", "number", "FastGS", "按 GTnet 模糊强度降低 score 裁剪压力。", min=0, max=1, step=0.01),
         field("fine_fastgs_size_prune_from_iter", "size prune 开始轮数", "number", "Prune", "大 splat 尺寸裁剪开始轮数。", min=0, max=100000, step=1),
         field("fine_fastgs_size_prune_max_screen_size", "屏幕尺寸裁剪阈值", "number", "Prune", "大 splat 屏幕尺寸裁剪阈值。", min=1, max=10000, step=1),
         field("fine_fastgs_size_prune_max_world_scale_ratio", "世界尺寸裁剪比例", "number", "Prune", "大 splat 世界尺度裁剪比例。", min=0, max=1, step=0.01),
@@ -397,8 +525,8 @@ def fastgs_fields() -> list[dict[str, Any]]:
         field("fine_fastgs_final_prune_min_opacity", "final prune opacity", "number", "Final prune", "最终裁剪最小 opacity 阈值。", min=0.001, max=0.2, step=0.001),
         field("fine_fastgs_final_prune_score_thresh", "final prune score", "number", "Final prune", "最终裁剪 score 阈值。", min=0.5, max=1, step=0.01),
         field("fine_fastgs_final_prune_max_world_scale_ratio", "final prune 世界比例", "number", "Final prune", "最终裁剪世界尺度比例阈值。", min=0, max=1, step=0.01),
-        field("fine_deblur_enabled", "Deblur", "deblur_switch", "Deblur", "开启保存为 auto，由后端根据模糊检测和模式自动启用；关闭保存为 false。"),
-        field("fine_deblur_mode", "Deblur 模式", "select", "Deblur", "sharp 表示不做模糊建模；defocus/motion/mixed 对应失焦、运动和混合模糊。", options=["sharp", "defocus", "motion", "mixed"]),
+        field("fine_deblur_enabled", "Deblur", "deblur_switch", "Deblur", "默认开启 GTnet；关闭保存为 false。"),
+        field("fine_deblur_mode", "Deblur 模式", "select", "Deblur", "默认 mixed，不再根据模糊检测自动切换 defocus/motion。", options=["sharp", "defocus", "motion", "mixed"]),
         field("fine_deblur_auto_schedule", "自动调度", "select", "Deblur", "是否由调度器控制 warmup、deblur loss、densify、prune。", options=["true", "false"]),
         field("fine_deblur_schedule_profile", "调度 profile", "select", "Deblur", "quality 质量优先，balanced 折中，fast 速度优先。", options=["quality", "balanced", "fast"]),
         field("fine_deblur_late_densify_enabled", "后期二次 densify", "select", "Deblur", "Deblur 后期是否再额外加密一段。", options=["true", "false"]),
@@ -418,7 +546,7 @@ def fastgs_fields() -> list[dict[str, Any]]:
         field("fine_deblur_max_position_delta", "最大位置位移", "number", "Deblur", "position delta 最大位移。", min=0, max=1, step=0.001),
         field("fine_deblur_transform_reg_weight", "transform 正则", "number", "Deblur", "GTnet transform 正则权重。", min=0, max=1, step=0.0001),
         field("fine_deblur_xyz_lr_scale", "Deblur xyz LR 缩放", "number", "Deblur", "Deblur 阶段位置学习率缩放。", min=0, max=1, step=0.01),
-        field("fine_deblur_blurred_views_only", "仅模糊帧 Deblur", "select", "Deblur", "是否只让 registry 中 blurred=true 的图片走 Deblur。", options=["true", "false"]),
+        field("fine_deblur_blurred_views_only", "仅模糊帧 Deblur", "select", "Deblur", "默认只让模糊帧走 GTnet，清晰帧保持普通渲染约束。", options=["true", "false"]),
     ]
 
 
@@ -456,16 +584,52 @@ def saved_defaults_for(db: Session, pipeline: str, scene_type: str) -> dict[str,
             PipelineParameterDefault.scene_type == scene,
         )
     )
-    return dict(row.options or {}) if row else {}
+    if not row:
+        return {}
+    return effective_saved_defaults_for(pipeline, row.options)
+
+
+def stored_defaults_for(pipeline: str, options: dict[str, Any]) -> dict[str, Any]:
+    if pipeline == "litevggt_spz":
+        return litevggt_stored_defaults(options)
+    if pipeline == "official_fastgs_big":
+        return {**dict(options or {}), PIPELINE_DEFAULTS_PRESET_KEY: FASTGS_DEFAULTS_PRESET}
+    return dict(options or {})
+
+
+def effective_saved_defaults_for(pipeline: str, options: dict[str, Any] | None) -> dict[str, Any]:
+    if pipeline == "litevggt_spz":
+        return litevggt_effective_saved_defaults(options)
+    stored = dict(options or {})
+    if pipeline == "official_fastgs_big":
+        if stored.get(PIPELINE_DEFAULTS_PRESET_KEY) != FASTGS_DEFAULTS_PRESET:
+            return {}
+        stored.pop(PIPELINE_DEFAULTS_PRESET_KEY, None)
+    return stored
 
 
 def merged_task_options(db: Session, pipeline: str, scene_type: str, payload_options: dict[str, Any]) -> dict[str, Any]:
+    merged, _sources = merged_task_options_with_sources(db, pipeline, scene_type, payload_options)
+    return merged
+
+
+def merged_task_options_with_sources(
+    db: Session,
+    pipeline: str,
+    scene_type: str,
+    payload_options: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, str]]:
     scene = normalize_parameter_scene_type(scene_type)
-    return {
-        **system_defaults_for(pipeline, scene),
-        **saved_defaults_for(db, pipeline, scene),
-        **(payload_options or {}),
+    system = system_defaults_for(pipeline, scene)
+    saved = saved_defaults_for(db, pipeline, scene)
+    payload = dict(payload_options or {})
+    merged = {**system, **saved, **payload}
+    sources = {
+        key: ("request" if key in payload else "admin_saved" if key in saved else "system_default")
+        for key in merged
+        if key != LITEVGGT_DEFAULTS_PRESET_KEY
     }
+    return merged, sources
 
 
 def defaults_payload(db: Session) -> dict[str, Any]:
@@ -481,6 +645,6 @@ def defaults_payload(db: Session) -> dict[str, Any]:
         if row.pipeline in values and row.scene_type in values[row.pipeline]:
             values[row.pipeline][row.scene_type] = {
                 **system_defaults_for(row.pipeline, row.scene_type),
-                **dict(row.options or {}),
+                **effective_saved_defaults_for(row.pipeline, row.options),
             }
     return {"defaults": values}

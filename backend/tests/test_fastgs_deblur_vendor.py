@@ -23,6 +23,7 @@ try:
     GTnet = blur_kernel.GTnet
     DeblurConfig = blur_kernel.DeblurConfig
     DeblurState = blur_kernel.DeblurState
+    compute_blur_indicator = blur_kernel.compute_blur_indicator
     deblur_transform_regularization = blur_kernel.deblur_transform_regularization
     predict_deblur_transforms = blur_kernel.predict_deblur_transforms
 except Exception as exc:  # pragma: no cover - depends on local torch availability
@@ -44,23 +45,35 @@ class FastGSDeblurSourceTests(unittest.TestCase):
         self.assertIn("mult = mult", source)
         self.assertIn("metric_map = metric_map", source)
         self.assertIn("get_flag=get_flag", source)
+        self.assertIn("scales=scales * scale_delta", source)
+        self.assertIn("scales=scales * scale_delta[..., transform_index]", source)
 
-    def test_train_loop_routes_deblur_and_samples_sharp_score_views(self) -> None:
+    def test_train_loop_routes_deblur_and_samples_score_views(self) -> None:
         source = (FASTGS_ROOT / "train.py").read_text(encoding="utf-8")
 
         self.assertIn("deblur_view_active = bool(deblur_loss_active and is_deblur_view", source)
         self.assertIn("render_fastgs_deblur", source)
+        self.assertIn("compute_blur_indicator", source)
         self.assertIn("sample_sharp_score_cameras(scene, blur_registry, opt)", source)
-        self.assertIn("is_sharp_score_view", source)
+        self.assertIn("cameras = scene.getTrainCameras().copy()", source)
         self.assertIn("compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, opt", source)
         self.assertIn("sharp_score_skipped_steps", source)
         self.assertIn("densify_deblur_extra_points", source)
         self.assertIn("fastgs_final_prune_min_opacity", source)
         self.assertIn("fastgs_final_prune_score_thresh", source)
         self.assertIn("score_thresh = opt.fastgs_final_prune_score_thresh", source)
+        self.assertIn("blur_indicator = compute_blur_indicator", source)
+        self.assertIn("fastgs_vcp_blur_protect_weight", source)
         self.assertIn("fastgs_late_prune_enabled", source)
         self.assertIn("fastgs_late_prune_min_opacity", source)
         self.assertIn("score_thresh = opt.fastgs_late_prune_score_thresh", source)
+        self.assertIn("collect_final_metrics", source)
+        self.assertIn('"final_psnr"', source)
+        self.assertIn('"final_ssim"', source)
+        self.assertIn('"final_lpips"', source)
+        self.assertIn('"final_render_fps"', source)
+        self.assertIn('"training_time_seconds"', source)
+        self.assertIn('"final_model_dir_bytes"', source)
         self.assertIn("and not deblur_loss_active", source)
         self.assertIn('use_score = scene_profile.name != "indoor"', source)
         self.assertIn('use_scale = scene_profile.name != "indoor"', source)
@@ -70,7 +83,7 @@ class FastGSDeblurSourceTests(unittest.TestCase):
 
         schedule_source = (BACKEND_ROOT / "app" / "fine" / "deblur_schedule.py").read_text(encoding="utf-8")
         self.assertNotIn('if prune_mode == "conservative":\n            return raw_prune_mask', schedule_source)
-        self.assertIn("max_prune_fraction_per_step=0.03", schedule_source)
+        self.assertIn("max_prune_fraction_per_step=0.02", schedule_source)
 
     def test_fastgs_argparse_uses_central_defaults(self) -> None:
         sys.path.insert(0, str(BACKEND_ROOT))
@@ -110,6 +123,19 @@ class FastGSDeblurSourceTests(unittest.TestCase):
         self.assertIn('"name": "GTnet"', source)
         self.assertIn('if group.get("name") == "GTnet"', source)
         self.assertIn("create_deblur_net", source)
+
+    def test_gaussian_model_uses_deblur_aware_vcd_and_vcp(self) -> None:
+        source = (FASTGS_ROOT / "scene" / "gaussian_model.py").read_text(encoding="utf-8")
+
+        self.assertIn("def _normalize_metric_signal", source)
+        self.assertIn("importance_norm = self._normalize_metric_signal(importance_score", source)
+        self.assertIn("grad_signal = torch.maximum", source)
+        self.assertIn("score_blend = blend_alpha * importance_norm + (1.0 - blend_alpha) * grad_norm", source)
+        self.assertIn("fastgs_vcd_blend_alpha", source)
+        self.assertIn("fastgs_vcd_score_thresh", source)
+        self.assertIn("blur_indicator", source)
+        self.assertIn("blur_protect_weight", source)
+        self.assertIn("score_values = score_values * (1.0 - protect_weight * blur_values)", source)
 
 
 @unittest.skipIf(torch is None, f"torch import failed: {IMPORT_ERROR}")
@@ -153,6 +179,27 @@ class FastGSDeblurKernelTests(unittest.TestCase):
         reg = deblur_transform_regularization(torch.ones(3, 3), torch.ones(3, 4) * 1.01, torch.zeros(3, 6))
 
         self.assertGreaterEqual(float(reg.item()), 0.0)
+
+    def test_blur_indicator_shape_and_clamp(self) -> None:
+        state = DeblurState(
+            config=DeblurConfig(mode="defocus", use_position=False, hidden=2, width=16, num_moments=2),
+            model=GTnet(num_hidden=2, width=16, pos_delta=False, num_moments=2),
+        )
+        means = torch.zeros(6, 3)
+        scales = torch.ones(6, 3)
+        rotations = torch.ones(6, 4)
+
+        indicator = compute_blur_indicator(
+            state,
+            means,
+            scales,
+            rotations,
+            [torch.zeros(3), torch.ones(3)],
+        )
+
+        self.assertEqual(tuple(indicator.shape), (6,))
+        self.assertTrue(bool(torch.all(indicator >= 0.0)))
+        self.assertTrue(bool(torch.all(indicator <= 1.0)))
 
 
 if __name__ == "__main__":

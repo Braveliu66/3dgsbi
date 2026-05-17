@@ -17,6 +17,9 @@ from app.fine.fastgs_defaults import (
     DEFAULT_FINE_SCENE_PROFILE,
     FINE_IMAGE_MAX_SIDE,
     FINE_SCENE_PROFILE_MAX_SIDES,
+    FASTGS_DEBLUR_BLURRED_VIEWS_ONLY,
+    FASTGS_DEBLUR_ENABLED,
+    FASTGS_DEBLUR_MODE,
     FASTGS_RESOLUTION,
 )
 from app.fine.option_utils import read_float, read_int
@@ -99,7 +102,7 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         f"train_input_dir={train_input_dir} blur_metrics={_format_for_log(blur.metrics())}",
         flush=True,
     )
-    blur_mode = str(ctx.options.get("fine_blur_mode") or blur.mode)
+    blur_mode = FASTGS_DEBLUR_MODE
     print(
         "[fine-runner] resolved training params "
         f"iterations={iterations} blur_mode={blur_mode} fine_scene_profile={fine_scene_profile} image_max_side={image_max_side} "
@@ -144,7 +147,7 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         "fine_deblur_mode": resolved_deblur_mode,
         "fine_deblur_mode_source": deblur_mode_source,
         "fine_deblur_blur_registry": str(blur_registry_path),
-        "fine_deblur_blurred_views_only": ctx.options.get("fine_deblur_blurred_views_only") or "true",
+        "fine_deblur_blurred_views_only": ctx.options.get("fine_deblur_blurred_views_only") or FASTGS_DEBLUR_BLURRED_VIEWS_ONLY,
         "fine_train_resolution": ctx.options.get("fine_train_resolution") or min(image_max_side, FASTGS_RESOLUTION),
     }
     print(
@@ -185,7 +188,7 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
 
     viewer_ply = ctx.work_dir / "final_viewer.ply"
     bounds = read_ply_xyz_bounds(ctx.final_ply)
-    viewer_scale_multiplier = read_float(ctx.options.get("fine_viewer_scale_multiplier"), 0.45, minimum=0.05, maximum=1.0)
+    viewer_scale_multiplier = read_float(ctx.options.get("fine_viewer_scale_multiplier"), 0.55, minimum=0.05, maximum=1.0)
     default_max_scale = max(1e-6, min(float(bounds["radius"]) * 0.009, 1.0))
     viewer_scale_max = read_float(ctx.options.get("fine_viewer_scale_max"), default_max_scale, minimum=1e-6, maximum=10.0)
     viewer_scale_metrics = write_scaled_viewer_ply(
@@ -234,7 +237,7 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         warnings.append("RAD LOD builder is not configured; final_lod.rad was not generated.")
 
     effective_algorithms = [scene_result.backend, "official_fastgs_big", "diff_gaussian_rasterization_fastgs"]
-    effective_deblur_mode = str(train_options.get("fine_deblur_mode") or blur_mode)
+    effective_deblur_mode = str(train_options.get("fine_deblur_mode") or FASTGS_DEBLUR_MODE)
     if deblur_mlp_enabled_by_default(effective_deblur_mode, train_options):
         effective_algorithms.append("Deblurring-3DGS_GTnet_fastgs")
     metrics = {
@@ -367,33 +370,21 @@ def assert_runtime_ready() -> None:
 
 
 def deblur_mlp_enabled_by_default(blur_mode: str, options: dict[str, Any]) -> bool:
-    value = str(options.get("fine_deblur_enabled", "auto")).lower()
+    value = str(options.get("fine_deblur_enabled", FASTGS_DEBLUR_ENABLED)).lower()
     if value in {"0", "false", "no", "off"}:
         return False
-    if value in {"1", "true", "yes", "on"}:
-        return True
-    return blur_mode in {"motion", "defocus", "mixed"}
+    return str(blur_mode or FASTGS_DEBLUR_MODE).strip().lower() != "sharp"
 
 
 def resolve_fine_deblur_mode(
     options: dict[str, Any],
-    detected_mode: str,
-    per_frame_blur: dict[str, dict[str, Any]],
+    _detected_mode: str,
+    _per_frame_blur: dict[str, dict[str, Any]],
 ) -> tuple[str, str]:
     explicit = str(options.get("fine_deblur_mode") or "").strip().lower()
     if explicit in {"sharp", "defocus", "motion", "mixed"}:
         return explicit, "override"
-    normalized = str(detected_mode or "").strip().lower()
-    if normalized in {"defocus", "motion", "mixed"}:
-        return normalized, "detected"
-    has_blurred_training_frame = any(
-        bool(item.get("blurred")) and not bool(item.get("rejected"))
-        for item in per_frame_blur.values()
-        if isinstance(item, dict)
-    )
-    if has_blurred_training_frame:
-        return "mixed", "fallback_mixed"
-    return "sharp", "disabled_sharp"
+    return FASTGS_DEBLUR_MODE, "default_mixed"
 
 
 def first_clear_training_images(per_frame_blur: dict[str, dict[str, Any]]) -> list[str]:

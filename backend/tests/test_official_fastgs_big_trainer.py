@@ -22,6 +22,7 @@ from app.fine.fastgs_defaults import (  # noqa: E402
     FASTGS_LATE_PRUNE_MIN_OPACITY,
     FASTGS_DEBLUR_AUTO_SCHEDULE,
     FASTGS_DEBLUR_BLURRED_VIEWS_ONLY,
+    FASTGS_DEBLUR_ENABLED,
     FASTGS_DEBLUR_LATE_DENSIFY_ENABLED,
     FASTGS_DEBLUR_MODE,
     FASTGS_DEBLUR_NUM_MOMENTS,
@@ -30,6 +31,9 @@ from app.fine.fastgs_defaults import (  # noqa: E402
     FASTGS_DEBLUR_XYZ_LR_SCALE,
     FASTGS_MULT,
     FASTGS_SAMPLE_CAMERAS,
+    FASTGS_VCD_BLEND_ALPHA,
+    FASTGS_VCD_SCORE_THRESH,
+    FASTGS_VCP_BLUR_PROTECT_WEIGHT,
 )
 from app.fine.types import FineFailure  # noqa: E402
 
@@ -84,11 +88,14 @@ class OfficialFastGSBigTrainerTests(unittest.TestCase):
             self.assertEqual(command[command.index("-r") + 1], "1500")
             self.assertEqual(command[command.index("--position_lr_max_steps") + 1], "30000")
             self.assertEqual(command[command.index("--densify_from_iter") + 1], "500")
-            self.assertEqual(command[command.index("--densify_until_iter") + 1], "24000")
+            self.assertEqual(command[command.index("--densify_until_iter") + 1], "26000")
             self.assertEqual(command[command.index("--opacity_reset_interval") + 1], "100000")
             self.assertEqual(command[command.index("--grad_thresh") + 1], str(FASTGS_GRAD_THRESH))
             self.assertEqual(command[command.index("--grad_abs_thresh") + 1], str(FASTGS_GRAD_ABS_THRESH))
             self.assertEqual(command[command.index("--fastgs_sample_cameras") + 1], str(FASTGS_SAMPLE_CAMERAS))
+            self.assertEqual(command[command.index("--fastgs_vcd_blend_alpha") + 1], str(FASTGS_VCD_BLEND_ALPHA))
+            self.assertEqual(command[command.index("--fastgs_vcd_score_thresh") + 1], str(FASTGS_VCD_SCORE_THRESH))
+            self.assertEqual(command[command.index("--fastgs_vcp_blur_protect_weight") + 1], str(FASTGS_VCP_BLUR_PROTECT_WEIGHT))
             self.assertEqual(command[command.index("--mult") + 1], str(FASTGS_MULT))
             self.assertIn("--fastgs_final_prune_min_opacity", command)
             self.assertEqual(command[command.index("--fastgs_final_prune_min_opacity") + 1], str(FASTGS_FINAL_PRUNE_MIN_OPACITY))
@@ -101,12 +108,13 @@ class OfficialFastGSBigTrainerTests(unittest.TestCase):
             self.assertEqual(command[command.index("--fastgs_late_prune_min_opacity") + 1], str(FASTGS_LATE_PRUNE_MIN_OPACITY))
             self.assertEqual(command[command.index("--fastgs_late_prune_max_fraction") + 1], str(FASTGS_LATE_PRUNE_MAX_FRACTION))
             self.assertEqual(command[command.index("--scene_type") + 1], "auto")
+            self.assertEqual(command[command.index("--deblur_enabled") + 1], FASTGS_DEBLUR_ENABLED)
             self.assertEqual(command[command.index("--deblur_mode") + 1], FASTGS_DEBLUR_MODE)
             self.assertEqual(command[command.index("--deblur_auto_schedule") + 1], FASTGS_DEBLUR_AUTO_SCHEDULE)
             self.assertEqual(command[command.index("--deblur_schedule_profile") + 1], FASTGS_DEBLUR_SCHEDULE_PROFILE)
             self.assertEqual(command[command.index("--deblur_late_densify_enabled") + 1], FASTGS_DEBLUR_LATE_DENSIFY_ENABLED)
             self.assertEqual(command[command.index("--deblur_warmup_iters") + 1], "5000")
-            self.assertEqual(command[command.index("--deblur_sharp_refine_from_iter") + 1], "26000")
+            self.assertEqual(command[command.index("--deblur_sharp_refine_from_iter") + 1], "28000")
             self.assertEqual(command[command.index("--deblur_num_moments") + 1], str(FASTGS_DEBLUR_NUM_MOMENTS))
             self.assertEqual(command[command.index("--deblur_transform_reg_weight") + 1], str(FASTGS_DEBLUR_TRANSFORM_REG_WEIGHT))
             self.assertEqual(command[command.index("--deblur_xyz_lr_scale") + 1], str(FASTGS_DEBLUR_XYZ_LR_SCALE))
@@ -147,13 +155,13 @@ class OfficialFastGSBigTrainerTests(unittest.TestCase):
             self.assertEqual(command[command.index("--iterations") + 1], "35000")
             self.assertEqual(command[command.index("--position_lr_max_steps") + 1], "35000")
             self.assertEqual(command[command.index("--densify_from_iter") + 1], "500")
-            self.assertEqual(command[command.index("--densify_until_iter") + 1], "24000")
+            self.assertEqual(command[command.index("--densify_until_iter") + 1], "26000")
             self.assertEqual(command[command.index("--opacity_reset_interval") + 1], "100000")
             self.assertEqual(command[command.index("--fastgs_late_prune_interval") + 1], "4000")
             self.assertEqual(command[command.index("--fastgs_late_prune_from_iter") + 1], "28000")
             self.assertEqual(command[command.index("--fastgs_late_prune_until_iter") + 1], "30000")
             self.assertEqual(command[command.index("--deblur_warmup_iters") + 1], "5000")
-            self.assertEqual(result.metrics["densify_until_iter"], 24000)
+            self.assertEqual(result.metrics["densify_until_iter"], 26000)
 
     def test_train_official_fastgs_big_applies_outdoor_profile_defaults(self) -> None:
         train_official_fastgs_big = import_trainer()
@@ -183,13 +191,13 @@ class OfficialFastGSBigTrainerTests(unittest.TestCase):
 
             command = popen.call_args.args[0]
             self.assertEqual(command[command.index("--scene_type") + 1], "outdoor_full")
-            self.assertEqual(command[command.index("--densify_until_iter") + 1], "15000")
+            self.assertEqual(command[command.index("--densify_until_iter") + 1], "20000")
             self.assertEqual(command[command.index("--fastgs_late_prune_interval") + 1], "2500")
             self.assertEqual(command[command.index("--fastgs_late_prune_from_iter") + 1], "20000")
             self.assertEqual(command[command.index("--fastgs_late_prune_max_world_scale_ratio") + 1], "0.06")
-            self.assertEqual(command[command.index("--fastgs_late_prune_max_fraction") + 1], "0.2")
+            self.assertEqual(command[command.index("--fastgs_late_prune_max_fraction") + 1], "0.12")
             self.assertEqual(command[command.index("--fastgs_final_prune_max_world_scale_ratio") + 1], "0.05")
-            self.assertEqual(command[command.index("--deblur_sharp_refine_from_iter") + 1], "22000")
+            self.assertEqual(command[command.index("--deblur_sharp_refine_from_iter") + 1], "24000")
             self.assertEqual(result.metrics["scene_parameter_profile"], "outdoor")
 
     def test_train_official_fastgs_big_passes_deblur_options_and_registry(self) -> None:
@@ -268,6 +276,9 @@ class OfficialFastGSBigTrainerTests(unittest.TestCase):
                         "fine_fastgs_late_prune_enabled": False,
                         "fine_fastgs_late_prune_interval": 1200,
                         "fine_fastgs_final_prune_min_opacity": 0.04,
+                        "fine_fastgs_vcd_blend_alpha": 0.6,
+                        "fine_fastgs_vcd_score_thresh": 0.45,
+                        "fine_fastgs_vcp_blur_protect_weight": 0.35,
                         "fine_densify_until_iter": 9000,
                         "fine_deblur_warmup_iters": 4500,
                     },
@@ -278,9 +289,15 @@ class OfficialFastGSBigTrainerTests(unittest.TestCase):
             self.assertEqual(command[command.index("--fastgs_late_prune_enabled") + 1], "false")
             self.assertEqual(command[command.index("--fastgs_late_prune_interval") + 1], "1200")
             self.assertEqual(command[command.index("--fastgs_final_prune_min_opacity") + 1], "0.04")
+            self.assertEqual(command[command.index("--fastgs_vcd_blend_alpha") + 1], "0.6")
+            self.assertEqual(command[command.index("--fastgs_vcd_score_thresh") + 1], "0.45")
+            self.assertEqual(command[command.index("--fastgs_vcp_blur_protect_weight") + 1], "0.35")
             self.assertEqual(command[command.index("--densify_until_iter") + 1], "9000")
             self.assertEqual(command[command.index("--deblur_warmup_iters") + 1], "4500")
             self.assertEqual(result.metrics["fastgs_late_prune_enabled"], "false")
+            self.assertEqual(result.metrics["fastgs_vcd_blend_alpha"], 0.6)
+            self.assertEqual(result.metrics["fastgs_vcd_score_thresh"], 0.45)
+            self.assertEqual(result.metrics["fastgs_vcp_blur_protect_weight"], 0.35)
 
     def test_train_official_fastgs_big_finds_final_ply(self) -> None:
         train_official_fastgs_big = import_trainer()

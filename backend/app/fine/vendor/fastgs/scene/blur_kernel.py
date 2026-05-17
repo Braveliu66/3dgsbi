@@ -150,7 +150,7 @@ def build_deblur_state(opt: Any, *, device: torch.device | str = "cuda") -> Debl
     mode = str(getattr(opt, "deblur_mode", FASTGS_DEBLUR_MODE)).strip().lower()
     if enabled_value in {"0", "false", "no", "off"}:
         return DeblurState()
-    if enabled_value not in {"1", "true", "yes", "on"} and mode == "sharp":
+    if mode == "sharp":
         return DeblurState()
     if getattr(opt, "optimizer_type", FASTGS_OPTIMIZER_TYPE) != FASTGS_OPTIMIZER_TYPE:
         return DeblurState()
@@ -212,6 +212,54 @@ def predict_deblur_transforms(
             max=state.config.max_position_delta,
         )
     return scale_delta, rotation_delta, position_delta
+
+
+def compute_blur_indicator(
+    state: DeblurState,
+    means3d: torch.Tensor,
+    scales: torch.Tensor,
+    rotations: torch.Tensor,
+    camera_centers: Any,
+) -> torch.Tensor:
+    """Estimate per-Gaussian GTnet blur strength without creating gradients."""
+    indicator = torch.zeros((means3d.shape[0],), dtype=torch.float32, device=means3d.device)
+    if not state.enabled:
+        return indicator
+
+    if isinstance(camera_centers, torch.Tensor):
+        centers = camera_centers
+    else:
+        items = [item for item in (camera_centers or []) if item is not None]
+        if not items:
+            return indicator
+        centers = torch.stack(
+            [
+                item.to(device=means3d.device, dtype=means3d.dtype).reshape(3)
+                if isinstance(item, torch.Tensor)
+                else torch.tensor(item, device=means3d.device, dtype=means3d.dtype).reshape(3)
+                for item in items
+            ]
+        )
+
+    centers = centers.to(device=means3d.device, dtype=means3d.dtype)
+    if centers.numel() == 0:
+        return indicator
+    if centers.ndim == 1:
+        centers = centers.reshape(1, 3)
+
+    with torch.no_grad():
+        accum = torch.zeros_like(indicator)
+        for camera_center in centers:
+            scale_delta, _, _ = predict_deblur_transforms(
+                state,
+                means3d,
+                scales,
+                rotations,
+                camera_center,
+            )
+            scale_delta = scale_delta.reshape(scale_delta.shape[0], -1)
+            accum += torch.norm(scale_delta - 1.0, dim=-1).to(dtype=torch.float32)
+    return torch.clamp(accum / max(int(centers.shape[0]), 1), 0.0, 1.0)
 
 
 def deblur_transform_regularization(

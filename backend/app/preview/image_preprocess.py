@@ -59,7 +59,7 @@ def normalize_image_directory(
                 image = convert_to_rgb(image)
                 width, height = image.size
                 if max(width, height) > max_side:
-                    image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+                    image = resize_preserving_aspect_ratio(image, max_side=max_side)
                     resized_count += 1
                 image.save(output_dir / f"{index:06d}.jpg", format="JPEG", quality=jpeg_quality, optimize=True)
         except UnidentifiedImageError as exc:
@@ -85,6 +85,13 @@ def convert_to_rgb(image: Image.Image) -> Image.Image:
     if image.mode != "RGB":
         return image.convert("RGB")
     return image
+
+
+def resize_preserving_aspect_ratio(image: Image.Image, *, max_side: int) -> Image.Image:
+    width, height = image.size
+    scale = float(max_side) / float(max(width, height))
+    size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
+    return image.resize(size, Image.Resampling.LANCZOS)
 
 
 def register_optional_heif_support() -> None:

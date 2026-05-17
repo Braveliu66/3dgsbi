@@ -42,7 +42,7 @@ class BlurAnalysis:
     blurred_images: int = 0
     training_blur_frames: int = 0
     rejected_blur_frames: int = 0
-    deblur_trigger_reason: str = "none"
+    deblur_trigger_reason: str = "default_mixed"
     per_frame_blur: dict[str, dict[str, str | bool | float | None]] = field(default_factory=dict)
 
     def metrics(self) -> dict[str, int | float | str | dict[str, dict[str, str | bool | float | None]]]:
@@ -195,7 +195,7 @@ def prepare_fine_images(
         blurred_images=analysis.blurred_images,
         training_blur_frames=training_blur_frames,
         rejected_blur_frames=analysis.rejected_blur_frames,
-        deblur_trigger_reason="none" if not all_blur else f"blur_detected:{mode}",
+        deblur_trigger_reason="default_mixed",
         per_frame_blur=per_frame_blur,
     )
 
@@ -321,7 +321,7 @@ def summarize_blur_scores(scores: list[BlurScore], *, reject_ratio: float, min_i
     all_blur = [classification for classification in classifications.values() if classification.blurred]
     mode = blur_mode_from_classifications(all_blur)
     training_blur_frames = len(kept_blur)
-    trigger_reason = "none" if not all_blur else f"blur_detected:{mode}"
+    trigger_reason = "default_mixed"
     return BlurAnalysis(
         mode=mode,
         mean_laplacian=mean_lap,

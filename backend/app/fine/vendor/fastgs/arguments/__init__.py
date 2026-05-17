@@ -87,6 +87,9 @@ from app.fine.fastgs_defaults import (
     FASTGS_SIZE_PRUNE_FROM_ITER,
     FASTGS_SIZE_PRUNE_MAX_SCREEN_SIZE,
     FASTGS_SIZE_PRUNE_MAX_WORLD_SCALE_RATIO,
+    FASTGS_VCD_BLEND_ALPHA,
+    FASTGS_VCD_SCORE_THRESH,
+    FASTGS_VCP_BLUR_PROTECT_WEIGHT,
 )
 
 class GroupParams:
@@ -172,6 +175,9 @@ class OptimizationParams(ParamGroup):
         # fastgs parameters
         self.loss_thresh = FASTGS_LOSS_THRESH
         self.fastgs_sample_cameras = FASTGS_SAMPLE_CAMERAS
+        self.fastgs_vcd_blend_alpha = FASTGS_VCD_BLEND_ALPHA
+        self.fastgs_vcd_score_thresh = FASTGS_VCD_SCORE_THRESH
+        self.fastgs_vcp_blur_protect_weight = FASTGS_VCP_BLUR_PROTECT_WEIGHT
         self.grad_abs_thresh = FASTGS_GRAD_ABS_THRESH
         self.highfeature_lr = FASTGS_HIGHFEATURE_LR
         self.lowfeature_lr = FASTGS_LOWFEATURE_LR

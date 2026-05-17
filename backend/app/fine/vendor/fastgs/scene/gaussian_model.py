@@ -36,6 +36,9 @@ if str(_BACKEND_ROOT) not in sys.path:
 from app.fine.fastgs_defaults import (
     FASTGS_FINAL_PRUNE_SCORE_THRESH,
     FASTGS_SIZE_PRUNE_MAX_WORLD_SCALE_RATIO,
+    FASTGS_VCD_BLEND_ALPHA,
+    FASTGS_VCD_SCORE_THRESH,
+    FASTGS_VCP_BLUR_PROTECT_WEIGHT,
 )
 
 class GaussianModel:
@@ -507,6 +510,32 @@ class GaussianModel:
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
 
+    @staticmethod
+    def _normalize_metric_signal(value_tensor, target_count, device):
+        values = torch.zeros((target_count), dtype=torch.float32, device=device)
+        if value_tensor is None:
+            return values
+        raw_values = torch.nan_to_num(
+            value_tensor.detach().reshape(-1).to(device=device, dtype=torch.float32),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+        valid_count = min(target_count, int(raw_values.shape[0]))
+        if valid_count <= 0:
+            return values
+        raw_values = raw_values[:valid_count]
+        positive = raw_values[raw_values > 0]
+        if int(positive.shape[0]) == 0:
+            return values
+        scale = torch.median(positive)
+        if float(scale.detach().item()) <= 1e-8:
+            scale = torch.max(positive)
+        if float(scale.detach().item()) <= 1e-8:
+            return values
+        values[:valid_count] = torch.clamp(raw_values / scale, 0.0, 1.0)
+        return values
+
     def densify_and_prune_fastgs(self, max_screen_size, min_opacity, extent, radii, args, importance_score = None, pruning_score = None):
         
         ''' 
@@ -531,9 +560,14 @@ class GaussianModel:
         all_clones = torch.logical_and(clone_qualifiers, grad_qualifiers)
         all_splits = torch.logical_and(split_qualifiers, grad_qualifiers_abs)
 
-        # This is our multi-view consisent metric for densification
-        # We use this metric to further filter the candidates for densification, which is similar to taming 3dgs.
-        metric_mask = importance_score > 5
+        # Deblur-aware VCD: use both multi-view error and base Gaussian gradients.
+        importance_norm = self._normalize_metric_signal(importance_score, self.get_xyz.shape[0], self.get_xyz.device)
+        grad_signal = torch.maximum(torch.norm(grad_vars, dim=-1), torch.norm(grads_abs, dim=-1))
+        grad_norm = self._normalize_metric_signal(grad_signal, self.get_xyz.shape[0], self.get_xyz.device)
+        blend_alpha = float(getattr(args, "fastgs_vcd_blend_alpha", FASTGS_VCD_BLEND_ALPHA))
+        blend_alpha = max(0.0, min(1.0, blend_alpha))
+        score_blend = blend_alpha * importance_norm + (1.0 - blend_alpha) * grad_norm
+        metric_mask = score_blend > float(getattr(args, "fastgs_vcd_score_thresh", FASTGS_VCD_SCORE_THRESH))
 
         self.densify_and_clone_fastgs(metric_mask, all_clones)
         self.densify_and_split_fastgs(metric_mask, all_splits)
@@ -603,6 +637,8 @@ class GaussianModel:
         max_world_scale = None,
         use_score = True,
         use_scale = True,
+        blur_indicator = None,
+        blur_protect_weight = FASTGS_VCP_BLUR_PROTECT_WEIGHT,
     ):
         """Final-stage pruning: remove Gaussians based on opacity and multi-view consistency.
         In the final stage we remove Gaussians that have low opacity or that are flagged by
@@ -614,6 +650,8 @@ class GaussianModel:
             max_world_scale=max_world_scale,
             use_score=use_score,
             use_scale=use_scale,
+            blur_indicator=blur_indicator,
+            blur_protect_weight=blur_protect_weight,
         )
         if metrics["removed"]:
             self.prune_points(final_prune)
@@ -627,13 +665,29 @@ class GaussianModel:
         max_world_scale = None,
         use_score = True,
         use_scale = True,
+        blur_indicator = None,
+        blur_protect_weight = FASTGS_VCP_BLUR_PROTECT_WEIGHT,
     ):
         prune_mask = (self.get_opacity < min_opacity).squeeze() 
         if pruning_score is None or not use_score:
             scores_mask = torch.zeros_like(prune_mask, dtype=bool, device="cuda")
         else:
             scores_mask = torch.zeros_like(prune_mask, dtype=bool, device="cuda")
-            score_values = (pruning_score > score_thresh).reshape(-1)
+            score_values = pruning_score.detach().reshape(-1).to(device=prune_mask.device, dtype=torch.float32)
+            if blur_indicator is not None:
+                protect_weight = max(0.0, min(1.0, float(blur_protect_weight)))
+                blur_values = torch.zeros_like(score_values)
+                raw_blur = torch.nan_to_num(
+                    blur_indicator.detach().reshape(-1).to(device=prune_mask.device, dtype=torch.float32),
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0,
+                )
+                valid_count = min(int(blur_values.shape[0]), int(raw_blur.shape[0]))
+                if valid_count > 0 and protect_weight > 0:
+                    blur_values[:valid_count] = torch.clamp(raw_blur[:valid_count], 0.0, 1.0)
+                    score_values = score_values * (1.0 - protect_weight * blur_values)
+            score_values = score_values > score_thresh
             scores_mask[:score_values.shape[0]] = score_values
         if max_world_scale is None or float(max_world_scale) <= 0 or not use_scale:
             scale_mask = torch.zeros_like(prune_mask, dtype=bool, device="cuda")

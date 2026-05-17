@@ -276,7 +276,7 @@ class FineRuntimeTests(unittest.TestCase):
 
         self.assertGreater(summary.training_blur_frames, 0)
         self.assertEqual(summary.mode, "defocus")
-        self.assertEqual(summary.deblur_trigger_reason, "blur_detected:defocus")
+        self.assertEqual(summary.deblur_trigger_reason, "default_mixed")
         self.assertTrue(deblur_mlp_enabled_by_default(summary.mode, {}))
 
     def test_low_texture_frame_is_not_marked_blurred(self) -> None:
@@ -396,7 +396,7 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertEqual(summary.training_blur_frames, 1)
         self.assertEqual(summary.mode, "mixed")
         self.assertTrue(deblur_mlp_enabled_by_default(summary.mode, {}))
-        self.assertEqual(summary.deblur_trigger_reason, "blur_detected:mixed")
+        self.assertEqual(summary.deblur_trigger_reason, "default_mixed")
 
     def test_rejected_blurry_image_still_triggers_deblur(self) -> None:
         BlurScore, _, summarize_blur_scores, _, deblur_mlp_enabled_by_default, _ = import_fine_runtime()
@@ -411,7 +411,7 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertEqual(summary.training_blur_frames, 0)
         self.assertEqual(summary.rejected_blur_frames, 1)
         self.assertEqual(summary.mode, "defocus")
-        self.assertEqual(summary.deblur_trigger_reason, "blur_detected:defocus")
+        self.assertEqual(summary.deblur_trigger_reason, "default_mixed")
         self.assertTrue(deblur_mlp_enabled_by_default(summary.mode, {}))
 
     def test_sfm_defaults_to_pycolmap(self) -> None:
@@ -503,17 +503,17 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("fine_edgs_enabled", runner_source)
         self.assertIn("EDGS/RoMA dense initialization has been removed", runner_source)
 
-    def test_deblur_auto_controls_gtnet_default(self) -> None:
+    def test_deblur_defaults_to_enabled_mixed_path(self) -> None:
         *_, deblur_mlp_enabled_by_default, _ = import_fine_runtime()
 
         self.assertTrue(deblur_mlp_enabled_by_default("motion", {}))
         self.assertTrue(deblur_mlp_enabled_by_default("defocus", {}))
         self.assertTrue(deblur_mlp_enabled_by_default("mixed", {}))
-        self.assertFalse(deblur_mlp_enabled_by_default("sharp", {}))
+        self.assertTrue(deblur_mlp_enabled_by_default("mixed", {"fine_deblur_enabled": "auto"}))
         self.assertFalse(deblur_mlp_enabled_by_default("motion", {"fine_deblur_enabled": "false"}))
-        self.assertTrue(deblur_mlp_enabled_by_default("sharp", {"fine_deblur_enabled": "true"}))
+        self.assertFalse(deblur_mlp_enabled_by_default("sharp", {"fine_deblur_enabled": "true"}))
 
-    def test_resolve_fine_deblur_mode_follows_detected_label(self) -> None:
+    def test_resolve_fine_deblur_mode_defaults_to_mixed(self) -> None:
         try:
             from app.fine.runner import resolve_fine_deblur_mode
         except Exception as exc:
@@ -521,22 +521,10 @@ class FineRuntimeTests(unittest.TestCase):
 
         registry = {"000000.jpg": {"blurred": True, "rejected": False}}
 
-        self.assertEqual(resolve_fine_deblur_mode({}, "defocus", registry), ("defocus", "detected"))
-        self.assertEqual(resolve_fine_deblur_mode({}, "motion", registry), ("motion", "detected"))
-        self.assertEqual(resolve_fine_deblur_mode({}, "mixed", registry), ("mixed", "detected"))
+        self.assertEqual(resolve_fine_deblur_mode({}, "defocus", registry), ("mixed", "default_mixed"))
+        self.assertEqual(resolve_fine_deblur_mode({}, "motion", registry), ("mixed", "default_mixed"))
+        self.assertEqual(resolve_fine_deblur_mode({}, "sharp", {}), ("mixed", "default_mixed"))
         self.assertEqual(resolve_fine_deblur_mode({"fine_deblur_mode": "mixed"}, "defocus", registry), ("mixed", "override"))
-
-    def test_resolve_fine_deblur_mode_uses_mixed_only_without_label(self) -> None:
-        try:
-            from app.fine.runner import resolve_fine_deblur_mode
-        except Exception as exc:
-            raise unittest.SkipTest(f"fine runner import unavailable: {exc}") from exc
-
-        blurred_registry = {"000000.jpg": {"blurred": True, "rejected": False}}
-        sharp_registry = {"000000.jpg": {"blurred": False, "rejected": False}}
-
-        self.assertEqual(resolve_fine_deblur_mode({}, "unknown", blurred_registry), ("mixed", "fallback_mixed"))
-        self.assertEqual(resolve_fine_deblur_mode({}, "sharp", sharp_registry), ("sharp", "disabled_sharp"))
 
     def test_far_noise_filter_removes_indoor_outlier_more_than_outdoor(self) -> None:
         try:
