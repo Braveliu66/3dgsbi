@@ -8,12 +8,6 @@ from typing import Any
 
 import numpy as np
 
-from app.preview.utils import prepend_sys_path
-
-
-FASTGS_ROOT = Path(__file__).resolve().parent / "vendor" / "fastgs"
-
-
 PLY_TYPE_MAP: dict[str, str] = {
     "char": "i1",
     "uchar": "u1",
@@ -44,8 +38,8 @@ def write_final_viewer_meta_json(
     bounds = read_ply_xyz_bounds(final_ply)
     recommended_view = recommended_training_camera_view(scene_dir, bounds, preferred_image_names=preferred_image_names)
     payload: dict[str, Any] = {
-        "asset_type": "fine_final_gaussian",
-        "point_source": "final_ply_gaussian_centers",
+        "asset_type": "fine_colmap_sparse_pointcloud",
+        "point_source": "colmap_sparse_points",
         "num_points": bounds["vertex_count"],
         "point_count_exported": bounds["vertex_count"],
         "bbox_min": bounds["bbox_min"],
@@ -55,9 +49,9 @@ def write_final_viewer_meta_json(
         "center": bounds["center"],
         "radius": bounds["radius"],
         "scale_applied": 1.0,
-        "coordinate_system": "fastgs_colmap_world",
+        "coordinate_system": "colmap_world",
         "recommended_frontend": {
-            "default_view_mode": "splats",
+            "default_view_mode": "points",
         },
     }
     if recommended_view is not None:
@@ -256,11 +250,14 @@ def recommended_training_camera_view(
     if not images_bin.exists() or not cameras_bin.exists():
         return None
 
-    with prepend_sys_path(FASTGS_ROOT):
-        from scene.colmap_loader import qvec2rotmat, read_extrinsics_binary, read_intrinsics_binary
+    try:
+        import pycolmap
+    except Exception:
+        return None
 
-        extrinsics = read_extrinsics_binary(str(images_bin))
-        intrinsics = read_intrinsics_binary(str(cameras_bin))
+    reconstruction = pycolmap.Reconstruction(sparse_dir)
+    extrinsics = getattr(reconstruction, "images", {}) or {}
+    intrinsics = getattr(reconstruction, "cameras", {}) or {}
 
     if not extrinsics:
         return None
@@ -270,8 +267,16 @@ def recommended_training_camera_view(
     selected = next((item for name in preferred for item in sorted_extrinsics if str(item.name) == name), None)
     if selected is None:
         selected = sorted_extrinsics[0]
-    rotation = np.asarray(qvec2rotmat(selected.qvec), dtype=np.float32)
-    translation = np.asarray(selected.tvec, dtype=np.float32)
+    try:
+        rotation = np.asarray(selected.cam_from_world.rotation.matrix(), dtype=np.float32)
+        translation = np.asarray(selected.cam_from_world.translation, dtype=np.float32)
+    except Exception:
+        qvec = np.asarray(getattr(selected, "qvec", []), dtype=np.float32)
+        tvec = np.asarray(getattr(selected, "tvec", []), dtype=np.float32)
+        if qvec.shape[0] != 4 or tvec.shape[0] != 3:
+            return None
+        rotation = qvec_to_rotmat(qvec)
+        translation = tvec
     camera_to_world = rotation.T
     position = (-camera_to_world @ translation).astype(np.float32)
     forward = normalize(camera_to_world @ np.asarray([0.0, 0.0, 1.0], dtype=np.float32))
@@ -300,6 +305,18 @@ def normalize(vector: np.ndarray) -> np.ndarray | None:
     if not np.isfinite(norm) or norm <= 1e-6:
         return None
     return (vector / norm).astype(np.float32)
+
+
+def qvec_to_rotmat(qvec: np.ndarray) -> np.ndarray:
+    w, x, y, z = [float(value) for value in qvec]
+    return np.asarray(
+        [
+            [1 - 2 * y * y - 2 * z * z, 2 * x * y - 2 * w * z, 2 * z * x + 2 * w * y],
+            [2 * x * y + 2 * w * z, 1 - 2 * x * x - 2 * z * z, 2 * y * z - 2 * w * x],
+            [2 * z * x - 2 * w * y, 2 * y * z + 2 * w * x, 1 - 2 * x * x - 2 * y * y],
+        ],
+        dtype=np.float32,
+    )
 
 
 def camera_fov_y_degrees(camera: Any) -> float | None:

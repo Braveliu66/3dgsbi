@@ -75,43 +75,17 @@ ALGORITHMS: list[dict[str, Any]] = [
         "notes": "Spark-readable SPZ conversion/validation.",
     },
     {
-        "name": "Image Fine (Official FastGS-Big)",
-        "repo_url": "https://github.com/fastgs/FastGS",
-        "license": "MIT plus upstream 3DGS-derived components; see vendored FastGS LICENSE",
-        "commit_hash_setting": "fastgs_repo_commit",
+        "name": "Image Fine (COLMAP Sparse)",
+        "repo_url": "https://colmap.github.io/",
+        "license": "BSD-3-Clause",
+        "commit_hash_setting": None,
         "local_path": FINE_ROOT / "runner.py",
         "enabled": True,
         "weight_paths": [],
         "commands": {},
         "source_type": "system",
-        "license_notice": "Fine reconstruction uses COLMAP CLI/pycolmap initialization and vendored official FastGS-Big training code.",
-        "notes": "Default fine reconstruction pipeline: image or video-frame normalization, COLMAP CLI sparse scene, optional FastGS chunk training, PLY merge, and Spark SPZ conversion.",
-    },
-    {
-        "name": "Deblurring-3DGS GTnet",
-        "repo_url": "https://github.com/benhenryL/Deblurring-3D-Gaussian-Splatting",
-        "license": "Research/non-commercial risk; verify upstream terms before commercial use",
-        "commit_hash_setting": "deblurring_3dgs_repo_commit",
-        "local_path": FINE_ROOT / "vendor" / "fastgs" / "scene" / "blur_kernel.py",
-        "enabled": True,
-        "weight_paths": [],
-        "commands": {},
-        "source_type": "adapted_module",
-        "license_notice": "Only the GTnet/Fourier embedding training-time blur model is adapted locally; the upstream environment and full repository are not vendored.",
-        "notes": "GTnet models blurred observations inside the official FastGS-Big training path. It does not export deblurred 2D images and final output remains a standard sharp Gaussian PLY.",
-    },
-    {
-        "name": "FastGS Reference",
-        "repo_url": "https://github.com/fastgs/FastGS",
-        "license": "MIT plus upstream 3DGS-derived components; see upstream",
-        "commit_hash_setting": "fastgs_repo_commit",
-        "local_path": FINE_ROOT / "vendor" / "fastgs",
-        "enabled": False,
-        "weight_paths": [],
-        "commands": {},
-        "source_type": "vendored",
-        "license_notice": "Official FastGS source is vendored locally for the image fine FastGS-Big training path.",
-        "notes": "Official FastGS-Big train.py and required runtime modules/submodules are bundled under backend/app/fine/vendor/fastgs.",
+        "license_notice": "Fine reconstruction uses COLMAP CLI/pycolmap sparse reconstruction only.",
+        "notes": "Default fine reconstruction pipeline: image or video-frame normalization, COLMAP sparse scene, and sparse PLY export.",
     },
 ]
 
@@ -196,7 +170,7 @@ def runtime_preflight(db: Session, settings: Settings | None = None) -> dict[str
                     weights_ready = False
             if not module_status.get("available", True):
                 issues.append(f"bundled module import failed: {module_status.get('error')}")
-            if item.name == "Image Fine (Official FastGS-Big)":
+            if item.name == "Image Fine (COLMAP Sparse)":
                 fine_runtime = fine_runtime_status()
                 extensions_ready = bool(fine_runtime["available"] or fine_workers["available"])
                 if not extensions_ready:
@@ -327,26 +301,11 @@ def bundled_module_status(name: str) -> dict[str, Any]:
         "LiteVGGT": "app.preview.vendor.litevggt_runtime",
         "LingBot-Map Video Preview": "app.preview.adapters.lingbot",
         "LingBot Video Point Cloud Fast": "app.preview.adapters.lingbot_pointcloud",
-        "Image Fine (Official FastGS-Big)": "app.fine.runner",
-        "Deblurring-3DGS GTnet": "app.fine.official_fastgs_big_trainer",
+        "Image Fine (COLMAP Sparse)": "app.fine.runner",
         "Spark SPZ": "app.preview.io.spz",
     }
     module = modules.get(name)
     return import_check(module) if module else {"available": True}
-
-
-def extension_pair_status() -> dict[str, Any]:
-    raster = import_check("diff_gaussian_rasterization")
-    knn = import_check("simple_knn")
-    fused = import_check("fused_ssim")
-    available = bool(raster.get("available") and knn.get("available") and fused.get("available"))
-    return {
-        "available": available,
-        "diff_gaussian_rasterization": raster,
-        "simple_knn": knn,
-        "fused_ssim": fused,
-        "error": None if available else "diff_gaussian_rasterization/simple_knn/fused_ssim import failed",
-    }
 
 
 def fine_runtime_status() -> dict[str, Any]:
@@ -356,26 +315,20 @@ def fine_runtime_status() -> dict[str, Any]:
     ffmpeg_status = executable_status("ffmpeg", ["-version"])
     modules = {
         "pycolmap": import_check("pycolmap"),
-        "diff_gaussian_rasterization_fastgs": import_check("diff_gaussian_rasterization_fastgs"),
-        "simple_knn": import_check("simple_knn"),
-        "fused_ssim": import_check("fused_ssim"),
     }
     available = bool(
-        torch_status.get("available")
-        and torch_status.get("cuda_available")
-        and spark_status.get("available")
-        and colmap_status.get("available")
+        colmap_status.get("available")
         and ffmpeg_status.get("available")
         and all(item.get("available") for item in modules.values())
     )
     return {
         "available": available,
-        "torch_cuda": torch_status,
+        "torch": torch_status,
         "spark_spz": spark_status,
         "colmap_cli": colmap_status,
         "ffmpeg": ffmpeg_status,
         **modules,
-        "error": None if available else "CUDA torch/Spark SPZ/COLMAP CLI/ffmpeg/pycolmap/diff_gaussian_rasterization_fastgs/simple_knn/fused_ssim check failed",
+        "error": None if available else "COLMAP CLI/ffmpeg/pycolmap check failed",
     }
 
 
@@ -424,7 +377,7 @@ def colmap_cli_status() -> dict[str, Any]:
     except Exception as exc:
         return {"available": False, "path": executable, "error": str(exc)}
     help_text = completed.stdout or ""
-    required = {"global_mapper", "hierarchical_mapper", "model_clusterer", "model_splitter"}
+    required = {"global_mapper", "hierarchical_mapper"}
     missing = sorted(command for command in required if command not in help_text)
     return {
         "available": completed.returncode == 0 and not missing,

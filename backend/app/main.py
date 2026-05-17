@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.algorithms import license_notice_for, normalize_preview_pipeline, runtime_preflight, seed_algorithm_registry
 from app.config import get_settings
 from app.database import SessionLocal, engine, get_db, initialize_database_schema
-from app.fine.fastgs_defaults import DEFAULT_FINE_SCENE_PROFILE, FINE_SCENE_PROFILE_MAX_SIDES
+from app.fine.colmap_defaults import DEFAULT_FINE_SCENE_PROFILE, FINE_PIPELINE_NAME, FINE_SCENE_PROFILE_MAX_SIDES
 from app.models import AlgorithmRegistry, Artifact, Feedback, MediaAsset, PipelineParameterDefault, Project, Task, TaskEvent, UploadSession, User, WorkerHeartbeat, new_id, utc_now
 from app.pipeline_parameters import (
     effective_saved_defaults_for,
@@ -1236,14 +1236,14 @@ def create_fine_task(
 
     image_count = sum(1 for item in project.media if item.kind == "image")
     video_count = sum(1 for item in project.media if item.kind == "video")
-    if project.input_type == "images" and image_count < 8:
-        raise HTTPException(status_code=400, detail="FastGS-Big fine reconstruction requires at least 8 images")
+    if project.input_type == "images" and image_count < 3:
+        raise HTTPException(status_code=400, detail="COLMAP fine reconstruction requires at least 3 images")
     if project.input_type == "video" and (video_count != 1 or len(project.media) != 1):
         raise HTTPException(status_code=400, detail="Video fine reconstruction requires exactly one video file")
     if project.input_type not in {"images", "video"}:
         raise HTTPException(status_code=400, detail="Fine reconstruction input type is unsupported")
 
-    fine_pipeline = "official_fastgs_big"
+    fine_pipeline = FINE_PIPELINE_NAME
     eta_seconds = settings.fine_expected_seconds_video if project.input_type == "video" else settings.fine_expected_seconds_images
     if str(payload_options.get("fine_edgs_enabled", "")).strip().lower() in {"1", "true", "yes", "on"}:
         raise HTTPException(status_code=400, detail="EDGS/RoMA dense initialization has been removed")
@@ -1268,6 +1268,11 @@ def create_fine_task(
         or payload_options.get("preview_scene_profile")
         or fine_scene_profile_from_scene_type(scene_type)
     )
+    payload_options = {
+        key: value
+        for key, value in payload_options.items()
+        if key != "fastgs_target" and not key.startswith("fine_fastgs_") and not key.startswith("fine_deblur_")
+    }
     options = {
         **payload_options,
         "fine_pipeline": fine_pipeline,
@@ -1278,7 +1283,6 @@ def create_fine_task(
         "quality_mode": normalize_fine_quality_mode(payload_options.get("quality_mode")),
         "camera_distortion": normalize_fine_camera_distortion(payload_options.get("camera_distortion")),
         "prefer_gpu": normalize_bool_option(payload_options.get("prefer_gpu"), True),
-        "fastgs_target": normalize_bool_option(payload_options.get("fastgs_target"), True),
         "fine_capture_order": normalize_fine_capture_order(payload_options.get("fine_capture_order")),
         "fine_sfm_backend": str(payload_options.get("fine_sfm_backend") or "colmap_cli").strip().lower(),
         "source_version": project.source_version,
@@ -1815,8 +1819,6 @@ def save_pipeline_parameter_defaults(
     if scene not in VALID_SCENE_TYPES:
         raise HTTPException(status_code=404, detail=f"Unsupported scene type: {scene_type}")
     options = sanitize_pipeline_options(pipeline, payload.options or {})
-    if pipeline == "official_fastgs_big" and isinstance(options.get("fine_deblur_enabled"), bool):
-        options["fine_deblur_enabled"] = "true" if options["fine_deblur_enabled"] else "false"
     stored_options = stored_defaults_for(pipeline, options)
     row = db.scalar(
         select(PipelineParameterDefault).where(

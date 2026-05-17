@@ -42,7 +42,7 @@ class BlurAnalysis:
     blurred_images: int = 0
     training_blur_frames: int = 0
     rejected_blur_frames: int = 0
-    deblur_trigger_reason: str = "default_mixed"
+    quality_trigger_reason: str = "image_quality"
     per_frame_blur: dict[str, dict[str, str | bool | float | None]] = field(default_factory=dict)
 
     def metrics(self) -> dict[str, int | float | str | dict[str, dict[str, str | bool | float | None]]]:
@@ -59,7 +59,7 @@ class BlurAnalysis:
             "blurred_images": self.blurred_images,
             "training_blur_frames": self.training_blur_frames,
             "rejected_blur_frames": self.rejected_blur_frames,
-            "deblur_trigger_reason": self.deblur_trigger_reason,
+            "quality_trigger_reason": self.quality_trigger_reason,
             "blur_frame_registry": self.per_frame_blur,
         }
 
@@ -195,7 +195,7 @@ def prepare_fine_images(
         blurred_images=analysis.blurred_images,
         training_blur_frames=training_blur_frames,
         rejected_blur_frames=analysis.rejected_blur_frames,
-        deblur_trigger_reason="default_mixed",
+        quality_trigger_reason="image_quality",
         per_frame_blur=per_frame_blur,
     )
 
@@ -321,7 +321,7 @@ def summarize_blur_scores(scores: list[BlurScore], *, reject_ratio: float, min_i
     all_blur = [classification for classification in classifications.values() if classification.blurred]
     mode = blur_mode_from_classifications(all_blur)
     training_blur_frames = len(kept_blur)
-    trigger_reason = "default_mixed"
+    trigger_reason = "image_quality"
     return BlurAnalysis(
         mode=mode,
         mean_laplacian=mean_lap,
@@ -335,7 +335,7 @@ def summarize_blur_scores(scores: list[BlurScore], *, reject_ratio: float, min_i
         blurred_images=sum(1 for item in classifications.values() if item.blurred),
         training_blur_frames=training_blur_frames,
         rejected_blur_frames=len(rejected_blur),
-        deblur_trigger_reason=trigger_reason,
+        quality_trigger_reason=trigger_reason,
         per_frame_blur={
             item.path.name: {
                 "source_image": item.path.name,
@@ -617,16 +617,16 @@ def build_pycolmap_scene(
         )
 
     point_count = len(reconstruction.points3D)
-    progress("fine_colmap_undistort", 40, "undistorting COLMAP images for FastGS")
+    progress("fine_colmap_undistort", 40, "undistorting COLMAP images")
     pycolmap.undistort_images(
         output_path=str(scene_dir),
         input_path=str(recon_path),
         image_path=str(images_dir),
         output_type="COLMAP",
     )
-    fastgs_sparse_dir = ensure_fastgs_sparse_zero(scene_dir / "sparse")
-    fastgs_reconstruction = pycolmap.Reconstruction(fastgs_sparse_dir)
-    validate_fastgs_colmap_scene(fastgs_reconstruction)
+    sparse_dir = ensure_colmap_sparse_zero(scene_dir / "sparse")
+    reconstruction = pycolmap.Reconstruction(sparse_dir)
+    validate_colmap_pinhole_scene(reconstruction)
     elapsed = round(time.monotonic() - started, 3)
     return SceneBuildResult(
         scene_dir=scene_dir,
@@ -673,7 +673,7 @@ def select_best_colmap_model(sparse_dir: Path) -> Path | None:
     return max(candidates, key=lambda path: (path / "images.bin").stat().st_size)
 
 
-def ensure_fastgs_sparse_zero(sparse_dir: Path) -> Path:
+def ensure_colmap_sparse_zero(sparse_dir: Path) -> Path:
     model_dir = sparse_dir / "0"
     if (model_dir / "images.bin").exists():
         return model_dir
@@ -686,7 +686,7 @@ def ensure_fastgs_sparse_zero(sparse_dir: Path) -> Path:
     raise FineFailure("COLMAP_UNDISTORT_FAILED", f"COLMAP undistortion did not create a sparse model in {sparse_dir}")
 
 
-def validate_fastgs_colmap_scene(reconstruction) -> None:
+def validate_colmap_pinhole_scene(reconstruction) -> None:
     cameras = getattr(reconstruction, "cameras", None) or {}
     for camera in cameras.values():
         model = _camera_model_name(getattr(camera, "model", ""))
@@ -702,14 +702,14 @@ def validate_fastgs_colmap_scene(reconstruction) -> None:
         else:
             raise FineFailure(
                 "COLMAP_CAMERA_MODEL_UNSUPPORTED",
-                f"FastGS requires undistorted SIMPLE_PINHOLE/PINHOLE cameras, got {model or camera.model}",
+                f"COLMAP export requires undistorted SIMPLE_PINHOLE/PINHOLE cameras, got {model or camera.model}",
             )
         if width <= 0 or height <= 0 or any(value <= 0 for value in fov_params):
-            raise FineFailure("COLMAP_CAMERA_INVALID", f"Invalid FastGS camera intrinsics for model {model}")
+            raise FineFailure("COLMAP_CAMERA_INVALID", f"Invalid COLMAP camera intrinsics for model {model}")
         if not _principal_point_is_plausible(cx, cy, width, height):
             raise FineFailure(
                 "COLMAP_CAMERA_INVALID",
-                f"Invalid FastGS principal point for {model}: cx={cx:.6g}, cy={cy:.6g}, size={width:.0f}x{height:.0f}",
+                f"Invalid COLMAP principal point for {model}: cx={cx:.6g}, cy={cy:.6g}, size={width:.0f}x{height:.0f}",
             )
 
 

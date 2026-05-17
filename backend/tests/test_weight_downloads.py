@@ -141,7 +141,7 @@ class WeightDownloadTests(unittest.TestCase):
         self.assertEqual([item.relative_path for item in weights_for_pipeline("litevggt_edgs")], [])
         self.assertEqual([item.relative_path for item in weights_for_pipeline("lingbot_map_spz")], ["lingbot/lingbot-map-long.pt"])
         self.assertEqual([item.relative_path for item in weights_for_pipeline("lingbot_video_pointcloud_fast")], ["lingbot/lingbot-map-long.pt"])
-        self.assertEqual([item.relative_path for item in weights_for_pipeline("official_fastgs_big")], [])
+        self.assertEqual([item.relative_path for item in weights_for_pipeline("colmap_sparse")], [])
 
     def test_seed_model_weights_copies_missing_weight_from_image_seed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

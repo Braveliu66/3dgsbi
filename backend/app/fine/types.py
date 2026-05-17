@@ -22,7 +22,7 @@ class FineContext:
     work_dir: Path
     model_cache_dir: Path
     final_ply: Path
-    final_spz: Path
+    final_spz: Path | None
     metrics_json: Path
     viewer_meta_json: Path | None
     lod_rad: Path | None

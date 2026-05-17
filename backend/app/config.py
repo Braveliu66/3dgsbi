@@ -3,7 +3,7 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.fine.fastgs_defaults import FINE_IMAGE_MAX_SIDE, FINE_ITERATIONS
+from app.fine.colmap_defaults import FINE_IMAGE_MAX_SIDE, FINE_ITERATIONS
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -55,11 +55,9 @@ class Settings(BaseSettings):
     litevggt_repo_commit: str = "4767c17f8b6f176bb751566e92f60eb885040033"
     lingbot_map_repo_commit: str = "4cd986009b9adeded8a4e740919221940dedeffe"
     spark_repo_commit: str = "3cf9fa15adb7ac7c47a1e962740db97b9e8a9fdf"
-    fastgs_repo_commit: str = "44e02a5c1d5e9ed64d2ecd4af1cbba14ac92150f"
     fast_dropgaussian_repo_commit: str = "aba6c08e567bc0b99dfe63f159df3a241562efc4"
     fastergs_repo_commit: str = "12ec29da2a5c0f13974fbe4827c5fc782b817c62"
     freesplatter_repo_commit: str = "c0446c44d9c670c75f2374f4ea32b9588f06723a"
-    deblurring_3dgs_repo_commit: str = "e63366b8581c0fde2fda0ab1aea99518da2e2f10"
     three_dgs_lm_repo_commit: str = "d6db64b1844b4303caa2f6e9a0a1ba107b96d6c9"
     lmrs_repo_commit: str = "cb40c7c06c2a60f8314ce095ad7b4513fbb33319"
     lmrs_rasterizer_repo_commit: str = "c2529d3bb13bc38271710785c015a89d9d623237"

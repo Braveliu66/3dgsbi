@@ -190,7 +190,7 @@ def run_fine_task(task_id: str, worker_id: str) -> None:
 
             if not result.final_ply.exists() or result.final_ply.stat().st_size <= 0:
                 raise FineFailure("ARTIFACT_NOT_FOUND", f"Missing non-empty final.ply: {result.final_ply}")
-            if not result.final_spz.exists() or result.final_spz.stat().st_size <= 0:
+            if result.final_spz and (not result.final_spz.exists() or result.final_spz.stat().st_size <= 0):
                 raise FineFailure("ARTIFACT_NOT_FOUND", f"Missing non-empty final_web.spz: {result.final_spz}")
 
             with SessionLocal() as upload_db:
@@ -223,7 +223,10 @@ def run_fine_task(task_id: str, worker_id: str) -> None:
                     f"task_id={task.id} metrics={format_options(task.metrics)}",
                     flush=True,
                 )
-                task.logs = append_log(task.logs, "uploaded final.ply", "uploaded final_web.spz", "uploaded metrics.json")
+                uploaded_logs = ["uploaded final.ply", "uploaded metrics.json"]
+                if result.final_spz:
+                    uploaded_logs.append("uploaded final_web.spz")
+                task.logs = append_log(task.logs, *uploaded_logs)
                 if result.viewer_meta_json:
                     task.logs = append_log(task.logs, "uploaded final_viewer_meta.json")
                 if result.lod_rad:
@@ -286,9 +289,10 @@ def upload_fine_artifacts(
     }
     specs = [
         ("final_ply", result.final_ply, storage_key("users", project.owner_id, "projects", project.id, "final", "final.ply"), "final.ply"),
-        ("final_spz", result.final_spz, storage_key("users", project.owner_id, "projects", project.id, "final", "final_web.spz"), "final_web.spz"),
         ("metrics_json", result.metrics_json, storage_key("users", project.owner_id, "projects", project.id, "final", "metrics.json"), "metrics.json"),
     ]
+    if result.final_spz:
+        specs.insert(1, ("final_spz", result.final_spz, storage_key("users", project.owner_id, "projects", project.id, "final", "final_web.spz"), "final_web.spz"))
     if result.viewer_meta_json:
         specs.append(
             (
@@ -339,8 +343,8 @@ def prepare_fine_inputs(db, task: Task, project: Project, work_dir: Path, starte
             f"project_id={project.id} image_count={image_count} work_dir={work_dir}",
             flush=True,
         )
-        if image_count < 8:
-            raise FineFailure("INSUFFICIENT_IMAGES", "FastGS-Big fine reconstruction requires an image project with at least 8 images")
+        if image_count < 3:
+            raise FineFailure("INSUFFICIENT_IMAGES", "COLMAP fine reconstruction requires an image project with at least 3 images")
         input_dir = download_media(project, work_dir)
         update_task(db, task, project, "input_downloaded", 12, started, f"downloaded {len(project.media)} media files")
         max_side = read_positive_int(options.get("fine_image_max_side"), settings.fine_image_max_side)
@@ -359,7 +363,7 @@ def prepare_fine_inputs(db, task: Task, project: Project, work_dir: Path, starte
             started,
             f"normalized {normalized.output_count} images to RGB JPEG, max side {normalized.max_side}px",
         )
-        return pipeline, normalized.output_dir, None, {**normalized.metrics(), "fine_input_type": "images"}, "checking official FastGS-Big runtime"
+        return pipeline, normalized.output_dir, None, {**normalized.metrics(), "fine_input_type": "images"}, "checking COLMAP runtime"
 
     if project.input_type == "video":
         videos = [media for media in project.media if media.kind == "video"]
@@ -389,7 +393,7 @@ def prepare_fine_inputs(db, task: Task, project: Project, work_dir: Path, starte
             started,
             f"extracted and filtered {result.metrics['video_kept_frames']} video frames for fine reconstruction",
         )
-        return pipeline, result.output_dir, video_path, result.metrics, "checking official FastGS-Big runtime"
+        return pipeline, result.output_dir, video_path, result.metrics, "checking COLMAP runtime"
 
     raise FineFailure("UNSUPPORTED_FINE_INPUT", f"Unsupported fine reconstruction input type: {project.input_type}")
 

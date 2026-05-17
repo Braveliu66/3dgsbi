@@ -13,9 +13,9 @@ from typing import Any, Callable
 
 from app.fine.preprocess import (
     SceneBuildResult,
-    ensure_fastgs_sparse_zero,
+    ensure_colmap_sparse_zero,
     select_best_colmap_model,
-    validate_fastgs_colmap_scene,
+    validate_colmap_pinhole_scene,
 )
 from app.fine.types import FineFailure
 from app.preview.utils import image_files
@@ -23,7 +23,7 @@ from app.resources import collect_gpu
 
 
 Progress = Callable[[str, int, str], None]
-REQUIRED_COLMAP_COMMANDS = {"global_mapper", "hierarchical_mapper", "model_clusterer", "model_splitter"}
+REQUIRED_COLMAP_COMMANDS = {"global_mapper", "hierarchical_mapper"}
 
 
 @dataclass(slots=True)
@@ -48,10 +48,6 @@ class ColmapPolicy:
     use_gpu: bool
     gpu_index: str
     ba_use_gpu: bool
-    chunk_target_images: int
-    chunk_overlap_ratio: float
-    fastgs_resolution: int
-    fastgs_data_device: str
 
 
 @dataclass(slots=True)
@@ -61,12 +57,6 @@ class ColmapCapabilities:
     commands: set[str]
     has_aliked_lightglue: bool
     has_sift_lightglue: bool
-
-
-@dataclass(slots=True)
-class ChunkBuildResult:
-    chunk_scene_dirs: list[Path]
-    metrics: dict[str, Any]
 
 
 def build_colmap_cli_scene(
@@ -234,7 +224,6 @@ def resolve_colmap_policy(
         affine = True
         dsp = True
         overlap = _seq_overlap(scene, n_images, input_type)
-        fastgs_resolution = 1600
     else:
         max_features, max_size, mapper = _outdoor_feature_size_mapper(n_images)
         matchers = _outdoor_matchers(n_images, sequential_input)
@@ -242,7 +231,6 @@ def resolve_colmap_policy(
         affine = False
         dsp = False
         overlap = _seq_overlap(scene, n_images, input_type)
-        fastgs_resolution = 1280 if quality == "speed" else 1600
 
     if retry_profile != "primary":
         guided = True
@@ -261,9 +249,6 @@ def resolve_colmap_policy(
         max_size = max(1200, int(max_size * 0.90))
 
     max_matches = choose_max_num_matches(free_vram_gb, scene, n_images)
-    target, overlap_ratio = chunk_target_for(scene, free_vram_gb)
-    data_device = "cpu" if free_vram_gb and free_vram_gb <= 16 else "cuda"
-
     return ColmapPolicy(
         name=retry_profile,
         scene_type=scene,
@@ -285,10 +270,6 @@ def resolve_colmap_policy(
         use_gpu=bool(prefer_gpu),
         gpu_index=gpu_index or "-1",
         ba_use_gpu=False,
-        chunk_target_images=target,
-        chunk_overlap_ratio=overlap_ratio,
-        fastgs_resolution=fastgs_resolution,
-        fastgs_data_device=data_device,
     )
 
 
@@ -303,153 +284,6 @@ def choose_max_num_matches(free_vram_gb: float, scene_type: str, n_images: int) 
     if n_images > 3000:
         return max(6000, min(matches, 14000))
     return max(8000, min(matches, 18000))
-
-
-def chunk_target_for(scene_type: str, free_vram_gb: float) -> tuple[int, float]:
-    if scene_type == "indoor":
-        if free_vram_gb <= 8:
-            return 80, 0.35
-        if free_vram_gb <= 12:
-            return 150, 0.30
-        if free_vram_gb <= 16:
-            return 220, 0.30
-        if free_vram_gb <= 24:
-            return 300, 0.25
-        return 500, 0.20
-    if free_vram_gb <= 8:
-        return 150, 0.25
-    if free_vram_gb <= 12:
-        return 250, 0.20
-    if free_vram_gb <= 16:
-        return 400, 0.20
-    if free_vram_gb <= 24:
-        return 600, 0.18
-    return 1000, 0.15
-
-
-def build_fastgs_chunks(
-    scene_dir: Path,
-    chunks_root: Path,
-    *,
-    scene_type: str,
-    n_images: int,
-    target_images: int,
-    overlap_ratio: float,
-    progress: Progress,
-) -> ChunkBuildResult:
-    target_images = max(1, int(target_images))
-    if n_images <= max(target_images, int(target_images * 1.15)):
-        return ChunkBuildResult(
-            chunk_scene_dirs=[scene_dir],
-            metrics={
-                "fastgs_chunk_count": 1,
-                "fastgs_chunking": "none",
-                "fastgs_chunk_target_images": target_images,
-                "fastgs_chunk_overlap_ratio": overlap_ratio,
-            },
-        )
-
-    capabilities = detect_colmap_capabilities()
-    chunks_sparse = chunks_root / "chunks_sparse"
-    if chunks_root.exists():
-        shutil.rmtree(chunks_root)
-    chunks_sparse.mkdir(parents=True, exist_ok=True)
-    sparse_zero = scene_dir / "sparse" / "0"
-    if not (sparse_zero / "images.bin").exists():
-        raise FineFailure("COLMAP_CHUNK_INPUT_MISSING", f"missing sparse/0 model for chunking: {sparse_zero}")
-
-    if scene_type == "outdoor":
-        parts = max(2, math.ceil(n_images / target_images))
-        nx = max(1, math.ceil(math.sqrt(parts)))
-        ny = max(1, math.ceil(parts / nx))
-        nz = 1
-        splitter = [
-            capabilities.executable,
-            "model_splitter",
-            "--input_path",
-            str(sparse_zero),
-            "--output_path",
-            str(chunks_sparse),
-            "--split_type",
-            "parts",
-            "--split_params",
-            f"{nx},{ny},{nz}",
-            "--overlap_ratio",
-            str(overlap_ratio),
-        ]
-        chunking = f"model_splitter:{nx},{ny},{nz}"
-        _run_colmap_command(splitter, stage="fine_colmap_model_splitter", progress=progress, progress_value=41)
-    else:
-        clusterer = [
-            capabilities.executable,
-            "model_clusterer",
-            "--input_path",
-            str(sparse_zero),
-            "--output_path",
-            str(chunks_sparse),
-        ]
-        chunking = "model_clusterer"
-        _run_colmap_command(clusterer, stage="fine_colmap_model_clusterer", progress=progress, progress_value=41)
-
-    chunk_models = find_sparse_models(chunks_sparse)
-    if not chunk_models:
-        print("[colmap-cli] chunk command produced no models; falling back to single FastGS scene", flush=True)
-        return ChunkBuildResult(
-            chunk_scene_dirs=[scene_dir],
-            metrics={
-                "fastgs_chunk_count": 1,
-                "fastgs_chunking": f"{chunking}:empty_fallback",
-                "fastgs_chunk_target_images": target_images,
-                "fastgs_chunk_overlap_ratio": overlap_ratio,
-            },
-        )
-    chunk_scenes = materialize_chunk_scenes(chunk_models, scene_dir, chunks_root / "chunk_scenes")
-    return ChunkBuildResult(
-        chunk_scene_dirs=chunk_scenes,
-        metrics={
-            "fastgs_chunk_count": len(chunk_scenes),
-            "fastgs_chunking": chunking,
-            "fastgs_chunk_target_images": target_images,
-            "fastgs_chunk_overlap_ratio": overlap_ratio,
-            "fastgs_chunk_scene_dirs": [str(path) for path in chunk_scenes],
-        },
-    )
-
-
-def merge_gaussian_ply_chunks(ply_paths: list[Path], output_path: Path) -> int:
-    import numpy as np
-    from plyfile import PlyData, PlyElement
-
-    existing = [Path(path) for path in ply_paths if Path(path).exists() and Path(path).stat().st_size > 0]
-    if not existing:
-        raise FineFailure("FASTGS_CHUNK_PLY_NOT_FOUND", "No non-empty FastGS chunk PLY files were produced")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    if len(existing) == 1:
-        shutil.copy2(existing[0], output_path)
-        return _ply_vertex_count(output_path)
-
-    first = PlyData.read(existing[0])
-    vertex = _ply_element(first, "vertex")
-    if vertex is None:
-        raise FineFailure("FASTGS_PLY_SCHEMA_UNSUPPORTED", f"PLY has no vertex element: {existing[0]}")
-    dtype = vertex.data.dtype
-    arrays = [vertex.data]
-    text = bool(first.text)
-    byte_order = first.byte_order
-    for path in existing[1:]:
-        current = PlyData.read(path)
-        current_vertex = _ply_element(current, "vertex")
-        if current_vertex is None:
-            raise FineFailure("FASTGS_PLY_SCHEMA_UNSUPPORTED", f"PLY has no vertex element: {path}")
-        if current_vertex.data.dtype != dtype:
-            raise FineFailure("FASTGS_PLY_SCHEMA_MISMATCH", f"Chunk PLY vertex schema differs: {path}")
-        if any(element.name != "vertex" for element in current.elements) or any(element.name != "vertex" for element in first.elements):
-            raise FineFailure("FASTGS_PLY_SCHEMA_UNSUPPORTED", "Only vertex-only Gaussian PLY files can be merged")
-        arrays.append(current_vertex.data)
-
-    merged = np.concatenate(arrays)
-    PlyData([PlyElement.describe(merged, "vertex")], text=text, byte_order=byte_order).write(output_path)
-    return int(len(merged))
 
 
 def detect_colmap_capabilities() -> ColmapCapabilities:
@@ -712,7 +546,7 @@ def _run_colmap_attempt(
             f"COLMAP CLI registered {registered}/{len(files)} images ({registered_ratio:.1%}), below threshold {threshold:.1%}",
         )
 
-    progress("fine_colmap_undistort", 40, "undistorting COLMAP CLI images for FastGS")
+    progress("fine_colmap_undistort", 40, "undistorting COLMAP CLI images")
     _run_colmap_command(
         [
             executable,
@@ -730,10 +564,10 @@ def _run_colmap_attempt(
         progress=progress,
         progress_value=40,
     )
-    fastgs_sparse_dir = ensure_fastgs_sparse_zero(scene_dir / "sparse")
-    fastgs_reconstruction = _load_reconstruction(fastgs_sparse_dir)
-    if fastgs_reconstruction is not None:
-        validate_fastgs_colmap_scene(fastgs_reconstruction)
+    sparse_zero = ensure_colmap_sparse_zero(scene_dir / "sparse")
+    reconstruction = _load_reconstruction(sparse_zero)
+    if reconstruction is not None:
+        validate_colmap_pinhole_scene(reconstruction)
     elapsed = round(time.monotonic() - started, 3)
     point_count = int(analysis.get("points3D") or 0)
     return SceneBuildResult(
@@ -765,10 +599,6 @@ def _run_colmap_attempt(
             "colmap_estimate_affine_shape": policy.estimate_affine_shape,
             "colmap_domain_size_pooling": policy.domain_size_pooling,
             "colmap_gpu_index": policy.gpu_index,
-            "fastgs_policy_chunk_target_images": policy.chunk_target_images,
-            "fastgs_policy_overlap_ratio": policy.chunk_overlap_ratio,
-            "fastgs_policy_resolution": policy.fastgs_resolution,
-            "fastgs_policy_data_device": policy.fastgs_data_device,
             **{f"colmap_analyzer_{key}": value for key, value in analysis.items() if key not in {"registered_images", "registered_ratio", "points3D"}},
         },
     )
@@ -863,21 +693,6 @@ def _resolve_colmap_min_registered_ratio(scene_type: str, image_count: int, over
     if image_count <= 3000:
         return 0.80
     return 0.75
-
-
-def _ply_vertex_count(path: Path) -> int:
-    from plyfile import PlyData
-
-    data = PlyData.read(path)
-    vertex = _ply_element(data, "vertex")
-    return int(len(vertex.data)) if vertex is not None else 0
-
-
-def _ply_element(data, name: str):
-    try:
-        return data[name]
-    except Exception:
-        return None
 
 
 def _indoor_feature_size_mapper(n_images: int) -> tuple[int, int, str]:

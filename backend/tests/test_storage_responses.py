@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.database import SessionLocal, initialize_database_schema  # noqa: E402
-from app.fine.fastgs_defaults import FINE_ITERATIONS  # noqa: E402
+from app.fine.colmap_defaults import FINE_ITERATIONS, FINE_PIPELINE_NAME  # noqa: E402
 from app.litevggt_defaults import LITEVGGT_DEFAULTS_PRESET_KEY, LITEVGGT_OFFICIAL_PAD_PRESET  # noqa: E402
 from app.main import app, storage  # noqa: E402
 from app.models import Artifact, MediaAsset, PipelineParameterDefault, Task  # noqa: E402
@@ -149,15 +149,14 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual({item["value"] for item in payload["scene_types"]}, {"indoor", "outdoor"})
             self.assertIn("litevggt_spz", pipelines)
             self.assertIn("lingbot_video_pointcloud_fast", pipelines)
-            self.assertIn("official_fastgs_big", pipelines)
+            self.assertIn(FINE_PIPELINE_NAME, pipelines)
             self.assertIn("preview_max_points", {item["key"] for item in pipelines["litevggt_spz"]["fields"]})
             self.assertIn("preview_lingbot_preprocess_mode", {item["key"] for item in pipelines["lingbot_video_pointcloud_fast"]["fields"]})
             self.assertIn("preview_lingbot_mask_sky", {item["key"] for item in pipelines["lingbot_video_pointcloud_fast"]["fields"]})
-            fastgs_keys = {item["key"] for item in pipelines["official_fastgs_big"]["fields"]}
-            self.assertIn("fine_deblur_enabled", fastgs_keys)
-            self.assertIn("fine_fastgs_vcd_blend_alpha", fastgs_keys)
-            self.assertIn("fine_fastgs_vcd_score_thresh", fastgs_keys)
-            self.assertIn("fine_fastgs_vcp_blur_protect_weight", fastgs_keys)
+            colmap_keys = {item["key"] for item in pipelines[FINE_PIPELINE_NAME]["fields"]}
+            self.assertIn("fine_sfm_backend", colmap_keys)
+            self.assertIn("fine_colmap_matcher", colmap_keys)
+            self.assertIn("fine_blur_reject_ratio", colmap_keys)
 
     def test_pipeline_parameter_defaults_are_admin_only_and_filter_unknown_keys(self) -> None:
         clear_pipeline_defaults()
@@ -300,20 +299,20 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(options["litevggt_parameter_sources"]["litevggt_target_size"], "system_default")
         clear_pipeline_defaults()
 
-    def test_deblur_switch_saves_true_and_fine_task_uses_it(self) -> None:
+    def test_colmap_defaults_save_and_fine_task_uses_them(self) -> None:
         clear_pipeline_defaults()
         with TestClient(app) as client, patch("app.main.enqueue_fine_task", return_value=None):
             headers = auth_headers(client)
             saved = client.put(
-                "/api/admin/pipeline-parameter-defaults/official_fastgs_big/indoor",
-                json={"options": {"fine_deblur_enabled": True}},
+                f"/api/admin/pipeline-parameter-defaults/{FINE_PIPELINE_NAME}/indoor",
+                json={"options": {"fine_colmap_threads": 4}},
                 headers=headers,
             )
             saved.raise_for_status()
-            self.assertEqual(saved.json()["options"]["fine_deblur_enabled"], "true")
+            self.assertEqual(saved.json()["options"]["fine_colmap_threads"], 4)
 
-            project_id = create_image_project(client, headers, "deblur auto fine")
-            for index in range(8):
+            project_id = create_image_project(client, headers, "colmap fine")
+            for index in range(3):
                 upload_response = client.post(
                     f"/api/projects/{project_id}/media",
                     files={"file": (f"{index}.png", PNG_BYTES, "image/png")},
@@ -324,7 +323,7 @@ class StorageResponseTests(unittest.TestCase):
             response = client.post(f"/api/projects/{project_id}/tasks/fine", json={"options": {"scene_type": "indoor"}}, headers=headers)
             response.raise_for_status()
 
-            self.assertEqual(response.json()["options"]["fine_deblur_enabled"], "true")
+            self.assertEqual(response.json()["options"]["fine_colmap_threads"], 4)
         clear_pipeline_defaults()
 
     def test_legacy_local_uri_falls_back_to_database_blob(self) -> None:
@@ -464,12 +463,12 @@ class StorageResponseTests(unittest.TestCase):
 
             self.assertEqual(payload["type"], "fine")
             self.assertEqual(payload["status"], "queued")
-            self.assertEqual(payload["options"]["fine_pipeline"], "official_fastgs_big")
+            self.assertEqual(payload["options"]["fine_pipeline"], FINE_PIPELINE_NAME)
             self.assertEqual(payload["options"]["fine_sfm_backend"], "colmap_cli")
             self.assertEqual(payload["options"]["quality_mode"], "auto")
             self.assertEqual(payload["options"]["camera_distortion"], "undistorted")
             self.assertTrue(payload["options"]["prefer_gpu"])
-            self.assertTrue(payload["options"]["fastgs_target"])
+            self.assertNotIn("fastgs_target", payload["options"])
             self.assertEqual(payload["options"]["fine_scene_profile"], "indoor_full")
             self.assertEqual(payload["options"]["scene_type"], "indoor")
             self.assertEqual(payload["options"]["fine_scene_type"], "indoor")

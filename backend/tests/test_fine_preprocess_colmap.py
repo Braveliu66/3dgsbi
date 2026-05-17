@@ -65,7 +65,7 @@ class FinePreprocessColmapTests(unittest.TestCase):
         self.assertIn("below threshold", raised.exception.message)
         pycolmap.undistort_images.assert_not_called()
 
-    def test_fastgs_camera_validation_rejects_misordered_pinhole_params(self) -> None:
+    def test_colmap_camera_validation_rejects_misordered_pinhole_params(self) -> None:
         preprocess = import_preprocess()
         reconstruction = SimpleNamespace(
             cameras={
@@ -79,7 +79,7 @@ class FinePreprocessColmapTests(unittest.TestCase):
         )
 
         with self.assertRaises(FineFailure) as raised:
-            preprocess.validate_fastgs_colmap_scene(reconstruction)
+            preprocess.validate_colmap_pinhole_scene(reconstruction)
 
         self.assertEqual(raised.exception.code, "COLMAP_CAMERA_INVALID")
         self.assertIn("principal point", raised.exception.message)

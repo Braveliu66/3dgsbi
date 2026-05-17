@@ -45,7 +45,7 @@ PIPELINE_WEIGHT_PATHS: dict[str, tuple[str, ...]] = {
     "litevggt_spz": ("litevggt/te_dict.pt",),
     "lingbot_map_spz": ("lingbot/lingbot-map-long.pt",),
     "lingbot_video_pointcloud_fast": ("lingbot/lingbot-map-long.pt",),
-    "official_fastgs_big": (),
+    "colmap_sparse": (),
 }
 
 
