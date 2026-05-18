@@ -15,7 +15,7 @@ Execution order:
 ```text
 prepare_fine_images()
   -> blur analysis and low-quality filtering
-  -> COLMAP CLI scene: images/ + sparse/0
+  -> PyCOLMAP scene: images/ + sparse/0
   -> build_training_config()
   -> worker/trainer/dash_deblur_group_gs/train.py --config
   -> final.ply
@@ -36,8 +36,8 @@ worker/trainer/dash_deblur_group_gs/
 Only used algorithm code is kept:
 
 - Deblurring-3DGS backbone: GaussianModel, GTnet, motion blur, defocus blur, `add_points()`, sharp canonical render.
-- DashGaussian scheduler: frequency resolution schedule, render scale/size, densify rate, momentum budget.
-- Group Training: temporary active/cached Gaussian split, non-destructive cache, merge-back.
+- Optional DashGaussian scheduler: frequency resolution schedule, render scale/size, densify rate, momentum budget.
+- Optional Group Training: temporary active/cached Gaussian split, non-destructive cache, merge-back.
 
 Not included:
 
@@ -125,7 +125,7 @@ Rebuild only for Dockerfile, requirements, system packages, CUDA extensions, bas
 Default SfM:
 
 ```text
-fine_sfm_backend = colmap_cli
+fine_sfm_backend = pycolmap
 ```
 
 Feature extraction, matching, and mapper bundle adjustment use GPU when `prefer_gpu=true`. Metrics record:

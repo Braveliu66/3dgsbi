@@ -266,10 +266,7 @@ def recommended_training_camera_view(
         return None
 
     sorted_extrinsics = sorted(extrinsics.values(), key=lambda item: str(item.name))
-    preferred = [name for name in (preferred_image_names or []) if name]
-    selected = next((item for name in preferred for item in sorted_extrinsics if str(item.name) == name), None)
-    if selected is None:
-        selected = sorted_extrinsics[0]
+    selected = sorted_extrinsics[0]
     try:
         rotation = np.asarray(selected.cam_from_world.rotation.matrix(), dtype=np.float32)
         translation = np.asarray(selected.cam_from_world.translation, dtype=np.float32)
@@ -291,7 +288,7 @@ def recommended_training_camera_view(
     target = position + forward * max(radius, 0.35)
 
     view: dict[str, Any] = {
-        "source": "training_camera",
+        "source": "first_training_camera",
         "image_name": str(selected.name),
         "position": [float(value) for value in position],
         "target": [float(value) for value in target],

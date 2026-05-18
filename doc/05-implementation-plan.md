@@ -189,7 +189,7 @@
 
 ## 7. 2026-05-18 Implementation Update
 
-- M6 fine pipeline now uses `colmap_cli` as the default production SfM frontend, with `pycolmap` still available.
+- M6 fine pipeline now uses `pycolmap` as the default production SfM frontend, with `colmap_cli` still available for explicit CLI runs.
 - Fine input contract is JPG/PNG images or extracted video frames. Missing EXIF camera metadata is normal; COLMAP estimates camera/intrinsics and sparse points from images.
 - Preview LiteVGGT remains separate from fine COLMAP and keeps its own runtime/package namespace.
 - GTnet deblur, DashGaussian scheduling, and Group Training live in the embedded DashDeblurGroupGS trainer, not in backend request handling code. Backend only resolves scene/deblur presets and writes config.

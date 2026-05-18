@@ -61,7 +61,7 @@ ALGORITHM_DEPENDENCIES: dict[str, dict[str, Any]] = {
             "diff_gaussian_rasterization",
             "simple_knn._C",
         ],
-        "executables": ["colmap", "ffmpeg", "node", "git"],
+        "executables": ["ffmpeg", "node", "git"],
         "requires_cuda": True,
     },
 }
@@ -104,7 +104,7 @@ ALGORITHMS: list[dict[str, Any]] = [
         "weight_paths": [],
         "commands": {},
         "source_type": "bundled",
-        "license_notice": "Fine reconstruction uses system COLMAP/pycolmap plus the embedded DashDeblurGroupGS worker trainer.",
+        "license_notice": "Fine reconstruction uses PyCOLMAP by default, optional COLMAP CLI, and the embedded DashDeblurGroupGS worker trainer.",
         "notes": "Default fine reconstruction pipeline: image or video-frame normalization, existing COLMAP scene construction, embedded DashDeblurGroupGS training, final PLY/SPZ export.",
     },
 ]
@@ -387,8 +387,7 @@ def fine_runtime_status() -> dict[str, Any]:
         "pycolmap": import_check("pycolmap"),
     }
     available = bool(
-        colmap_status.get("available")
-        and ffmpeg_status.get("available")
+        ffmpeg_status.get("available")
         and trainer_status.get("available")
         and dependencies.get("available")
         and all(item.get("available") for item in modules.values())
@@ -402,7 +401,7 @@ def fine_runtime_status() -> dict[str, Any]:
         "dash_deblur_group": trainer_status,
         "dependencies": dependencies,
         **modules,
-        "error": None if available else "COLMAP CLI/ffmpeg/pycolmap/DashDeblurGroupGS check failed",
+        "error": None if available else "ffmpeg/pycolmap/DashDeblurGroupGS check failed",
     }
 
 

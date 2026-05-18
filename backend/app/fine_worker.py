@@ -43,6 +43,12 @@ from app.worker import (
 
 settings = get_settings()
 storage = Storage(settings)
+TAIL_STAGE_ETA_SECONDS = {
+    "fine_outputs_validating": 90,
+    "fine_outputs_ready": 30,
+    "uploading_artifacts": 120,
+    "fine_ready": 0,
+}
 
 
 def main() -> None:
@@ -434,7 +440,7 @@ def update_task(db, task: Task, project: Project, stage: str, progress: int, sta
     task.current_stage = stage
     task.progress = max(task.progress or 0, progress)
     parsed_eta = eta_from_progress_logs(logs)
-    task.eta_seconds = parsed_eta if parsed_eta is not None else estimate_fine_eta(task, started)
+    task.eta_seconds = fine_eta_for_update(task, stage, started, logs, parsed_eta)
     if logs:
         task.logs = append_log(task.logs, *logs)
     if not is_raw_training_progress(stage, logs):
@@ -479,6 +485,22 @@ def estimate_fine_eta(task: Task, started: float) -> int | None:
     if progress < 20:
         return int(by_expected)
     return int(max(0, by_progress * 0.45 + by_expected * 0.55))
+
+
+def fine_eta_for_update(
+    task: Task,
+    stage: str,
+    started: float,
+    logs: tuple[str, ...],
+    parsed_eta: int | None = None,
+) -> int | None:
+    if parsed_eta is not None:
+        return parsed_eta
+    if stage == "fine_training" and any("training complete" in line.lower() for line in logs):
+        return 0
+    if stage in TAIL_STAGE_ETA_SECONDS:
+        return TAIL_STAGE_ETA_SECONDS[stage]
+    return estimate_fine_eta(task, started)
 
 
 def eta_from_progress_logs(logs: tuple[str, ...]) -> int | None:

@@ -6,7 +6,7 @@ from .grouping_method import get_under_training_mask
 
 class GroupingParams(ParamGroup):
     def __init__(self, parser):
-        self.Grouping = True
+        self.Grouping = False
         self.grouping_method = "Opacity-weighted"
         self.UTR = 0.78
         self.grouping_from_iter = 10000

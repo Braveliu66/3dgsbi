@@ -50,8 +50,8 @@ class EffectiveDeblurMode:
 
 
 INDOOR_MOTION = {
-    "iterations": 30000,
-    "resolution": 2,
+    "iterations": 20000,
+    "resolution": 1,
     "white_background": False,
     "eval": True,
     "deblur": 1,
@@ -60,34 +60,34 @@ INDOOR_MOTION = {
     "hidden": 3,
     "width": 64,
     "gtnet_lr": 0.001,
-    "position_lr_final": 0.0000016,
-    "percent_dense": 0.005,
-    "lambda_dssim": 0.3,
+    "position_lr_final": 0.000016,
+    "percent_dense": 0.01,
+    "lambda_dssim": 0.2,
     "lambda_s": 0.01,
-    "lambda_p": 0.008,
-    "max_clamp": 1.08,
-    "densify_from_iter": 800,
-    "densify_until_iter": 25000,
+    "lambda_p": 0.01,
+    "max_clamp": 1.10,
+    "densify_from_iter": 500,
+    "densify_until_iter": 15000,
     "densification_interval": 100,
-    "densify_grad_threshold": 0.0001,
-    "densify_prune_threshold": 0.008,
-    "densify_with_depth": 1,
+    "densify_grad_threshold": 0.0005,
+    "densify_prune_threshold": 0.01,
+    "densify_with_depth": 0,
     "prune_range": 3,
-    "pts_iter": 2500,
-    "pts_rate": 1.1,
+    "pts_iter": 999999,
+    "pts_rate": 0.0,
     "pts_dist": 2,
     "pts_N_intpl": 4,
-    "pts_N_pts": 200000,
+    "pts_N_pts": 0,
     "pts_add_bound": 10,
     "dash_enable": True,
-    "dash_start_iter": 5000,
+    "dash_start_iter": 1,
     "resolution_mode": "freq",
     "densify_mode": "freq",
     "max_n_gaussian": -1,
     "dash_max_reso_scale": 4,
     "dash_start_significance_factor": 4,
     "dash_max_densify_rate_per_step": 0.12,
-    "Grouping": True,
+    "Grouping": False,
     "grouping_method": "Opacity-weighted",
     "UTR": 0.78,
     "grouping_from_iter": 10000,
@@ -98,13 +98,11 @@ INDOOR_MOTION = {
 
 INDOOR_MIX = {
     **INDOOR_MOTION,
-    "iterations": 30000,
     "deblur": 4,
 }
 
 INDOOR_DEFOCUS = {
     **INDOOR_MOTION,
-    "iterations": 30000,
     "deblur": 4,
     "use_pos": 0,
     "num_moments": 3,
@@ -112,33 +110,29 @@ INDOOR_DEFOCUS = {
     "lambda_s": 0.008,
     "lambda_p": 0.0,
     "max_clamp": 1.06,
-    "densify_prune_threshold": 0.0045,
+    "densify_grad_threshold": 0.0002,
+    "densify_prune_threshold": 0.005,
     "dash_max_densify_rate_per_step": 0.10,
     "UTR": 0.82,
 }
 
 OUTDOOR_MOTION = {
     **INDOOR_MOTION,
-    "iterations": 35000,
-    "resolution": 4,
+    "iterations": 25000,
     "num_moments": 6,
-    "percent_dense": 0.01,
     "lambda_dssim": 0.2,
-    "lambda_p": 0.01,
-    "max_clamp": 1.10,
+    "percent_dense": 0.01,
     "densify_from_iter": 1000,
-    "densify_until_iter": 28000,
-    "densify_grad_threshold": 0.00015,
+    "densify_until_iter": 18000,
     "prune_range": 4,
-    "pts_iter": 3500,
-    "pts_rate": 1.3,
+    "pts_iter": 999999,
+    "pts_rate": 0.0,
     "pts_dist": 3,
     "pts_add_bound": 20,
-    "dash_start_iter": 4000,
     "dash_max_densify_rate_per_step": 0.10,
     "UTR": 0.75,
     "grouping_from_iter": 7000,
-    "grouping_until_iter": 30000,
+    "grouping_until_iter": 20000,
     "grouping_interval": 600,
     "grouping_freeze_around_pts": 1500,
 }
@@ -157,7 +151,8 @@ OUTDOOR_DEFOCUS = {
     "lambda_s": 0.008,
     "lambda_p": 0.0,
     "max_clamp": 1.08,
-    "densify_prune_threshold": 0.004,
+    "densify_grad_threshold": 0.0002,
+    "densify_prune_threshold": 0.005,
     "dash_max_densify_rate_per_step": 0.09,
     "UTR": 0.78,
 }
@@ -172,6 +167,19 @@ CONFIG_PRESETS = {
 }
 
 CONFIG_KEY_ORDER = list(INDOOR_MOTION)
+MODE_LOCKED_KEYS = {
+    "deblur",
+    "use_pos",
+    "num_moments",
+    "hidden",
+    "lambda_s",
+    "lambda_p",
+    "max_clamp",
+    "densify_grad_threshold",
+    "densify_prune_threshold",
+    "densify_with_depth",
+    "dash_max_densify_rate_per_step",
+}
 INT_KEYS = {
     "iterations",
     "resolution",
@@ -252,7 +260,18 @@ def run_dash_deblur_group_training(
         raise FineFailure("FINE_TRAINING_OUTPUT_MISSING", f"DashDeblurGroupGS did not produce a final PLY under {output_dir}")
 
     final_ply.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(produced_ply, final_ply)
+    raw_final_ply = runtime_dir / "final_raw.ply"
+    shutil.copy2(produced_ply, raw_final_ply)
+    try:
+        from app.fine.viewer_meta import write_far_noise_filtered_ply
+
+        far_noise_metrics = write_far_noise_filtered_ply(
+            raw_final_ply,
+            final_ply,
+            profile=str(options.get("fine_scene_profile") or options.get("preview_scene_profile") or "mixed_balanced"),
+        )
+    except Exception as exc:
+        raise FineFailure("FINE_OUTPUT_FILTER_FAILED", f"failed to filter final Gaussian PLY: {exc}") from exc
     splat_count = read_ply_vertex_count(final_ply)
 
     resolved_spz: Path | None = None
@@ -281,10 +300,17 @@ def run_dash_deblur_group_training(
         "deblur_auto_mixed_frames": deblur_mode.mixed_frames,
         "deblur_auto_sharp_frames": deblur_mode.sharp_frames,
         "deblur": int(config["deblur"]),
+        "resolution": int(config["resolution"]),
+        "use_pos": int(config["use_pos"]),
+        "num_moments": int(config["num_moments"]),
+        "densify_with_depth": int(config["densify_with_depth"]),
         "dash_enable": bool(config["dash_enable"]),
         "dash_start_iter": int(config["dash_start_iter"]),
         "resolution_mode": str(config["resolution_mode"]),
         "densify_mode": str(config["densify_mode"]),
+        "max_n_gaussian": int(config["max_n_gaussian"]),
+        "pts_iter": int(config["pts_iter"]),
+        "pts_N_pts": int(config["pts_N_pts"]),
         "Grouping": bool(config["Grouping"]),
         "UTR": float(config["UTR"]),
         "grouping_from_iter": int(config["grouping_from_iter"]),
@@ -293,6 +319,7 @@ def run_dash_deblur_group_training(
         "iterations": int(config["iterations"]),
         "splat_count": splat_count,
         "final_spz_enabled": resolved_spz is not None,
+        **far_noise_metrics,
     }
     return DashDeblurGroupResult(
         final_ply=final_ply,
@@ -358,7 +385,18 @@ def build_training_config(options: dict[str, Any], blur_analysis: Any | None = N
             config[key] = read_bool(options.get(key), bool(config[key]))
         elif key in STRING_KEYS:
             config[key] = str(options.get(key) or config[key]).strip()
+    apply_mode_locked_config(config, scene_type, deblur_mode)
     return config
+
+
+def apply_mode_locked_config(config: dict[str, Any], scene_type: str, deblur_mode: str) -> None:
+    if deblur_mode == "sharp":
+        config.update({"deblur": 0, "use_pos": 0, "lambda_s": 0.0, "lambda_p": 0.0, "num_moments": 1})
+        return
+    base_mode = deblur_mode if deblur_mode in {"motion", "mix", "defocus"} else "motion"
+    preset = CONFIG_PRESETS[(scene_type, base_mode)]
+    for key in MODE_LOCKED_KEYS:
+        config[key] = preset[key]
 
 
 def write_training_config(path: Path, config: dict[str, Any]) -> None:
@@ -534,9 +572,9 @@ def normalize_deblur_mode(options: dict[str, Any]) -> str:
         return "sharp"
     mode_key = "fine_deblur_mode_requested" if "fine_deblur_mode_requested" in options else "fine_deblur_mode"
     if mode_key in options:
-        value = str(options.get(mode_key) or "mix").strip().lower()
+        value = str(options.get(mode_key) or "motion").strip().lower()
         if value in {"mix", "auto", "automatic"}:
-            return "mix"
+            return "motion"
         if value in {"defocus", "2"}:
             return "defocus"
         if value in {"sharp", "0", "none", "off"}:
@@ -550,20 +588,12 @@ def normalize_deblur_mode(options: dict[str, Any]) -> str:
         return "defocus"
     if code == 0:
         return "sharp"
-    return "mix"
+    return "motion"
 
 
 def resolve_effective_deblur_mode(options: dict[str, Any], blur_analysis: Any | None = None) -> EffectiveDeblurMode:
     requested = normalize_deblur_mode(options)
-    if requested in {"motion", "defocus", "sharp"}:
-        return EffectiveDeblurMode(requested, requested, "explicit", "user_selected", 0, 0, 0, 0)
-
-    counts = count_training_blur_kinds(blur_analysis)
-    motion = counts["motion"]
-    defocus = counts["defocus"]
-    mixed = counts["mixed"]
-    sharp = counts["sharp"]
-    return EffectiveDeblurMode("mix", "mix", "explicit", "mixed_training_requested", motion, defocus, mixed, sharp)
+    return EffectiveDeblurMode(requested, requested, "explicit", "user_selected", 0, 0, 0, 0)
 
 
 def count_training_blur_kinds(blur_analysis: Any | None) -> dict[str, int]:

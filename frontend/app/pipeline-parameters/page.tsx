@@ -89,7 +89,7 @@ export default function PipelineParametersPage() {
       <div className="workspace-page">
         <header className="page-header compact">
           <div>
-            <p className="eyebrow">Pipeline Parameters</p>
+            <p className="eyebrow">管线参数</p>
             <h1>管线参数</h1>
           </div>
         </header>
@@ -102,7 +102,7 @@ export default function PipelineParametersPage() {
     <div className="workspace-page pipeline-parameters-page">
       <header className="page-header compact">
         <div>
-          <p className="eyebrow">Pipeline Parameters</p>
+          <p className="eyebrow">管线参数</p>
           <h1>管线参数</h1>
         </div>
         <div className="actions">
@@ -237,9 +237,19 @@ function renderInput(field: PipelineParameterField, value: unknown, onChange: (v
     return (
       <select className="select" value={String(value ?? "")} onChange={(event) => onChange(event.target.value)}>
         {(field.options ?? []).map((option) => (
-          <option value={option} key={option}>{option}</option>
+          <option value={option} key={option}>{optionLabel(field, option)}</option>
         ))}
       </select>
+    );
+  }
+  if (field.type === "text") {
+    return (
+      <input
+        className="input"
+        type="text"
+        value={typeof value === "string" ? value : ""}
+        onChange={(event) => onChange(event.target.value)}
+      />
     );
   }
   if (field.type === "nullable_number") {
@@ -271,6 +281,10 @@ function renderInput(field: PipelineParameterField, value: unknown, onChange: (v
       onChange={(event) => onChange(Number(event.target.value))}
     />
   );
+}
+
+function optionLabel(field: PipelineParameterField, option: string): string {
+  return field.option_labels?.[option] ?? option;
 }
 
 function effectiveDefaults(

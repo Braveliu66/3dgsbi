@@ -21,6 +21,7 @@ from sqlalchemy.orm import selectinload
 from app.algorithms import normalize_preview_pipeline
 from app.config import get_settings
 from app.database import SessionLocal, engine, initialize_database_schema
+from app.litevggt_defaults import apply_litevggt_video_speed_defaults
 from app.models import Artifact, MediaAsset, Project, Task, TaskEvent, User, WorkerHeartbeat, utc_now
 from app.preview.image_preprocess import normalize_image_directory
 from app.preview.runner import run_preview_pipeline
@@ -391,6 +392,7 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
             default_pipeline = "litevggt_spz"
             requested_pipeline = (task.options or {}).get("pipeline") or (task.options or {}).get("preview_pipeline")
             pipeline = normalize_preview_pipeline(requested_pipeline, default_pipeline)
+            preview_options = task.options or {}
             print(
                 "[preview-worker] task context "
                 f"task_id={task.id} project_id={project.id} project_name={project.name!r} "
@@ -404,8 +406,8 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
             update_task(db, task, project, "input_downloaded", 13, started, f"downloaded {len(project.media)} media files")
             input_metrics: dict[str, Any] = {}
             if any(media.kind == "image" for media in project.media):
-                max_side = read_positive_int((task.options or {}).get("preview_image_max_side"), settings.preview_image_max_side)
-                jpeg_quality = read_positive_int((task.options or {}).get("preview_image_jpeg_quality"), settings.preview_image_jpeg_quality)
+                max_side = read_positive_int(preview_options.get("preview_image_max_side"), settings.preview_image_max_side)
+                jpeg_quality = read_positive_int(preview_options.get("preview_image_jpeg_quality"), settings.preview_image_jpeg_quality)
                 normalized = normalize_image_directory(
                     input_dir,
                     work_dir / "input_normalized",
@@ -432,14 +434,17 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
                 videos = sorted((path for path in input_dir.iterdir() if path.is_file()), key=lambda path: path.name)
                 if project.input_type != "video" or len(videos) != 1:
                     raise PreviewFailure("INVALID_PREVIEW_INPUT", "Preview requires images or exactly one video file")
-                max_side = read_positive_int((task.options or {}).get("preview_image_max_side"), settings.preview_image_max_side)
-                jpeg_quality = read_positive_int((task.options or {}).get("preview_image_jpeg_quality"), settings.preview_image_jpeg_quality)
+                preview_options = apply_litevggt_video_speed_defaults(preview_options)
+                max_side = read_positive_int(preview_options.get("preview_image_max_side"), settings.preview_image_max_side)
+                jpeg_quality = read_positive_int(preview_options.get("preview_image_jpeg_quality"), settings.preview_image_jpeg_quality)
                 video_result = preprocess_preview_video(
                     videos[0],
                     work_dir,
-                    scene_type=str((task.options or {}).get("scene_type") or "indoor"),
+                    scene_type=str(preview_options.get("scene_type") or "indoor"),
                     max_side=max_side,
                     jpeg_quality=jpeg_quality,
+                    fps=preview_options.get("preview_video_fps"),
+                    max_frames=preview_options.get("preview_video_max_frames"),
                 )
                 input_dir = video_result.output_dir
                 input_metrics = video_result.metrics
@@ -469,7 +474,7 @@ def run_preview_task(task_id: str, worker_id: str) -> None:
                 output_spz=output_spz,
                 model_cache_dir=Path(settings.model_cache_dir).resolve(),
                 source_version=source_version,
-                options=task.options or {},
+                options=preview_options,
                 progress=lambda stage, progress, message=None, metrics=None: progress_task(
                     task.id, project.id, stage, progress, started, message, metrics
                 ),

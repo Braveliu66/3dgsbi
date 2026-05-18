@@ -338,14 +338,14 @@ Worker 返回结果：
 Fine tasks accept uploaded JPG/PNG images without EXIF camera metadata. Valid task options include:
 
 - `fine_pipeline=dash_deblur_group_gs` by default. Legacy `colmap_sparse` is accepted as an alias.
-- `fine_sfm_backend=colmap_cli` by default. `fine_sfm_backend=colmap` is accepted as an alias. The deprecated fine value `litevggt` is unsupported; preview still uses LiteVGGT.
+- `fine_sfm_backend=pycolmap` by default. `fine_sfm_backend=colmap` is accepted as a PyCOLMAP alias. `fine_sfm_backend=colmap_cli` explicitly uses the command-line COLMAP path. The deprecated fine value `litevggt` is unsupported; preview still uses LiteVGGT.
 - `fine_training_flavor=auto|dash_deblur_group`. `auto` uses the embedded trainer or an explicitly configured compatible `train.py --config` repo.
 - `fine_data_device=cpu|cuda`.
 - `fine_deblur_enabled=true|false`. `false` writes `deblur=0` for sharp canonical training.
-- `fine_deblur_mode=mix|motion|defocus|sharp`. `mix` keeps the mixed deblur preset instead of auto-selecting a single branch.
+- `fine_deblur_mode=motion|defocus|sharp`. Default is `motion`; legacy `mix`, `auto`, and `automatic` requests are accepted as aliases for `motion`.
 - `num_moments` controls the GTnet motion branch moment count.
-- `dash_enable`, `dash_start_iter`, `resolution_mode`, and `densify_mode` control DashGaussian scheduling.
-- `Grouping`, `UTR`, `grouping_from_iter`, `grouping_until_iter`, and `grouping_interval` control non-destructive Group Training.
+- `dash_enable`, `dash_start_iter`, `resolution_mode`, and `densify_mode` control DashGaussian scheduling. Defaults enable `dash_enable=true`, `dash_start_iter=1`, `resolution_mode=freq`, and `densify_mode=freq`.
+- `Grouping`, `UTR`, `grouping_from_iter`, `grouping_until_iter`, and `grouping_interval` control optional non-destructive Group Training; defaults keep grouping disabled.
 - `fine_trainer_repo` can point at a compatible DashDeblurGroupGS checkout; empty uses the embedded trainer or `DASH_DEBLUR_GROUP_REPO`.
 - `protect_new_points_iters` is removed and must not be sent by the UI/API. It is not part of the fused trainer contract.
 
@@ -354,22 +354,19 @@ Fine `metrics.json` now includes:
 ```json
 {
   "pipeline": "dash_deblur_group_gs",
-  "sfm_backend": "colmap_cli",
+  "sfm_backend": "pycolmap",
   "sfm_registered_images": 6,
   "sfm_sparse_points": 250000,
   "fine_training_backend": "dash_deblur_group_gs",
   "fine_training_flavor": "dash_deblur_group",
-  "fine_deblur_mode": "mix",
-  "fine_deblur_mode_requested": "mix",
-  "fine_deblur_mode_effective": "mix",
+  "fine_deblur_mode": "motion",
+  "fine_deblur_mode_requested": "motion",
+  "fine_deblur_mode_effective": "motion",
   "deblur_auto_confidence": "explicit",
-  "deblur": 4,
-  "colmap_use_gpu": true,
-  "colmap_ba_use_gpu": true,
-  "colmap_gpu_index": "0",
+  "deblur": 1,
   "dash_enable": true,
-  "dash_start_iter": 5000,
-  "Grouping": true,
+  "dash_start_iter": 1,
+  "Grouping": false,
   "UTR": 0.78,
   "splat_count": 1200000
 }

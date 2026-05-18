@@ -156,8 +156,8 @@ Fine workflow now runs:
 1. Frontend sends `scene_type=indoor|outdoor`; backend does not run a scene-classification model.
 2. Normalize uploaded JPG/PNG or extracted video frames into RGB JPEG. Missing EXIF is valid; EXIF orientation is only a pixel-rotation hint.
 3. Analyze blur and keep at least 3 real images.
-4. Run the COLMAP CLI path by default. The worker image builds upstream COLMAP with `global_mapper`, `hierarchical_mapper`, `model_clusterer`, and `model_splitter`.
-5. Select indoor/outdoor COLMAP policies by image count, input type, quality mode, GPU memory, and reconstruction feedback. Outdoor large scenes prefer `global_mapper`; only missing CLI support falls back to `mapper`.
+4. Run the PyCOLMAP path by default. The worker image still builds upstream COLMAP for explicit `fine_sfm_backend=colmap_cli` runs.
+5. Select indoor/outdoor PyCOLMAP matching policy by image count and capture order. Explicit CLI runs still use the COLMAP CLI policy code.
 6. Write a COLMAP-compatible scene with `images/` and `sparse/0`.
 7. Keep `fine_deblur_mode=mix` as the mixed deblur preset; explicit `motion`, `defocus`, or `sharp` still selects a single branch.
 8. Generate a scene-specific DashDeblurGroupGS config for `mix`, `motion`, `defocus`, or `sharp`.

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from app.fine.sparse_filter import write_filtered_sparse_points_ply
 from app.fine.types import FineFailure
 from app.preview.utils import image_files
 
@@ -99,7 +100,7 @@ class SceneBuildResult:
     metrics: dict[str, Any]
 
 
-def analyze_blur(input_dir: Path, *, reject_ratio: float = 0.15) -> BlurAnalysis:
+def analyze_blur(input_dir: Path, *, reject_ratio: float = 0.0) -> BlurAnalysis:
     scores = score_blur_images(input_dir)
     return summarize_blur_scores(scores, reject_ratio=reject_ratio)
 
@@ -108,7 +109,7 @@ def prepare_fine_images(
     input_dir: Path,
     output_dir: Path,
     *,
-    reject_ratio: float = 0.15,
+    reject_ratio: float = 0.0,
     min_images: int = 3,
 ) -> tuple[Path, BlurAnalysis]:
     if Image is None or ImageOps is None:
@@ -609,14 +610,19 @@ def build_pycolmap_scene(
     reconstruction = pycolmap.Reconstruction(recon_path)
     registered = len(reconstruction.images)
     registered_ratio = registered / len(files)
-    threshold = _resolve_min_registered_ratio(len(files), min_registered_ratio)
-    if registered < min_model_size or registered_ratio < threshold:
+    threshold = _resolve_min_registered_ratio(min_registered_ratio)
+    if registered < min_model_size:
+        raise FineFailure(
+            "COLMAP_RECONSTRUCTION_INCOMPLETE",
+            f"COLMAP registered {registered}/{len(files)} images, below minimum {min_model_size}",
+        )
+    if threshold is not None and registered_ratio < threshold:
         raise FineFailure(
             "COLMAP_RECONSTRUCTION_INCOMPLETE",
             f"COLMAP registered {registered}/{len(files)} images ({registered_ratio:.1%}), below threshold {threshold:.1%}",
         )
 
-    point_count = len(reconstruction.points3D)
+    raw_point_count = len(reconstruction.points3D)
     progress("fine_colmap_undistort", 40, "undistorting COLMAP images")
     pycolmap.undistort_images(
         output_path=str(scene_dir),
@@ -627,6 +633,9 @@ def build_pycolmap_scene(
     sparse_dir = ensure_colmap_sparse_zero(scene_dir / "sparse")
     reconstruction = pycolmap.Reconstruction(sparse_dir)
     validate_colmap_pinhole_scene(reconstruction)
+    filtered_point_count = write_filtered_sparse_points_ply(reconstruction, sparse_dir / "points3D.ply")
+    point_count = int(filtered_point_count) if filtered_point_count is not None else raw_point_count
+    removed_point_count = raw_point_count - int(filtered_point_count) if filtered_point_count is not None else None
     elapsed = round(time.monotonic() - started, 3)
     return SceneBuildResult(
         scene_dir=scene_dir,
@@ -641,6 +650,9 @@ def build_pycolmap_scene(
             "sfm_registered_ratio": registered_ratio,
             "sfm_min_registered_ratio": threshold,
             "sfm_sparse_points": point_count,
+            "sfm_sparse_points_raw": raw_point_count,
+            "sfm_sparse_points_filtered": filtered_point_count,
+            "sfm_sparse_filter_removed": removed_point_count,
             "sfm_undistorted": True,
             "colmap_profile": profile_name,
             "colmap_matcher": matcher,
@@ -656,14 +668,10 @@ def build_pycolmap_scene(
     )
 
 
-def _resolve_min_registered_ratio(image_count: int, override: float | None) -> float:
+def _resolve_min_registered_ratio(override: float | None) -> float | None:
     if override is not None:
         return max(0.30, min(0.95, float(override)))
-    if image_count <= 250:
-        return 0.70
-    if image_count <= 1000:
-        return 0.65
-    return 0.60
+    return None
 
 
 def select_best_colmap_model(sparse_dir: Path) -> Path | None:

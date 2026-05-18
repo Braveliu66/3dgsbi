@@ -68,8 +68,7 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
     profile_image_max_side = FINE_SCENE_PROFILE_MAX_SIDES[fine_scene_profile]
     default_image_max_side = min(profile_image_max_side, settings.fine_image_max_side, FINE_IMAGE_MAX_SIDE)
     image_max_side = read_int(ctx.options.get("fine_image_max_side"), default_image_max_side, minimum=512, maximum=FINE_IMAGE_MAX_SIDE)
-    reject_ratio = read_float(ctx.options.get("fine_blur_reject_ratio"), 0.10, minimum=0.0, maximum=0.45)
-    colmap_features = read_int(ctx.options.get("fine_sift_max_num_features"), COLMAP_SIFT_MAX_NUM_FEATURES, minimum=1024, maximum=65_536)
+    reject_ratio = read_float(ctx.options.get("fine_blur_reject_ratio"), 0.0, minimum=0.0, maximum=0.45)
     colmap_max_size = read_int(ctx.options.get("fine_colmap_max_image_size"), COLMAP_MAX_IMAGE_SIZE, minimum=512, maximum=4_096)
     colmap_max_matches = read_int(ctx.options.get("fine_colmap_max_num_matches"), COLMAP_MAX_NUM_MATCHES, minimum=1024, maximum=65_536)
     colmap_sequential_overlap = read_int(ctx.options.get("fine_colmap_sequential_overlap"), COLMAP_SEQUENTIAL_OVERLAP, minimum=4, maximum=200)
@@ -90,6 +89,24 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         ctx.work_dir / "fine_input",
         reject_ratio=reject_ratio,
         min_images=3,
+    )
+    colmap_features, colmap_feature_metrics = resolve_colmap_feature_budget(
+        ctx.options,
+        quality,
+        fine_scene_profile=fine_scene_profile,
+        image_count=len(image_files(train_input_dir)),
+        matcher=colmap_matcher,
+        max_image_size=colmap_max_size,
+    )
+    print(
+        "[fine-runner] colmap feature budget "
+        f"max_num_features={colmap_features} "
+        f"requested={colmap_feature_metrics['colmap_sift_feature_budget_requested']} "
+        f"reason={colmap_feature_metrics['colmap_sift_feature_budget_reason']} "
+        f"blur_ratio={colmap_feature_metrics['colmap_sift_feature_budget_blur_ratio']} "
+        f"sharp_score={colmap_feature_metrics['colmap_sift_feature_budget_sharp_score']} "
+        f"max_image_size={colmap_max_size}",
+        flush=True,
     )
 
     scene_dir = ctx.work_dir / "fine_scene"
@@ -112,6 +129,7 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         min_sparse_points=min_sparse_points,
         min_registered_ratio=min_registered_ratio,
     )
+    scene_result.metrics.update(colmap_feature_metrics)
     print(
         "[fine-runner] scene build complete "
         f"backend={scene_result.backend} scene_dir={scene_result.scene_dir} "
@@ -142,7 +160,6 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
             ctx.viewer_meta_json,
             final_ply=ctx.final_ply,
             scene_dir=scene_result.scene_dir,
-            preferred_image_names=first_clear_training_images(quality.per_frame_blur),
             asset_type="fine_dash_deblur_group_gaussians",
             point_source="dash_deblur_group_gs",
             default_view_mode="splats",
@@ -211,10 +228,10 @@ def build_scene(
     min_sparse_points: int = COLMAP_MIN_SPARSE_POINTS,
     min_registered_ratio: float | None = None,
 ):
-    sfm_backend = str(ctx.options.get("fine_sfm_backend") or "colmap_cli").strip().lower()
+    sfm_backend = str(ctx.options.get("fine_sfm_backend") or "pycolmap").strip().lower()
     if sfm_backend not in {"pycolmap", "colmap", "colmap_cli"}:
         raise FineFailure("UNSUPPORTED_FINE_SFM_BACKEND", f"Unsupported fine SfM backend: {sfm_backend}")
-    if sfm_backend in {"colmap", "colmap_cli"}:
+    if sfm_backend == "colmap_cli":
         result = build_colmap_cli_scene(
             input_dir,
             scene_dir,
@@ -232,8 +249,6 @@ def build_scene(
             sequential_overlap=colmap_sequential_overlap,
             progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
         )
-        if sfm_backend == "colmap":
-            result.metrics["sfm_backend_requested_alias"] = "colmap_maps_to_colmap_cli"
     else:
         result = build_pycolmap_scene(
             input_dir,
@@ -253,6 +268,8 @@ def build_scene(
             min_registered_ratio=min_registered_ratio,
             progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
         )
+        if sfm_backend == "colmap":
+            result.metrics["sfm_backend_requested_alias"] = "colmap_maps_to_pycolmap"
 
     result.metrics["sfm_min_sparse_points"] = min_sparse_points
     result.metrics["sfm_target_sparse_points"] = COLMAP_TARGET_SPARSE_POINTS
@@ -262,7 +279,9 @@ def build_scene(
     if min_sparse_points > 0 and point_count < min_sparse_points:
         raise FineFailure(
             "SFM_SPARSE_POINTS_TOO_LOW",
-            f"COLMAP produced {point_count} sparse points, below quality gate {min_sparse_points}",
+            f"COLMAP produced {point_count} sparse points, below quality gate {min_sparse_points}. "
+            "Add more overlapping/sharper images, or raise fine_colmap_max_image_size/fine_sift_max_num_features. "
+            "Only lower fine_sfm_min_sparse_points for debugging.",
         )
     return result
 
@@ -283,6 +302,94 @@ def resolve_fine_scene_profile(options: dict[str, Any]) -> str:
     return profile
 
 
+def resolve_colmap_feature_budget(
+    options: dict[str, Any],
+    quality: Any,
+    *,
+    fine_scene_profile: str,
+    image_count: int,
+    matcher: str,
+    max_image_size: int,
+) -> tuple[int, dict[str, Any]]:
+    profile_default = 32_768 if fine_scene_profile == "indoor_full" else COLMAP_SIFT_MAX_NUM_FEATURES
+    requested = read_int(options.get("fine_sift_max_num_features"), profile_default, minimum=1024, maximum=65_536)
+    auto_enabled = read_bool(options.get("fine_sift_max_num_features_auto"), True)
+    legacy_default_values = {32_768, 65_536, COLMAP_SIFT_MAX_NUM_FEATURES, profile_default}
+    if not auto_enabled:
+        return requested, _colmap_feature_budget_metrics(False, requested, requested, "manual_fixed", quality, image_count, matcher, max_image_size)
+    if options.get("fine_sift_max_num_features") not in {None, ""} and requested not in legacy_default_values:
+        return requested, _colmap_feature_budget_metrics(False, requested, requested, "manual_override", quality, image_count, matcher, max_image_size)
+
+    blur_ratio = _training_blur_ratio(quality)
+    sharp_score = float(getattr(quality, "mean_sharp_score", 0.0) or 0.0)
+    if blur_ratio >= 0.55 or sharp_score <= -0.75:
+        budget = 20_480
+        reason = "very_low_quality_more_features"
+    elif blur_ratio >= 0.30 or sharp_score <= 0.10:
+        budget = 16_384
+        reason = "low_quality_more_features"
+    elif blur_ratio <= 0.15 and sharp_score >= 1.00:
+        budget = 8_192
+        reason = "sharp_high_quality_less_features"
+    else:
+        budget = 12_288
+        reason = "balanced_quality"
+
+    effective_matcher = matcher.strip().lower()
+    if effective_matcher == "auto":
+        effective_matcher = "exhaustive" if image_count <= 250 else "sequential"
+    small_exhaustive_set = effective_matcher == "exhaustive" and 0 < image_count <= 30
+    memory_cap = 24_576
+    if effective_matcher == "exhaustive":
+        if image_count >= 80:
+            memory_cap = 12_288
+        elif image_count >= 40:
+            memory_cap = 16_384
+        else:
+            memory_cap = 20_480
+    if small_exhaustive_set:
+        small_set_budget = min(requested, 32_768)
+        budget = max(budget, small_set_budget)
+        memory_cap = max(memory_cap, small_set_budget)
+        reason = "small_image_set_more_features"
+    if max_image_size > COLMAP_MAX_IMAGE_SIZE and not small_exhaustive_set:
+        memory_cap = min(memory_cap, 12_288)
+
+    resolved = min(budget, memory_cap)
+    return resolved, _colmap_feature_budget_metrics(True, requested, resolved, reason, quality, image_count, effective_matcher, max_image_size)
+
+
+def _training_blur_ratio(quality: Any) -> float:
+    kept_images = int(getattr(quality, "kept_images", 0) or 0)
+    if kept_images > 0:
+        return max(0.0, min(1.0, float(getattr(quality, "training_blur_frames", 0) or 0) / kept_images))
+    image_count = int(getattr(quality, "blurred_images", 0) or 0)
+    return 1.0 if image_count > 0 else 0.0
+
+
+def _colmap_feature_budget_metrics(
+    auto: bool,
+    requested: int,
+    resolved: int,
+    reason: str,
+    quality: Any,
+    image_count: int,
+    matcher: str,
+    max_image_size: int,
+) -> dict[str, Any]:
+    return {
+        "colmap_sift_feature_budget_auto": auto,
+        "colmap_sift_feature_budget_requested": requested,
+        "colmap_sift_feature_budget_resolved": resolved,
+        "colmap_sift_feature_budget_reason": reason,
+        "colmap_sift_feature_budget_blur_ratio": round(_training_blur_ratio(quality), 6),
+        "colmap_sift_feature_budget_sharp_score": round(float(getattr(quality, "mean_sharp_score", 0.0) or 0.0), 6),
+        "colmap_sift_feature_budget_images": image_count,
+        "colmap_sift_feature_budget_matcher": matcher,
+        "colmap_sift_feature_budget_max_image_size": max_image_size,
+    }
+
+
 def assert_runtime_ready() -> None:
     try:
         import pycolmap  # noqa: F401
@@ -297,17 +404,6 @@ def assert_training_runtime_ready(options: dict[str, Any], repo_cache_dir: Path)
 def reject_removed_options(options: dict[str, Any]) -> None:
     if read_bool(options.get("fine_edgs_enabled"), False):
         raise FineFailure("UNSUPPORTED_FINE_OPTION", "EDGS/RoMA dense initialization has been removed from this worker image")
-
-
-def first_clear_training_images(per_frame_blur: dict[str, dict[str, Any]]) -> list[str]:
-    clear: list[str] = []
-    for item in per_frame_blur.values():
-        if item.get("rejected") or item.get("blurred"):
-            continue
-        training_image = item.get("training_image")
-        if isinstance(training_image, str) and training_image:
-            clear.append(training_image)
-    return clear
 
 
 def read_bool(value: Any, fallback: bool) -> bool:

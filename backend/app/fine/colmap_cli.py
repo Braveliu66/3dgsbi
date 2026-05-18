@@ -17,6 +17,7 @@ from app.fine.preprocess import (
     select_best_colmap_model,
     validate_colmap_pinhole_scene,
 )
+from app.fine.sparse_filter import write_filtered_sparse_points_ply
 from app.fine.types import FineFailure
 from app.preview.utils import image_files
 from app.resources import collect_gpu
@@ -639,10 +640,16 @@ def _run_colmap_attempt(
         raise FineFailure("COLMAP_RECONSTRUCTION_FAILED", "COLMAP CLI did not produce a sparse reconstruction")
 
     analysis = analyze_model(executable, recon_path, len(files))
-    threshold = _resolve_colmap_min_registered_ratio(policy.scene_type, len(files), min_registered_ratio)
+    threshold = _resolve_colmap_min_registered_ratio(min_registered_ratio)
     registered = int(analysis["registered_images"])
     registered_ratio = float(analysis["registered_ratio"])
-    if registered < max(3, min(10, len(files))) or registered_ratio < threshold:
+    min_registered_images = max(3, min(10, len(files)))
+    if registered < min_registered_images:
+        raise FineFailure(
+            "COLMAP_RECONSTRUCTION_INCOMPLETE",
+            f"COLMAP CLI registered {registered}/{len(files)} images, below minimum {min_registered_images}",
+        )
+    if threshold is not None and registered_ratio < threshold:
         raise FineFailure(
             "COLMAP_RECONSTRUCTION_INCOMPLETE",
             f"COLMAP CLI registered {registered}/{len(files)} images ({registered_ratio:.1%}), below threshold {threshold:.1%}",
@@ -670,8 +677,11 @@ def _run_colmap_attempt(
     reconstruction = _load_reconstruction(sparse_zero)
     if reconstruction is not None:
         validate_colmap_pinhole_scene(reconstruction)
+    filtered_point_count = write_filtered_sparse_points_ply(reconstruction, sparse_zero / "points3D.ply") if reconstruction is not None else None
     elapsed = round(time.monotonic() - started, 3)
-    point_count = int(analysis.get("points3D") or 0)
+    raw_point_count = int(analysis.get("points3D") or 0)
+    point_count = int(filtered_point_count) if filtered_point_count is not None else raw_point_count
+    removed_point_count = raw_point_count - int(filtered_point_count) if filtered_point_count is not None else None
     return SceneBuildResult(
         scene_dir=scene_dir,
         backend="colmap_cli",
@@ -686,6 +696,9 @@ def _run_colmap_attempt(
             "sfm_registered_ratio": registered_ratio,
             "sfm_min_registered_ratio": threshold,
             "sfm_sparse_points": point_count,
+            "sfm_sparse_points_raw": raw_point_count,
+            "sfm_sparse_points_filtered": filtered_point_count,
+            "sfm_sparse_filter_removed": removed_point_count,
             "sfm_undistorted": True,
             "colmap_policy": policy.name,
             "colmap_matchers": policy.matchers,
@@ -791,22 +804,10 @@ def _load_reconstruction(path: Path):
         return None
 
 
-def _resolve_colmap_min_registered_ratio(scene_type: str, image_count: int, override: float | None) -> float:
+def _resolve_colmap_min_registered_ratio(override: float | None) -> float | None:
     if override is not None:
         return max(0.30, min(0.95, float(override)))
-    if scene_type == "indoor":
-        if image_count <= 80:
-            return 0.95
-        if image_count <= 300:
-            return 0.90
-        if image_count <= 1000:
-            return 0.85
-        return 0.80
-    if image_count <= 150:
-        return 0.90
-    if image_count <= 3000:
-        return 0.80
-    return 0.75
+    return None
 
 
 def _indoor_feature_size_mapper(n_images: int) -> tuple[int, int, str]:

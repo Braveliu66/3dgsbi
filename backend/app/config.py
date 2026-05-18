@@ -3,7 +3,7 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.fine.colmap_defaults import FINE_IMAGE_MAX_SIDE, FINE_ITERATIONS
+from app.fine.colmap_defaults import FINE_DEFAULT_IMAGE_MAX_SIDE, FINE_ITERATIONS
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     fine_queue_name: str = "fine_tasks"
     fine_expected_seconds_images: int = 7200
     fine_expected_seconds_video: int = 14_400
-    fine_image_max_side: int = FINE_IMAGE_MAX_SIDE
+    fine_image_max_side: int = FINE_DEFAULT_IMAGE_MAX_SIDE
     fine_iterations: int = FINE_ITERATIONS
 
     litevggt_repo_commit: str = "4767c17f8b6f176bb751566e92f60eb885040033"

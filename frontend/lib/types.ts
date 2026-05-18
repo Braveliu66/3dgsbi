@@ -269,7 +269,7 @@ export interface RuntimePreflight {
 }
 
 export type PipelineSceneType = "indoor" | "outdoor";
-export type PipelineParameterType = "number" | "nullable_number" | "boolean" | "select" | "deblur_switch";
+export type PipelineParameterType = "number" | "nullable_number" | "boolean" | "select" | "deblur_switch" | "text";
 
 export interface PipelineParameterField {
   key: string;
@@ -281,6 +281,7 @@ export interface PipelineParameterField {
   max?: number;
   step?: number;
   options?: string[];
+  option_labels?: Record<string, string>;
 }
 
 export interface PipelineParameterSchemaItem {

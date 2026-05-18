@@ -32,10 +32,6 @@ function sceneTypeForVideoPreview(profile: PreviewSceneProfile): "indoor" | "out
   return profile === "outdoor_fast_clean" ? "outdoor" : "indoor";
 }
 
-function videoMaxInputFrames(): number {
-  return 300;
-}
-
 export default function UploadPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const thumbsRef = useRef<Record<string, string>>({});
@@ -181,7 +177,6 @@ export default function UploadPage() {
         options.preview_scene_profile = previewSceneProfile;
         options.scene_type = sceneTypeForVideoPreview(previewSceneProfile);
         options.litevggt_preprocess_mode = "pad";
-        options.litevggt_max_input_frames = videoMaxInputFrames();
       } else {
         options.pipeline = "litevggt_spz";
         options.preview_scene_profile = previewSceneProfile;

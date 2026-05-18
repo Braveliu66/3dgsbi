@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from app.fine.colmap_cli import (  # noqa: E402
     detect_colmap_capabilities,
     retry_policies,
     resolve_colmap_policy,
+    write_filtered_sparse_points_ply,
 )
 
 
@@ -245,6 +247,34 @@ class ColmapCliPolicyTests(unittest.TestCase):
             capabilities = detect_colmap_capabilities()
 
         self.assertIn("global_mapper", capabilities.commands)
+
+    def test_sparse_ply_filter_removes_track_and_bbox_outliers(self) -> None:
+        from app.fine import sparse_filter
+
+        if sparse_filter.np is None:
+            raise unittest.SkipTest("NumPy is required for sparse point filtering")
+
+        class Track:
+            def __init__(self, length: int) -> None:
+                self._length = length
+
+            def length(self) -> int:
+                return self._length
+
+        points = {}
+        for index in range(120):
+            points[index] = SimpleNamespace(xyz=[float(index % 12), float(index // 12), 0.0], color=[128, 64, 32], error=1.0, track=Track(4))
+        points[200] = SimpleNamespace(xyz=[1000.0, 1000.0, 1000.0], color=[255, 0, 0], error=1.0, track=Track(4))
+        points[201] = SimpleNamespace(xyz=[0.0, 0.0, 0.0], color=[255, 0, 0], error=20.0, track=Track(1))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "points3D.ply"
+            count = write_filtered_sparse_points_ply(SimpleNamespace(points3D=points), output)
+            text = output.read_text(encoding="ascii")
+
+        self.assertEqual(count, 120)
+        self.assertIn("element vertex 120", text)
+        self.assertNotIn("1000", text)
 
 
 if __name__ == "__main__":

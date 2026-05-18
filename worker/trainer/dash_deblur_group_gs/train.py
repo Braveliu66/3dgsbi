@@ -74,6 +74,8 @@ def training(dataset, opt, pipe, group_training, testing_iterations, saving_iter
     first_iter += 1
     zero_densify_since = None
     grouping_disabled_by_densify_stall = False
+    auto_stop_densify = False
+    small_add_count = 0
 
     viewpoint_stack = scene.getTrainCameras().copy()
 
@@ -115,7 +117,8 @@ def training(dataset, opt, pipe, group_training, testing_iterations, saving_iter
             pipe.debug = True
 
         gaussians.current_iteration = iteration
-        if scheduler is not None and iteration >= opt.dash_start_iter:
+        dash_active = scheduler is not None and iteration >= opt.dash_start_iter
+        if dash_active:
             render_scale = scheduler.get_res_scale(iteration)
         else:
             render_scale = 1
@@ -170,7 +173,7 @@ def training(dataset, opt, pipe, group_training, testing_iterations, saving_iter
                 scene.save(iteration)
 
             # Densification
-            if iteration < opt.densify_until_iter:
+            if iteration < opt.densify_until_iter and not auto_stop_densify:
                 # Keep track of max radii in image-space for pruning
                 if type(visibility_filter) == list:
                     for vf, rd in zip(visibility_filter, radii):
@@ -184,7 +187,7 @@ def training(dataset, opt, pipe, group_training, testing_iterations, saving_iter
                     point_caching = merge_group_cache_if_needed(gaussians, point_caching)
                     densify_rate = 1.0
                     momentum_add = 0
-                    if scheduler is not None and opt.densify_mode == "freq" and iteration >= opt.dash_start_iter:
+                    if dash_active and opt.densify_mode == "freq":
                         densify_rate = scheduler.get_densify_rate(iteration, gaussians.get_xyz.shape[0], render_scale)
                         momentum_add = gaussians.prune_and_densify_deblur_safe(
                             opt.densify_grad_threshold,
@@ -202,7 +205,22 @@ def training(dataset, opt, pipe, group_training, testing_iterations, saving_iter
                         gaussians.densify_and_prune(opt.densify_grad_threshold, opt.densify_prune_threshold, scene.cameras_extent, size_threshold, opt.densify_with_depth, opt.prune_range)
                         momentum_add = int(gaussians.get_xyz.shape[0]) - n_before
                     point_caching = None
-                    progress_bar.write(f"[ITER {iteration}] render_scale={render_scale} N_GS={gaussians.get_xyz.shape[0]} densify_rate={densify_rate:.4f} momentum_add={momentum_add}")
+                    n_gs = int(gaussians.get_xyz.shape[0])
+                    progress_bar.write(f"[ITER {iteration}] render_scale={render_scale} N_GS={n_gs} densify_rate={densify_rate:.4f} momentum_add={momentum_add}")
+                    rel_add = max(momentum_add, 0) / max(n_gs, 1)
+                    if iteration > 10000 and rel_add < 0.001:
+                        small_add_count += 1
+                    else:
+                        small_add_count = 0
+                    hit_point_cap = opt.max_n_gaussian > 0 and n_gs >= opt.max_n_gaussian
+                    hit_low_gain = small_add_count >= 5
+                    if hit_point_cap or hit_low_gain:
+                        auto_stop_densify = True
+                        progress_bar.write(
+                            f"[ITER {iteration}] auto_stop_densify=True "
+                            f"N_GS={n_gs} rel_add={rel_add:.6f} "
+                            f"reason={'point_cap' if hit_point_cap else 'low_gain'}"
+                        )
                     if (
                         group_training is not None
                         and getattr(group_training, "Grouping", False)
@@ -233,8 +251,11 @@ def training(dataset, opt, pipe, group_training, testing_iterations, saving_iter
                         pts_N_pts = opt.pts_N_pts
                     print(f"Allocate {pts_N_pts} points\n")
 
-                    gaussians.add_points(training_args=opt, dist=opt.pts_dist, N=opt.pts_N_intpl, num_pts=pts_N_pts, bound=opt.pts_add_bound)
-                    point_caching = None
+                    if pts_N_pts > 0:
+                        gaussians.add_points(training_args=opt, dist=opt.pts_dist, N=opt.pts_N_intpl, num_pts=pts_N_pts, bound=opt.pts_add_bound)
+                        point_caching = None
+                    else:
+                        progress_bar.write(f"[ITER {iteration}] add_points skipped because pts_N_pts={pts_N_pts}")
 
             # Optimizer step
             if iteration < opt.iterations:

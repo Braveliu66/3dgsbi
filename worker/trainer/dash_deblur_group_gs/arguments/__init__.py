@@ -82,24 +82,24 @@ class OptimizationParams(ParamGroup):
         self.rotation_lr = 0.001
         self.percent_dense = 0.005
         self.lambda_dssim = 0.3
-        self.densification_interval = 100
-        self.densify_from_iter = 500
-        self.densify_until_iter = 25_000
-        self.densify_grad_threshold = 0.0001
-        self.densify_prune_threshold = 0.005
+        self.densification_interval = 200
+        self.densify_from_iter = 700
+        self.densify_until_iter = 16_000
+        self.densify_grad_threshold = 0.0002
+        self.densify_prune_threshold = 0.008
 
         # depth-based densification & pruning
-        self.densify_with_depth = 1 # Not in use
+        self.densify_with_depth = 0 # Not in use
         self.densification_range = 1 
         self.prune_range = 3
         
         # add pts
         self.pts_dist = 2
         self.pts_N_intpl = 4
-        self.pts_N_pts = 200_000
-        self.pts_iter = 2500
+        self.pts_N_pts = 0
+        self.pts_iter = 999999
         self.pts_add_bound = 10
-        self.pts_rate=1.1
+        self.pts_rate=0.0
 
         # MLP & rendering
         self.gtnet_lr = 1e-3
@@ -112,11 +112,11 @@ class OptimizationParams(ParamGroup):
         self.use_pos = 0
 
         # DashGaussian scheduling
-        self.dash_enable = False
-        self.resolution_mode = "const"
-        self.densify_mode = "free"
+        self.dash_enable = True
+        self.resolution_mode = "freq"
+        self.densify_mode = "freq"
         self.max_n_gaussian = -1
-        self.dash_start_iter = 5000
+        self.dash_start_iter = 1
         self.dash_max_reso_scale = 4
         self.dash_max_densify_rate_per_step = 0.10
         self.dash_start_significance_factor = 4

@@ -28,6 +28,7 @@ from app.config import get_settings
 from app.database import SessionLocal, engine, get_db, initialize_database_schema
 from app.fine.colmap_defaults import DEFAULT_FINE_SCENE_PROFILE, FINE_PIPELINE_NAME, FINE_SCENE_PROFILE_MAX_SIDES
 from app.models import AlgorithmRegistry, Artifact, Feedback, MediaAsset, PipelineParameterDefault, Project, Task, TaskEvent, UploadSession, User, WorkerHeartbeat, new_id, utc_now
+from app.litevggt_defaults import apply_litevggt_video_speed_defaults
 from app.pipeline_parameters import (
     effective_saved_defaults_for,
     VALID_PIPELINES,
@@ -1188,6 +1189,7 @@ def create_preview_task(
             options.get("preview_scene_profile")
             or ("outdoor_fast_clean" if options["scene_type"] == "outdoor" else "indoor_full")
         )
+        options = apply_litevggt_video_speed_defaults(options)
     else:
         raise HTTPException(status_code=400, detail="Preview input type is unsupported")
     task = Task(
@@ -1287,7 +1289,7 @@ def create_fine_task(
         "camera_distortion": normalize_fine_camera_distortion(payload_options.get("camera_distortion")),
         "prefer_gpu": normalize_bool_option(payload_options.get("prefer_gpu"), True),
         "fine_capture_order": normalize_fine_capture_order(payload_options.get("fine_capture_order")),
-        "fine_sfm_backend": str(payload_options.get("fine_sfm_backend") or "colmap_cli").strip().lower(),
+        "fine_sfm_backend": str(payload_options.get("fine_sfm_backend") or "pycolmap").strip().lower(),
         "source_version": project.source_version,
         "fine_expected_seconds": eta_seconds,
         "fine_iterations": int(payload_options.get("fine_iterations") or settings.fine_iterations),
