@@ -1,6 +1,7 @@
 import math
 
 import torch
+import torch.nn.functional as F
 
 from utils.general_utils import get_expon_lr_func
 
@@ -140,7 +141,18 @@ class TrainingScheduler:
         self.next_i = 2
         scene_freq_image = None
         max_reso_scale = float(self.max_reso_scale)
+        target_h = min(int(img.shape[-2]) for img in original_images)
+        target_w = min(int(img.shape[-1]) for img in original_images)
+        target_size = (target_h, target_w)
         for img in original_images:
+            if tuple(img.shape[-2:]) != target_size:
+                img = F.interpolate(
+                    img[None],
+                    size=target_size,
+                    mode="bilinear",
+                    align_corners=False,
+                    antialias=True,
+                )[0]
             img_fft_centered = torch.fft.fftshift(torch.fft.fft2(img), dim=(-2, -1))
             img_fft_mod = (img_fft_centered.real.square() + img_fft_centered.imag.square()).sqrt()
             scene_freq_image = img_fft_mod if scene_freq_image is None else scene_freq_image + img_fft_mod
