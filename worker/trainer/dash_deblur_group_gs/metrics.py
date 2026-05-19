@@ -16,14 +16,6 @@ photometric = {
     "lpips": None
 }
 
-def _ssim_win_size(height, width):
-    win_size = min(7, height, width)
-    if win_size % 2 == 0:
-        win_size -= 1
-    if win_size < 1:
-        raise ValueError(f"SSIM input is empty after cropping: height={height}, width={width}")
-    return win_size
-
 def compute_img_metric(im1t: torch.Tensor, im2t: torch.Tensor,
                        metric="mse", margin=0, mask=None):
     """
@@ -53,7 +45,7 @@ def compute_img_metric(im1t: torch.Tensor, im2t: torch.Tensor,
             marginw = int(wid * margin) + 1
             mask = mask[:, marginh:hei - marginh, marginw:wid - marginw]
 
-    # convert from [0, 1] to [-1, 1]
+    # 从 [0, 1] 映射到 [-1, 1]
     im1t = (im1t * 2 - 1).clamp(-1, 1)
     im2t = (im2t * 2 - 1).clamp(-1, 1)
 
@@ -90,15 +82,8 @@ def compute_img_metric(im1t: torch.Tensor, im2t: torch.Tensor,
                 pixelnum = mask[i, ..., 0].sum()
                 value = value - 10 * np.log10(hei * wid / pixelnum)
         elif metric in ["ssim"]:
-            height, width, _ = im1[i].shape
-            win_size = _ssim_win_size(height, width)
             value, ssimmap = photometric["ssim"](
-                im1[i], im2[i],
-                channel_axis=-1,
-                data_range=2.0,
-                win_size=win_size,
-                full=True,
-                use_sample_covariance=win_size > 1,
+                im1[i], im2[i], multichannel=True, full=True
             )
             if mask is not None:
                 value = (ssimmap * mask[i]).sum() / mask[i].sum()
@@ -117,7 +102,7 @@ if __name__ == "__main__":
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
 
-    # Set up command line argument parser
+    # 初始化命令行参数解析器
     parser = ArgumentParser(description="Training script parameters")
     parser.add_argument('--model_paths', '-m', required=True, nargs="+", type=str, default=[])
     args = parser.parse_args()

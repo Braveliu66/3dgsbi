@@ -35,24 +35,17 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(config["iterations"], 1234)
-        self.assertEqual(config["resolution"], 1)
-        self.assertEqual(config["deblur"], 6)
+        self.assertEqual(config["resolution"], -1)
+        self.assertEqual(config["deblur"], 1)
         self.assertEqual(config["use_pos"], 0)
-        self.assertEqual(config["densify_with_depth"], 0)
-        self.assertEqual(config["dash_enable"], True)
-        self.assertEqual(config["dash_start_iter"], 1)
-        self.assertEqual(config["resolution_mode"], "freq")
-        self.assertEqual(config["densify_mode"], "freq")
-        self.assertEqual(config["grouping_interval"], 600)
-        self.assertEqual(config["Grouping"], False)
-        self.assertEqual(config["lambda_p"], 0.0)
-        self.assertEqual(config["densify_until_iter"], 18000)
+        self.assertEqual(config["densify_with_depth"], 1)
+        self.assertEqual(config["lambda_p"], 0.01)
+        self.assertEqual(config["densify_until_iter"], 15000)
         self.assertEqual(config["densification_interval"], 100)
         self.assertEqual(config["densify_grad_threshold"], 0.0002)
-        self.assertEqual(config["max_n_gaussian"], -1)
-        self.assertEqual(config["dash_max_densify_rate_per_step"], 0.09)
-        self.assertEqual(config["pts_iter"], 999999)
-        self.assertEqual(config["pts_N_pts"], 0)
+        self.assertEqual(config["pts_iter"], 2500)
+        self.assertEqual(config["pts_rate"], 1.1)
+        self.assertEqual(config["pts_N_pts"], 200000)
 
     def test_legacy_mix_maps_to_motion_even_with_defocus_analysis(self) -> None:
         blur = SimpleNamespace(
@@ -80,7 +73,7 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         self.assertEqual(config["num_moments"], 4)
         self.assertEqual(config["hidden"], 3)
         self.assertEqual(config["lambda_p"], 0.01)
-        self.assertEqual(config["densify_with_depth"], 0)
+        self.assertEqual(config["densify_with_depth"], 1)
 
     def test_legacy_mix_maps_to_motion_after_stale_saved_options(self) -> None:
         blur = SimpleNamespace(
@@ -140,8 +133,7 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         self.assertEqual(mode.defocus_frames, 0)
         self.assertEqual(config["deblur"], 1)
         self.assertEqual(config["use_pos"], 1)
-        self.assertEqual(config["num_moments"], 6)
-        self.assertEqual(config["dash_start_iter"], 1)
+        self.assertEqual(config["num_moments"], 4)
 
     def test_mix_deblur_mode_ignores_auto_override_when_uncertain(self) -> None:
         blur = SimpleNamespace(
@@ -188,7 +180,7 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         self.assertEqual(config["deblur"], 1)
         self.assertEqual(config["use_pos"], 1)
 
-    def test_write_training_config_preserves_deblur_dash_group_keys(self) -> None:
+    def test_write_training_config_preserves_deblur_keys(self) -> None:
         config = build_training_config({"scene_type": "indoor", "fine_deblur_mode": "motion"})
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "train_config.txt"
@@ -197,21 +189,40 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
 
         self.assertIn("deblur = 1", text)
-        self.assertIn("resolution = 1", text)
+        self.assertIn("resolution = -1", text)
         self.assertIn("position_lr_final = 1.6e-05", text)
         self.assertIn("percent_dense = 0.01", text)
         self.assertIn("lambda_dssim = 0.2", text)
-        self.assertIn("dash_enable = True", text)
-        self.assertIn("densify_with_depth = 0", text)
-        self.assertIn("resolution_mode = freq", text)
-        self.assertIn("densify_mode = freq", text)
-        self.assertIn("max_n_gaussian = -1", text)
-        self.assertIn("dash_max_densify_rate_per_step = 0.12", text)
-        self.assertIn("pts_N_pts = 0", text)
-        self.assertIn("pts_iter = 999999", text)
-        self.assertIn("Grouping = False", text)
-        self.assertIn("grouping_method = Opacity-weighted", text)
+        self.assertIn("densify_with_depth = 1", text)
+        self.assertIn("densify_grad_threshold = 0.0005", text)
+        self.assertIn("densify_prune_threshold = 0.01", text)
+        self.assertIn("pts_N_pts = 200000", text)
+        self.assertIn("pts_iter = 2500", text)
+        self.assertIn("pts_rate = 1.1", text)
+        self.assertNotIn("dash_enable", text)
+        self.assertNotIn("Grouping", text)
         self.assertNotIn("protect_new_points_iters", text)
+
+    def test_trainer_uses_official_densify_order_without_default_caps(self) -> None:
+        source = (Path(__file__).resolve().parents[2] / "worker" / "trainer" / "dash_deblur_group_gs" / "scene" / "gaussian_model.py").read_text(encoding="utf-8")
+        densify_source = source.split("def densify_and_prune", 1)[1].split("def add_densification_stats", 1)[0]
+
+        self.assertLess(densify_source.index("self.densify_and_clone"), densify_source.index("self.densify_and_split"))
+        self.assertLess(densify_source.index("self.densify_and_split"), densify_source.index("prune_mask ="))
+        self.assertNotIn("opacity > 0.015", source)
+        self.assertNotIn("seen >=", source)
+
+    def test_trainer_uses_braveliu_auto_point_schedule(self) -> None:
+        trainer_root = Path(__file__).resolve().parents[2] / "worker" / "trainer" / "dash_deblur_group_gs"
+        train_source = (trainer_root / "train.py").read_text(encoding="utf-8")
+        gaussian_source = (trainer_root / "scene" / "gaussian_model.py").read_text(encoding="utf-8")
+
+        self.assertIn("def auto_point_addition_iter", train_source)
+        self.assertIn("opt.pts_iter = auto_pts_iter", train_source)
+        self.assertIn("pts_N_pts = int(min(volume / (opt.pts_rate ** 3), 200000))", train_source)
+        self.assertNotIn("def resolve_add_points_count", train_source)
+        self.assertNotIn("kept={add_stats['kept']} rejected={add_stats['rejected']}", train_source)
+        self.assertNotIn("torch.cdist", gaussian_source)
 
     def test_build_training_command_uses_colmap_scene_and_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -240,6 +251,8 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         self.assertIn("--model_path", command)
         self.assertIn(str(output_dir), command)
         self.assertIn("--config", command)
+        self.assertIn("--test_iterations", command)
+        self.assertIn("20001", command)
 
     def test_training_exports_filtered_final_ply(self) -> None:
         try:
@@ -251,7 +264,7 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
             root = Path(tmp)
             repo = root / "repo"
             repo.mkdir()
-            (repo / "train.py").write_text("parser.add_argument('--config')\ndeblur = 1\nGrouping = False\n", encoding="utf-8")
+            (repo / "train.py").write_text("parser.add_argument('--config')\ndeblur = 1\n", encoding="utf-8")
             produced = root / "produced.ply"
             self._write_xyz_binary_ply(produced, [(float(index % 12), float(index // 12), 0.0) for index in range(120)] + [(1000.0, 1000.0, 1000.0)])
             final_ply = root / "final.ply"
@@ -267,35 +280,32 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
                     final_spz=None,
                     options={"fine_trainer_repo": str(repo), "fine_scene_profile": "indoor_full"},
                     repo_cache_dir=root / "cache",
-                    blur_analysis=None,
+                    blur_analysis=SimpleNamespace(kept_images=14),
                 )
 
         run_training.assert_called_once()
         self.assertEqual(result.splat_count, 120)
         self.assertEqual(result.metrics["far_noise_removed_points"], 1)
         self.assertEqual(result.final_ply, final_ply)
+        self.assertEqual(result.metrics["deblur_strategy"], "all_training_images")
+        self.assertEqual(result.metrics["deblur_applied_images"], 14)
 
-    def test_dashgaussian_flavor_is_rejected(self) -> None:
+    def test_unknown_trainer_flavor_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            repo = root / "DashGaussian"
-            (repo / "utils").mkdir(parents=True)
+            repo = root / "foreign_trainer"
+            repo.mkdir()
             (repo / "train.py").write_text("from argparse import ArgumentParser\n", encoding="utf-8")
-            (repo / "train_dash.py").write_text("from utils.schedule_utils import TrainingScheduler\n", encoding="utf-8")
-            (repo / "utils" / "schedule_utils.py").write_text("class TrainingScheduler: pass\n", encoding="utf-8")
 
             with self.assertRaises(Exception) as raised:
-                resolve_runtime_paths({"fine_trainer_repo": str(repo), "fine_training_flavor": "dashgaussian"}, root / "repo-cache")
+                resolve_runtime_paths({"fine_trainer_repo": str(repo), "fine_training_flavor": "foreign"}, root / "repo-cache")
 
         self.assertIn("unsupported fine training flavor", str(raised.exception))
 
-    def test_merged_repo_detection_wins_over_dash_files(self) -> None:
+    def test_merged_repo_detection_uses_deblur_train_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
-            (repo / "utils").mkdir()
             (repo / "train.py").write_text("parser.add_argument('--config')\ndeblur = 1\n", encoding="utf-8")
-            (repo / "train_dash.py").write_text("", encoding="utf-8")
-            (repo / "utils" / "schedule_utils.py").write_text("", encoding="utf-8")
 
             self.assertEqual(detect_trainer_flavor(repo), "dash_deblur_group")
 

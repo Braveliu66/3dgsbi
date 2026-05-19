@@ -1,12 +1,12 @@
 #
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
+# 版权所有 (C) 2023, Inria
+# GRAPHDECO 研究组, https://team.inria.fr/graphdeco
+# 初始化输出目录
 #
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
+# 本软件仅可在 LICENSE.md 文件条款下用于
+# 非商业、研究和评估用途。
 #
-# For inquiries contact  george.drettakis@inria.fr
+# 咨询请联系：george.drettakis@inria.fr
 #
 
 from scene.cameras import Camera
@@ -21,7 +21,7 @@ def loadCam(args, id, cam_info, resolution_scale):
 
     if args.resolution in [1, 2, 4, 8]:
         resolution = round(orig_w/(resolution_scale * args.resolution)), round(orig_h/(resolution_scale * args.resolution))
-    else:  # should be a type that converts to float
+    else:  # 初始化命令行参数解析器 float ?????
         if args.resolution == -1:
             if orig_w > 1600:
                 global WARNED

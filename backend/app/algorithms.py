@@ -415,7 +415,6 @@ def dash_deblur_group_status() -> dict[str, Any]:
     submodules = {
         "diff_gaussian_rasterization": repo / "submodules" / "diff-gaussian-rasterization",
         "simple_knn": repo / "submodules" / "simple-knn",
-        "fused_ssim": repo / "submodules" / "fused-ssim",
     }
     submodule_status = {
         name: {"path": str(path), "exists": path.exists()}

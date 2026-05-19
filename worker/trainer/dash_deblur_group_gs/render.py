@@ -1,13 +1,3 @@
-#
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
-#
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
-#
-# For inquiries contact  george.drettakis@inria.fr
-#
 
 import torch
 from scene import Scene
@@ -36,11 +26,11 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
     metric_lpips = []
 
     for idx, view in enumerate(tqdm(views, desc="Rendering and Evaluation progress")):
-        # rendering
+        # 初始化输出目录
         rendering = render(view, gaussians, pipeline, background)["render"]
         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
 
-        # evaluation
+        # 初始化输出目录
         rendering = torch.clamp(rendering, 0.0, 1.0)
         gt_image = torch.clamp(view.original_image, 0.0, 1.0)
         metric_psnr.append(psnr(rendering, gt_image).mean().double().item())
@@ -70,7 +60,7 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
              render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background)
 
 if __name__ == "__main__":
-    # Set up command line argument parser
+    # 初始化命令行参数解析器
     parser = ArgumentParser(description="Testing script parameters")
     model = ModelParams(parser, sentinel=True)
     pipeline = PipelineParams(parser)
@@ -81,7 +71,7 @@ if __name__ == "__main__":
     args = get_combined_args(parser)
     print("Rendering " + args.model_path)
 
-    # Initialize system state (RNG)
+    # 初始化系统随机状态（RNG）
     safe_state(args.quiet)
 
     render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test)

@@ -342,10 +342,10 @@ Fine tasks accept uploaded JPG/PNG images without EXIF camera metadata. Valid ta
 - `fine_training_flavor=auto|dash_deblur_group`. `auto` uses the embedded trainer or an explicitly configured compatible `train.py --config` repo.
 - `fine_data_device=cpu|cuda`.
 - `fine_deblur_enabled=true|false`. `false` writes `deblur=0` for sharp canonical training.
-- `fine_deblur_mode=motion|defocus|sharp`. Default is `motion`; legacy `mix`, `auto`, and `automatic` requests are accepted as aliases for `motion`.
+- `fine_deblur_mode=motion|defocus|sharp`. Default is `motion`; legacy `mix`, `auto`, and `automatic` requests are accepted as aliases for `motion`. Deblur is applied to every training image when enabled.
 - `num_moments` controls the GTnet motion branch moment count.
-- `dash_enable`, `dash_start_iter`, `resolution_mode`, and `densify_mode` control DashGaussian scheduling. Defaults enable `dash_enable=true`, `dash_start_iter=1`, `resolution_mode=freq`, and `densify_mode=freq`.
-- `Grouping`, `UTR`, `grouping_from_iter`, `grouping_until_iter`, and `grouping_interval` control optional non-destructive Group Training; defaults keep grouping disabled.
+- `resolution` controls trainer image downsampling. Default `resolution=4` follows the upstream real motion/defocus configs.
+- `pts_iter`, `pts_rate`, `pts_N_pts`, `pts_N_intpl`, and `pts_add_bound` control Deblurring-3DGS `add_points()`. Defaults trigger random point addition at iteration 2500 with `pts_N_pts=200000`; `pts_rate` is only used for volume-based sizing when `pts_N_pts=0`.
 - `fine_trainer_repo` can point at a compatible DashDeblurGroupGS checkout; empty uses the embedded trainer or `DASH_DEBLUR_GROUP_REPO`.
 - `protect_new_points_iters` is removed and must not be sent by the UI/API. It is not part of the fused trainer contract.
 
@@ -364,10 +364,6 @@ Fine `metrics.json` now includes:
   "fine_deblur_mode_effective": "motion",
   "deblur_auto_confidence": "explicit",
   "deblur": 1,
-  "dash_enable": true,
-  "dash_start_iter": 1,
-  "Grouping": false,
-  "UTR": 0.78,
   "splat_count": 1200000
 }
 ```

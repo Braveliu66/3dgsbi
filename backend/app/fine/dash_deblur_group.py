@@ -51,7 +51,7 @@ class EffectiveDeblurMode:
 
 INDOOR_MOTION = {
     "iterations": 20000,
-    "resolution": 1,
+    "resolution": -1,
     "white_background": False,
     "eval": True,
     "deblur": 1,
@@ -71,90 +71,40 @@ INDOOR_MOTION = {
     "densification_interval": 100,
     "densify_grad_threshold": 0.0005,
     "densify_prune_threshold": 0.01,
-    "densify_with_depth": 0,
+    "densify_with_depth": 1,
     "prune_range": 3,
-    "pts_iter": 999999,
-    "pts_rate": 0.0,
+    "pts_iter": 2500,
+    "pts_rate": 1.1,
     "pts_dist": 2,
     "pts_N_intpl": 4,
-    "pts_N_pts": 0,
+    "pts_N_pts": 200000,
     "pts_add_bound": 10,
-    "dash_enable": True,
-    "dash_start_iter": 1,
-    "resolution_mode": "freq",
-    "densify_mode": "freq",
-    "max_n_gaussian": -1,
-    "dash_max_reso_scale": 4,
-    "dash_start_significance_factor": 4,
-    "dash_max_densify_rate_per_step": 0.12,
-    "Grouping": False,
-    "grouping_method": "Opacity-weighted",
-    "UTR": 0.78,
-    "grouping_from_iter": 10000,
-    "grouping_until_iter": 27000,
-    "grouping_interval": 800,
-    "grouping_freeze_around_pts": 1000,
 }
 
 INDOOR_MIX = {
     **INDOOR_MOTION,
-    "deblur": 4,
 }
 
 INDOOR_DEFOCUS = {
     **INDOOR_MOTION,
-    "deblur": 4,
     "use_pos": 0,
-    "num_moments": 3,
-    "hidden": 2,
-    "lambda_s": 0.008,
-    "lambda_p": 0.0,
-    "max_clamp": 1.06,
     "densify_grad_threshold": 0.0002,
     "densify_prune_threshold": 0.005,
-    "dash_max_densify_rate_per_step": 0.10,
-    "UTR": 0.82,
 }
 
 OUTDOOR_MOTION = {
     **INDOOR_MOTION,
-    "iterations": 25000,
-    "num_moments": 6,
-    "lambda_dssim": 0.2,
-    "percent_dense": 0.01,
-    "densify_from_iter": 1000,
-    "densify_until_iter": 18000,
-    "prune_range": 4,
-    "pts_iter": 999999,
-    "pts_rate": 0.0,
-    "pts_dist": 3,
-    "pts_add_bound": 20,
-    "dash_max_densify_rate_per_step": 0.10,
-    "UTR": 0.75,
-    "grouping_from_iter": 7000,
-    "grouping_until_iter": 20000,
-    "grouping_interval": 600,
-    "grouping_freeze_around_pts": 1500,
 }
 
 OUTDOOR_MIX = {
     **OUTDOOR_MOTION,
-    "deblur": 6,
 }
 
 OUTDOOR_DEFOCUS = {
     **OUTDOOR_MOTION,
-    "deblur": 6,
     "use_pos": 0,
-    "num_moments": 3,
-    "hidden": 2,
-    "lambda_s": 0.008,
-    "lambda_p": 0.0,
-    "max_clamp": 1.08,
     "densify_grad_threshold": 0.0002,
     "densify_prune_threshold": 0.005,
-    "dash_max_densify_rate_per_step": 0.09,
-    "UTR": 0.78,
 }
 
 CONFIG_PRESETS = {
@@ -178,7 +128,6 @@ MODE_LOCKED_KEYS = {
     "densify_grad_threshold",
     "densify_prune_threshold",
     "densify_with_depth",
-    "dash_max_densify_rate_per_step",
 }
 INT_KEYS = {
     "iterations",
@@ -198,14 +147,6 @@ INT_KEYS = {
     "pts_N_intpl",
     "pts_N_pts",
     "pts_add_bound",
-    "dash_start_iter",
-    "max_n_gaussian",
-    "dash_max_reso_scale",
-    "dash_start_significance_factor",
-    "grouping_from_iter",
-    "grouping_until_iter",
-    "grouping_interval",
-    "grouping_freeze_around_pts",
 }
 FLOAT_KEYS = {
     "gtnet_lr",
@@ -218,11 +159,9 @@ FLOAT_KEYS = {
     "densify_grad_threshold",
     "densify_prune_threshold",
     "pts_rate",
-    "dash_max_densify_rate_per_step",
-    "UTR",
 }
-BOOL_KEYS = {"white_background", "eval", "dash_enable", "Grouping"}
-STRING_KEYS = {"resolution_mode", "densify_mode", "grouping_method"}
+BOOL_KEYS = {"white_background", "eval"}
+STRING_KEYS: set[str] = set()
 
 
 def run_dash_deblur_group_training(
@@ -300,22 +239,14 @@ def run_dash_deblur_group_training(
         "deblur_auto_mixed_frames": deblur_mode.mixed_frames,
         "deblur_auto_sharp_frames": deblur_mode.sharp_frames,
         "deblur": int(config["deblur"]),
+        "deblur_strategy": "all_training_images" if int(config["deblur"]) != 0 else "disabled",
+        "deblur_applied_images": _deblur_applied_image_count(config, blur_analysis),
         "resolution": int(config["resolution"]),
         "use_pos": int(config["use_pos"]),
         "num_moments": int(config["num_moments"]),
         "densify_with_depth": int(config["densify_with_depth"]),
-        "dash_enable": bool(config["dash_enable"]),
-        "dash_start_iter": int(config["dash_start_iter"]),
-        "resolution_mode": str(config["resolution_mode"]),
-        "densify_mode": str(config["densify_mode"]),
-        "max_n_gaussian": int(config["max_n_gaussian"]),
         "pts_iter": int(config["pts_iter"]),
         "pts_N_pts": int(config["pts_N_pts"]),
-        "Grouping": bool(config["Grouping"]),
-        "UTR": float(config["UTR"]),
-        "grouping_from_iter": int(config["grouping_from_iter"]),
-        "grouping_until_iter": int(config["grouping_until_iter"]),
-        "grouping_interval": int(config["grouping_interval"]),
         "iterations": int(config["iterations"]),
         "splat_count": splat_count,
         "final_spz_enabled": resolved_spz is not None,
@@ -330,6 +261,16 @@ def run_dash_deblur_group_training(
         source_commit=source_commit,
         metrics=metrics,
     )
+
+
+def _deblur_applied_image_count(config: dict[str, Any], blur_analysis: Any | None) -> int:
+    if int(config.get("deblur", 0) or 0) == 0:
+        return 0
+    for attr in ("kept_images", "input_images", "normalized_image_count"):
+        value = int(getattr(blur_analysis, attr, 0) or 0)
+        if value > 0:
+            return value
+    return 0
 
 
 def resolve_runtime_paths(options: dict[str, Any], repo_cache_dir: Path) -> DashDeblurGroupPaths:
@@ -414,7 +355,7 @@ def write_training_config(path: Path, config: dict[str, Any]) -> None:
 
 def detect_trainer_flavor(repo_dir: Path) -> str:
     train_py = repo_dir / "train.py"
-    if file_contains(train_py, ("deblur", "Grouping", "--config")):
+    if file_contains(train_py, ("deblur", "--config")):
         return "dash_deblur_group"
     return "dash_deblur_group"
 
@@ -439,6 +380,7 @@ def build_training_command(
     expname: str,
     config: dict[str, Any],
 ) -> list[str]:
+    iterations = int(config["iterations"])
     return [
         paths.python,
         "-u",
@@ -451,6 +393,8 @@ def build_training_command(
         expname,
         "--config",
         str(config_path),
+        "--test_iterations",
+        str(iterations + 1),
     ]
 
 
@@ -622,9 +566,9 @@ def deblur_mode_from_config(config: dict[str, Any]) -> str:
     code = int(config.get("deblur", 1))
     if code == 0:
         return "sharp"
+    if not read_bool(config.get("use_pos"), True):
+        return "defocus"
     if code >= 3:
-        if not read_bool(config.get("use_pos"), True):
-            return "defocus"
         return "mix"
     if code == 2:
         return "defocus"
@@ -643,6 +587,11 @@ def read_bool(value: Any, fallback: bool) -> bool:
 
 
 def git_commit(repo_dir: Path) -> str:
+    marker = repo_dir / "UPSTREAM_SOURCE.txt"
+    if marker.exists():
+        match = re.search(r"^Commit:\s*([0-9a-fA-F]{7,40})\s*$", marker.read_text(encoding="utf-8", errors="ignore"), re.MULTILINE)
+        if match:
+            return match.group(1)
     try:
         completed = subprocess.run(
             ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],

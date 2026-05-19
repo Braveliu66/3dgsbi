@@ -1,12 +1,12 @@
 #
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
+# 版权所有 (C) 2023, Inria
+# GRAPHDECO 研究组, https://team.inria.fr/graphdeco
+# 保留所有权利。
 #
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
+# 本软件仅可在 LICENSE.md 文件条款下用于
+# 非商业、研究和评估用途。
 #
-# For inquiries contact  george.drettakis@inria.fr
+# 咨询请联系：george.drettakis@inria.fr
 #
 
 from argparse import ArgumentParser, Namespace
@@ -71,37 +71,37 @@ class PipelineParams(ParamGroup):
 
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
-        self.iterations = 30_000
+        self.iterations = 20_000
         self.position_lr_init = 0.0016
-        self.position_lr_final = 0.0000016
+        self.position_lr_final = 0.000016
         self.position_lr_delay_mult = 0.01
         self.position_lr_max_steps = 30_000
         self.feature_lr = 0.0025
         self.opacity_lr = 0.05
         self.scaling_lr = 0.005
         self.rotation_lr = 0.001
-        self.percent_dense = 0.005
-        self.lambda_dssim = 0.3
-        self.densification_interval = 200
-        self.densify_from_iter = 700
-        self.densify_until_iter = 16_000
+        self.percent_dense = 0.01
+        self.lambda_dssim = 0.2
+        self.densification_interval = 100
+        self.densify_from_iter = 500
+        self.densify_until_iter = 15_000
         self.densify_grad_threshold = 0.0002
-        self.densify_prune_threshold = 0.008
+        self.densify_prune_threshold = 0.005
 
-        # depth-based densification & pruning
-        self.densify_with_depth = 0 # Not in use
+        # 基于深度的增密与裁剪
+        self.densify_with_depth = 1 # 暂未使用
         self.densification_range = 1 
         self.prune_range = 3
         
-        # add pts
+        # 新增点参数
         self.pts_dist = 2
         self.pts_N_intpl = 4
-        self.pts_N_pts = 0
-        self.pts_iter = 999999
+        self.pts_N_pts = 200_000
+        self.pts_iter = 2500
         self.pts_add_bound = 10
-        self.pts_rate=0.0
+        self.pts_rate=1.1
 
-        # MLP & rendering
+        # MLP 与渲染参数
         self.gtnet_lr = 1e-3
         self.hidden = 3
         self.width=64
@@ -110,16 +110,6 @@ class OptimizationParams(ParamGroup):
         self.lambda_s=0.01
         self.lambda_p=0.01
         self.use_pos = 0
-
-        # DashGaussian scheduling
-        self.dash_enable = True
-        self.resolution_mode = "freq"
-        self.densify_mode = "freq"
-        self.max_n_gaussian = -1
-        self.dash_start_iter = 1
-        self.dash_max_reso_scale = 4
-        self.dash_max_densify_rate_per_step = 0.10
-        self.dash_start_significance_factor = 4
 
         super().__init__(parser, "Optimization Parameters")
 

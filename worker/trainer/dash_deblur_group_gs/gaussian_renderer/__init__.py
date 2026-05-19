@@ -1,12 +1,12 @@
 #
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
+# 版权所有 (C) 2023, Inria
+# GRAPHDECO 研究组, https://team.inria.fr/graphdeco
+# 初始化输出目录
 #
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
+# 本软件仅可在 LICENSE.md 文件条款下用于
+# 非商业、研究和评估用途。
 #
-# For inquiries contact  george.drettakis@inria.fr
+# 咨询请联系：george.drettakis@inria.fr
 #
 
 import torch
@@ -17,34 +17,27 @@ from utils.sh_utils import eval_sh
 import torch.nn.functional as F
 
 def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier=1.0, deblur=0, use_pos=False,
-           lambda_s=0.01, lambda_p=0.01, max_clamp=1.1, render_size=None):
+           lambda_s=0.01, lambda_p=0.01, max_clamp=1.1 ):
     """
-    Render the scene. 
+    ?????
     
-    Background tensor (bg_color) must be on GPU!
+    ?????bg_color????? GPU ??
     """
 
-    # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
+    # 创建零张量，用于让 PyTorch 返回二维（屏幕空间）均值的梯度。
     screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
     try:
         screenspace_points.retain_grad()
     except:
         pass
 
-    # Set up rasterization configuration
+    # 全部完成
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
     tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
 
-    if render_size is None:
-        image_height = int(viewpoint_camera.image_height)
-        image_width = int(viewpoint_camera.image_width)
-    else:
-        image_height = int(render_size[0])
-        image_width = int(render_size[1])
-
     raster_settings = GaussianRasterizationSettings(
-        image_height=image_height,
-        image_width=image_width,
+        image_height=int(viewpoint_camera.image_height),
+        image_width=int(viewpoint_camera.image_width),
         tanfovx=tanfovx,
         tanfovy=tanfovy,
         bg=bg_color,
@@ -63,15 +56,15 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     means2D = screenspace_points
     opacity = pc.get_opacity
 
-    # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
-    # scaling / rotation by the rasterizer.
+    # 若提供预计算的 3D 协方差则直接使用，否则由
+    # 全部完成
     scales = None
     rotations = None
     cov3D_precomp = None
     if pipe.compute_cov3D_python:
         cov3D_precomp = pc.get_covariance(scaling_modifier)
     else: 
-        if not deblur:  # testing time
+        if not deblur:  # 初始化命令行参数解析器
             scales = pc.get_scaling 
             rotations = pc.get_rotation 
 
@@ -109,7 +102,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             scales_delta = torch.clamp(lambda_s * scales_delta + (1-lambda_s), min=1.0, max=max_clamp)
             rotations_delta = torch.clamp(lambda_s * rotations_delta + (1-lambda_s), min=1.0, max=max_clamp)
 
-            if not use_pos:    # defocus 
+            if not use_pos:    # 初始化命令行参数解析器
                 transformed_scales = scales * scales_delta
                 transformed_rotations = rotations * rotations_delta
 
@@ -128,7 +121,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
                         "visibility_filter" : radii > 0,
                         "radii": radii}
             
-            elif use_pos:   # motion
+            elif use_pos:   # 初始化命令行参数解析器
                 pos_delta = lambda_p * pos_delta
                 pos_delta = pos_delta.view(-1, 3, M)
                 scales_delta = scales_delta.view(-1, 3, M+1)
@@ -148,7 +141,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
                     rotations = transformed_rotations,
                     cov3D_precomp = cov3D_precomp)
 
-                # renders = [torch.clamp(rendered_image, min=0.0, max=1.0)]
+                # renders = [torch.clamp(rendered_image, min=0.0, max=1.0)]  # 可选：限制到 [0,1]
                 renders = [rendered_image]
                 viewspace_points = [screenspace_points]
                 visibility_filter = [_radii > 0]
@@ -175,7 +168,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
                         rotations = transformed_rotations,
                         cov3D_precomp = cov3D_precomp)
 
-                    # renders.append(torch.clamp(rendered_image, min=0.0, max=1.0))
+                    # renders.append(torch.clamp(rendered_image, min=0.0, max=1.0))  # 可选：限制到 [0,1]
                     renders.append(rendered_image)
                     viewspace_points.append(screenspace_points)
                     visibility_filter.append(_radii > 0)

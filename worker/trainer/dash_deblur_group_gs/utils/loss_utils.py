@@ -1,12 +1,12 @@
 #
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
+# 版权所有 (C) 2023, Inria
+# GRAPHDECO 研究组, https://team.inria.fr/graphdeco
+# 初始化输出目录
 #
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
+# 本软件仅可在 LICENSE.md 文件条款下用于
+# 非商业、研究和评估用途。
 #
-# For inquiries contact  george.drettakis@inria.fr
+# 咨询请联系：george.drettakis@inria.fr
 #
 
 import torch

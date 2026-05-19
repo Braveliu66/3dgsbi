@@ -37,7 +37,7 @@ class BaseNet(nn.Module):
     def __init__(self):
         super(BaseNet, self).__init__()
 
-        # register buffer
+        # 注册缓冲区
         self.register_buffer(
             'mean', torch.Tensor([-.030, -.088, -.188])[None, :, None, None])
         self.register_buffer(

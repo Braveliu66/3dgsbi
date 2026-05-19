@@ -388,18 +388,11 @@ test -f "$DASH_DEBLUR_GROUP_REPO/train.py"
 if [ "${DASH_DEBLUR_GROUP_INSTALL_EXTENSIONS:-true}" = "true" ]; then
   install_dash_deblur_group_extension diff-gaussian-rasterization "$DASH_DEBLUR_GROUP_REPO/submodules/diff-gaussian-rasterization"
   install_dash_deblur_group_extension simple-knn "$DASH_DEBLUR_GROUP_REPO/submodules/simple-knn"
-  if [ -d "$DASH_DEBLUR_GROUP_REPO/submodules/fused-ssim" ]; then
-    install_dash_deblur_group_extension fused-ssim "$DASH_DEBLUR_GROUP_REPO/submodules/fused-ssim"
-  fi
   python - <<'PY'
 import importlib
 
 for module_name in ("diff_gaussian_rasterization", "simple_knn._C"):
     importlib.import_module(module_name)
-try:
-    importlib.import_module("fused_ssim")
-except ModuleNotFoundError:
-    pass
 print("DashDeblurGroupGS CUDA extension imports ok")
 PY
 fi

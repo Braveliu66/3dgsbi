@@ -37,7 +37,7 @@ from app.models import PipelineParameterDefault
 VALID_PIPELINES = {"litevggt_spz", FINE_PIPELINE_NAME}
 VALID_SCENE_TYPES = {"indoor", "outdoor"}
 PIPELINE_DEFAULTS_PRESET_KEY = "_pipeline_defaults_preset"
-COLMAP_DEFAULTS_PRESET = "dash_deblur_group_defaults_2026_05_18_v9"
+COLMAP_DEFAULTS_PRESET = "dash_deblur_group_official_params_2026_05_19_v1"
 
 SCENE_PROFILES = {
     "indoor": {"preview_scene_profile": "indoor_full", "fine_scene_profile": "indoor_full"},
@@ -54,14 +54,14 @@ COLMAP_DEFAULTS: dict[str, dict[str, Any]] = {
         "scene_type": scene_type,
         "fine_scene_type": scene_type,
         "fine_scene_profile": SCENE_PROFILES[scene_type]["fine_scene_profile"],
-        "fine_sfm_backend": "pycolmap",
+        "fine_sfm_backend": "colmap_cli",
         "quality_mode": "auto",
         "camera_distortion": "undistorted",
         "prefer_gpu": True,
         "fine_capture_order": "auto",
         "fine_image_max_side": FINE_DEFAULT_IMAGE_MAX_SIDE,
         "fine_iterations": FINE_ITERATIONS,
-        "resolution": 1,
+        "resolution": -1,
         "fine_colmap_max_image_size": COLMAP_MAX_IMAGE_SIZE,
         "fine_sift_max_num_features_auto": True,
         "fine_sift_max_num_features": COLMAP_SIFT_MAX_NUM_FEATURES,
@@ -101,29 +101,14 @@ COLMAP_DEFAULTS: dict[str, dict[str, Any]] = {
         "densification_interval": 100,
         "densify_grad_threshold": 0.0005,
         "densify_prune_threshold": 0.01,
-        "densify_with_depth": False,
+        "densify_with_depth": True,
         "prune_range": 3,
-        "pts_iter": 999999,
-        "pts_rate": 0.0,
+        "pts_iter": 2500,
+        "pts_rate": 1.1,
         "pts_dist": 2,
         "pts_N_intpl": 4,
-        "pts_N_pts": 0,
+        "pts_N_pts": 200000,
         "pts_add_bound": 10,
-        "dash_enable": True,
-        "dash_start_iter": 1,
-        "resolution_mode": "freq",
-        "densify_mode": "freq",
-        "max_n_gaussian": -1,
-        "dash_max_reso_scale": 4,
-        "dash_start_significance_factor": 4,
-        "dash_max_densify_rate_per_step": 0.12,
-        "Grouping": False,
-        "grouping_method": "Opacity-weighted",
-        "UTR": 0.78,
-        "grouping_from_iter": 10000,
-        "grouping_until_iter": 27000,
-        "grouping_interval": 800,
-        "grouping_freeze_around_pts": 1000,
     }
     for scene_type in VALID_SCENE_TYPES
 }
@@ -144,28 +129,12 @@ COLMAP_DEFAULTS["outdoor"].update(
     {
         "fine_scene_profile": "outdoor_fast_clean",
         "fine_image_max_side": FINE_DEFAULT_IMAGE_MAX_SIDE,
-        "fine_iterations": 25000,
         "fine_colmap_max_image_size": COLMAP_MAX_IMAGE_SIZE,
         "fine_sift_max_num_features": 65_536,
         "fine_colmap_max_num_matches": 65_536,
         "fine_colmap_sequential_overlap": 30,
         "fine_colmap_matcher": "auto",
         "fine_blur_reject_ratio": 0.0,
-        "num_moments": 6,
-        "lambda_dssim": 0.2,
-        "densify_from_iter": 1000,
-        "densify_until_iter": 18000,
-        "prune_range": 4,
-        "pts_iter": 999999,
-        "pts_rate": 0.0,
-        "pts_dist": 3,
-        "pts_add_bound": 20,
-        "dash_max_densify_rate_per_step": 0.10,
-        "UTR": 0.75,
-        "grouping_from_iter": 7000,
-        "grouping_until_iter": 20000,
-        "grouping_interval": 600,
-        "grouping_freeze_around_pts": 1500,
     }
 )
 
@@ -183,7 +152,7 @@ def pipeline_parameter_schema() -> dict[str, Any]:
         ],
         "pipelines": [
             pipeline_schema("litevggt_spz", "LiteVGGT 图片预览", litevggt_fields()),
-            pipeline_schema(FINE_PIPELINE_NAME, "DashDeblurGroupGS 精细重建", colmap_fields()),
+            pipeline_schema(FINE_PIPELINE_NAME, "Deblur3DGS 精细重建", colmap_fields()),
         ],
     }
 
@@ -233,7 +202,7 @@ def litevggt_fields() -> list[dict[str, Any]]:
 
 def colmap_fields() -> list[dict[str, Any]]:
     return [
-        field("fine_sfm_backend", "SfM 后端", "select", "COLMAP", "精细重建使用的 SfM 实现；colmap 是 PyCOLMAP 兼容别名。", options=["pycolmap", "colmap", "colmap_cli"], option_labels={"pycolmap": "PyCOLMAP", "colmap": "COLMAP（PyCOLMAP 别名）", "colmap_cli": "COLMAP 命令行"}),
+        field("fine_sfm_backend", "SfM 后端", "select", "COLMAP", "精细重建使用的 SfM 实现；colmap 与 colmap_cli 均使用 COLMAP 命令行。", options=["colmap_cli", "colmap", "pycolmap"], option_labels={"colmap_cli": "COLMAP 命令行", "colmap": "COLMAP 命令行", "pycolmap": "PyCOLMAP"}),
         field("quality_mode", "质量模式", "select", "COLMAP", "COLMAP 质量策略。", options=["auto", "quality", "speed"], option_labels={"auto": "自动", "quality": "质量优先", "speed": "速度优先"}),
         field("camera_distortion", "相机畸变策略", "select", "COLMAP", "精细重建输入图像的相机畸变处理策略。", options=["undistorted"], option_labels={"undistorted": "已去畸变"}),
         field("prefer_gpu", "优先使用 GPU", "boolean", "COLMAP", "可用时使用 GPU 提取和匹配特征。"),
@@ -256,13 +225,13 @@ def colmap_fields() -> list[dict[str, Any]]:
         field("fine_min_registered_ratio", "最小注册比例", "nullable_number", "COLMAP", "图像成功注册比例低于该值时判定重建质量不足；空值表示不强制。", min=0.30, max=0.95, step=0.01),
         field("fine_blur_reject_ratio", "低质量帧剔除比例", "number", "输入", "进入 COLMAP 前剔除质量最低的帧比例；默认 0 只记录模糊分析，不剔除模糊帧。", min=0, max=0.45, step=0.01),
         field("fine_trainer_repo", "训练器目录", "text", "训练运行时", "DashDeblurGroupGS 训练器仓库路径；留空使用 worker 内置训练器。"),
-        field("fine_training_flavor", "训练器兼容模式", "select", "训练运行时", "训练器兼容模式。", options=["auto", "dash_deblur_group"], option_labels={"auto": "自动", "dash_deblur_group": "DashDeblurGroup"}),
+        field("fine_training_flavor", "训练器兼容模式", "select", "训练运行时", "训练器兼容模式。", options=["auto", "dash_deblur_group"], option_labels={"auto": "自动", "dash_deblur_group": "Deblur3DGS"}),
         field("fine_train_python", "训练 Python", "text", "训练运行时", "训练器使用的 Python 可执行文件；留空使用 worker Python。"),
         field("fine_train_entrypoint", "训练入口脚本", "text", "训练运行时", "训练器仓库内的训练脚本；留空使用 train.py。"),
         field("fine_data_device", "图像张量设备", "select", "训练运行时", "兼容训练器中图像张量存放的设备。", options=["cpu", "cuda"], option_labels={"cpu": "CPU", "cuda": "CUDA"}),
         field("fine_spz_enabled", "导出 SPZ", "boolean", "训练运行时", "把最终 Gaussian PLY 转成 Spark SPZ 供网页查看器使用。"),
         field("fine_iterations", "训练迭代数", "number", "去模糊训练", "DashDeblurGroupGS 总训练迭代数。", min=1, max=100000, step=100),
-        field("resolution", "训练下采样倍率", "number", "去模糊训练", "输入图像进入 trainer 的下采样倍率；1 保留原始分辨率，2/4 更快但细节更差。", min=1, max=8, step=1),
+        field("resolution", "训练下采样倍率", "number", "去模糊训练", "输入图像进入 trainer 的下采样倍率；-1 使用训练器默认策略。", min=-1, max=8, step=1),
         field("fine_deblur_enabled", "启用去模糊", "boolean", "去模糊训练", "启用 Deblurring-3DGS 的 GTnet 训练分支。"),
         field("fine_deblur_mode", "去模糊模式", "select", "去模糊训练", "训练使用的去模糊物理分支；默认使用 motion，不再根据模糊分析自动切换。", options=["motion", "defocus", "sharp"], option_labels={"motion": "运动模糊", "defocus": "失焦模糊", "sharp": "清晰"}),
         field("use_pos", "启用位置偏移", "boolean", "去模糊训练", "启用 GTnet 的位置偏移分支。"),
@@ -283,27 +252,12 @@ def colmap_fields() -> list[dict[str, Any]]:
         field("densify_prune_threshold", "剪枝不透明度阈值", "number", "加点与剪枝", "Deblur-safe pruning 使用的不透明度阈值。", min=0, max=1, step=0.0001),
         field("densify_with_depth", "启用深度剪枝", "boolean", "加点与剪枝", "按深度提高远端背景点的剪枝力度。"),
         field("prune_range", "深度剪枝范围", "number", "加点与剪枝", "传给训练器的深度剪枝范围。", min=0, max=32, step=1),
-        field("pts_iter", "随机补点迭代", "number", "随机补点", "Deblurring-3DGS add_points 的触发迭代；999999 表示默认不触发。", min=0, max=1000000, step=100),
-        field("pts_rate", "随机补点密度", "number", "随机补点", "按包围盒体积估算随机补点数的密度参数；0 表示不按体积估算。", min=0, max=10, step=0.1),
+        field("pts_iter", "随机补点迭代", "number", "随机补点", "Deblurring-3DGS add_points 的触发迭代；默认 2500，999999 可手动禁用。", min=0, max=1000000, step=100),
+        field("pts_rate", "随机补点密度", "number", "随机补点", "当 pts_N_pts=0 时按包围盒体积估算随机补点数的密度参数；0 表示不按体积估算。", min=0, max=10, step=0.1),
         field("pts_dist", "随机补点插值距离", "number", "随机补点", "随机补点颜色插值使用的邻近距离。", min=0, max=64, step=1),
         field("pts_N_intpl", "随机补点插值邻居数", "number", "随机补点", "随机补点颜色插值使用的邻居数量。", min=1, max=32, step=1),
-        field("pts_N_pts", "随机补点数量", "number", "随机补点", "add_points 最多新增的随机点数；0 表示禁用。", min=0, max=5000000, step=10000),
+        field("pts_N_pts", "随机补点数量", "number", "随机补点", "add_points 最多新增的随机点数；默认 200000，0 表示禁用。", min=0, max=5000000, step=10000),
         field("pts_add_bound", "随机补点边界裁剪", "number", "随机补点", "add_points 采样包围盒的边界裁剪数量。", min=0, max=1000, step=1),
-        field("dash_enable", "启用 Dash 调度", "boolean", "Dash 调度", "启用 DashGaussian 的分辨率和点数增长调度。"),
-        field("dash_start_iter", "Dash 开始迭代", "number", "Dash 调度", "Dash 调度开始生效的迭代。", min=0, max=100000, step=100),
-        field("resolution_mode", "分辨率调度模式", "select", "Dash 调度", "Dash 分辨率调度模式。", options=["const", "freq"], option_labels={"const": "固定", "freq": "频率调度"}),
-        field("densify_mode", "点数预算模式", "select", "Dash 调度", "Dash 点数增长预算模式。", options=["free", "freq"], option_labels={"free": "不限制", "freq": "频率预算"}),
-        field("max_n_gaussian", "Gaussian 点数上限", "number", "Dash 调度", "Gaussian 总点数预算；-1 表示不设置硬上限。", min=-1, max=100000000, step=100000),
-        field("dash_max_reso_scale", "最大低分辨率倍率", "number", "Dash 调度", "Dash 允许使用的最大低分辨率倍率。", min=1, max=8, step=1),
-        field("dash_start_significance_factor", "Dash 起始显著性系数", "number", "Dash 调度", "Dash 启动阶段使用的显著性系数。", min=1, max=16, step=1),
-        field("dash_max_densify_rate_per_step", "单次最大加点比例", "number", "Dash 调度", "每次 densification 允许的最大 Gaussian 增长比例。", min=0, max=1, step=0.01),
-        field("Grouping", "启用分组训练", "boolean", "分组训练", "启用非破坏式 Group Training 缓存。"),
-        field("grouping_method", "分组方法", "select", "分组训练", "Group Training 的点选择策略。", options=["Opacity-weighted"], option_labels={"Opacity-weighted": "不透明度加权"}),
-        field("UTR", "活跃训练比例", "number", "分组训练", "Group Training 中未缓存点参与训练的比例。", min=0.5, max=1, step=0.01),
-        field("grouping_from_iter", "分组开始迭代", "number", "分组训练", "Group Training 的起始迭代。", min=0, max=100000, step=100),
-        field("grouping_until_iter", "分组结束迭代", "number", "分组训练", "Group Training 的结束迭代。", min=0, max=100000, step=100),
-        field("grouping_interval", "分组间隔", "number", "分组训练", "两次 grouping 之间的迭代间隔。", min=1, max=10000, step=100),
-        field("grouping_freeze_around_pts", "随机补点冻结窗口", "number", "分组训练", "在 add_points 前后多少迭代内暂停 grouping。", min=0, max=10000, step=100),
     ]
 
 

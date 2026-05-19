@@ -1,13 +1,3 @@
-#
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
-#
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
-#
-# For inquiries contact  george.drettakis@inria.fr
-#
 
 import numpy as np
 import collections
@@ -70,12 +60,12 @@ class Image(BaseImage):
         return qvec2rotmat(self.qvec)
 
 def read_next_bytes(fid, num_bytes, format_char_sequence, endian_character="<"):
-    """Read and unpack the next bytes from a binary file.
+    """???????????????????
     :param fid:
-    :param num_bytes: Sum of combination of {2, 4, 8}, e.g. 2, 6, 16, 30, etc.
-    :param format_char_sequence: List of {c, e, f, d, h, H, i, I, l, L, q, Q}.
-    :param endian_character: Any of {@, =, <, >, !}
-    :return: Tuple of read and unpacked values.
+    :param num_bytes: ? {2,4,8} ??????????? 2?6?16?30 ??
+    :param format_char_sequence: ? {c,e,f,d,h,H,i,I,l,L,q,Q} ?????????
+    :param endian_character: ???????? {@, =, <, >, !}?
+    :return: ??????????
     """
     data = fid.read(num_bytes)
     return struct.unpack(endian_character + format_char_sequence, data)
@@ -195,7 +185,7 @@ def read_extrinsics_binary(path_to_model_file):
             camera_id = binary_image_properties[8]
             image_name = ""
             current_char = read_next_bytes(fid, 1, "c")[0]
-            while current_char != b"\x00":   # look for the ASCII 0 entry
+            while current_char != b"\x00":   # 初始化输出目录 ASCII 0 ???
                 image_name += current_char.decode("utf-8")
                 current_char = read_next_bytes(fid, 1, "c")[0]
             num_points2D = read_next_bytes(fid, num_bytes=8,
@@ -232,7 +222,7 @@ def read_intrinsics_binary(path_to_model_file):
             num_params = CAMERA_MODEL_IDS[model_id].num_params
             params = read_next_bytes(fid, num_bytes=8*num_params,
                                      format_char_sequence="d"*num_params)
-            # import pdb; pdb.set_trace()
+            # import pdb; pdb.set_trace()  # 调试断点（默认关闭）
             cameras[camera_id] = Camera(id=camera_id,
                                         model=model_name,
                                         width=width,

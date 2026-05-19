@@ -1,0 +1,2 @@
+Repository: https://github.com/Braveliu66/Deblurring-3D-Gaussian-Splatting
+Commit: c1c1a1a73f9f9ead6f3cda45eb258e7f86d438d3

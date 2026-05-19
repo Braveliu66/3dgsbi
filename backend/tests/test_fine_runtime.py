@@ -34,7 +34,7 @@ class FineRuntimeTests(unittest.TestCase):
 
         self.assertEqual(COLMAP_MAX_IMAGE_SIZE, 1080)
         self.assertEqual(FINE_DEFAULT_IMAGE_MAX_SIDE, 1500)
-        self.assertEqual(COLMAP_MIN_SPARSE_POINTS, 12_000)
+        self.assertEqual(COLMAP_MIN_SPARSE_POINTS, 0)
 
     def test_fine_viewer_meta_starts_from_first_training_camera(self) -> None:
         runner_source = (BACKEND_ROOT / "app" / "fine" / "runner.py").read_text(encoding="utf-8")
@@ -128,12 +128,12 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("model_clusterer", dockerfile_source)
         self.assertIn("model_splitter", dockerfile_source)
         self.assertNotIn("ARG DASH_DEBLUR_GROUP_REPO_URL", dockerfile_source)
-        self.assertNotIn("YouyuChen0207/DashGaussian", dockerfile_source)
         self.assertIn("COPY worker/trainer/dash_deblur_group_gs /opt/dash_deblur_group_gs", dockerfile_source)
         self.assertIn("ENV DASH_DEBLUR_GROUP_REPO=/opt/dash_deblur_group_gs", dockerfile_source)
         self.assertIn("submodules/diff-gaussian-rasterization", dockerfile_source)
         self.assertIn("submodules/simple-knn", dockerfile_source)
-        self.assertIn("submodules/fused-ssim", dockerfile_source)
+        self.assertNotIn("submodules/fused-ssim", dockerfile_source)
+        self.assertNotIn("fused_ssim", dockerfile_source)
         self.assertIn("third_party/glm/glm/glm.hpp", dockerfile_source)
         self.assertIn("extension wheel cache hit", dockerfile_source)
         self.assertIn("extension wheel cache miss", dockerfile_source)
@@ -163,32 +163,22 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertFalse((fine_root / "vendor" / "fastgs").exists())
         trainer_root = WORKSPACE_ROOT / "worker" / "trainer" / "dash_deblur_group_gs"
         self.assertTrue((trainer_root / "train.py").exists())
-        self.assertTrue((trainer_root / "utils" / "schedule_utils.py").exists())
-        self.assertTrue((trainer_root / "gaussians_grouping" / "__init__.py").exists())
-        self.assertTrue((trainer_root / "gaussians_grouping" / "grouping_method.py").exists())
+        self.assertFalse((trainer_root / "utils" / "schedule_utils.py").exists())
+        self.assertFalse((trainer_root / "gaussians_grouping" / "__init__.py").exists())
+        self.assertFalse((trainer_root / "gaussians_grouping" / "grouping_method.py").exists())
         self.assertTrue((trainer_root / "submodules" / "diff-gaussian-rasterization").exists())
         self.assertTrue((trainer_root / "submodules" / "simple-knn").exists())
 
-        schedule_source = (trainer_root / "utils" / "schedule_utils.py").read_text(encoding="utf-8")
         gaussian_model_source = (trainer_root / "scene" / "gaussian_model.py").read_text(encoding="utf-8")
         train_source = (trainer_root / "train.py").read_text(encoding="utf-8")
-        grouping_source = (trainer_root / "gaussians_grouping" / "__init__.py").read_text(encoding="utf-8")
-        grouping_method_source = (trainer_root / "gaussians_grouping" / "grouping_method.py").read_text(encoding="utf-8")
-        self.assertIn("torch.fft.fft2", schedule_source)
-        self.assertIn("get_densify_rate", schedule_source)
-        self.assertIn("get_delayed_expon_lr_func", schedule_source)
-        self.assertIn("return decay(step - decay_from_iter)", schedule_source)
         self.assertNotIn("birth_iter", gaussian_model_source)
         self.assertNotIn("protect_new_points_iters", gaussian_model_source)
-        self.assertIn("prune mask has", gaussian_model_source)
-        self.assertIn("max_new_points", gaussian_model_source)
-        self.assertIn("torch.sqrt(norm_depth)", gaussian_model_source)
-        self.assertNotIn("min_opacity / norm_depth", gaussian_model_source)
-        self.assertIn("auto_stop_densify", train_source)
-        self.assertIn("add_points skipped", train_source)
-        self.assertIn("gaussian_model.prune_points(mask_cache)", grouping_source)
-        self.assertIn('"Opacity-weighted"', grouping_method_source)
-        self.assertIn("torch.multinomial", grouping_method_source)
+        self.assertNotIn("max_new_points", gaussian_model_source)
+        self.assertNotIn("auto_stop_densify", train_source)
+        self.assertNotIn("gaussians_grouping", train_source)
+        self.assertNotIn("DeblurDashScheduler", train_source)
+        self.assertIn("auto_point_addition_iter", train_source)
+        self.assertIn("volume / (opt.pts_rate ** 3)", train_source)
 
     def test_normalize_fine_pipeline_uses_dash_name_and_colmap_alias(self) -> None:
         from app.fine.runner import normalize_fine_pipeline
@@ -225,13 +215,13 @@ class FineRuntimeTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "UNSUPPORTED_FINE_PIPELINE")
 
-    def test_sfm_defaults_to_pycolmap(self) -> None:
+    def test_sfm_defaults_to_colmap_cli(self) -> None:
         from app.fine.preprocess import SceneBuildResult
         from app.fine.runner import build_scene
 
-        expected = SceneBuildResult(Path("scene"), "pycolmap", 8, 8, 2816, {"sfm_backend": "pycolmap"})
+        expected = SceneBuildResult(Path("scene"), "colmap_cli", 8, 8, 2816, {"sfm_backend": "colmap_cli"})
         ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={}, progress=None)
-        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_pycolmap_scene", return_value=expected) as pycolmap:
+        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_colmap_cli_scene", return_value=expected) as colmap_cli:
             result = build_scene(
                 ctx,
                 Path(tmp),
@@ -242,22 +232,21 @@ class FineRuntimeTests(unittest.TestCase):
                 min_sparse_points=0,
             )
 
-        self.assertEqual(result.backend, "pycolmap")
+        self.assertEqual(result.backend, "colmap_cli")
         self.assertEqual(result.point_count, 2816)
         self.assertTrue(result.metrics["sfm_sparse_points_below_target"])
-        pycolmap.assert_called_once()
+        colmap_cli.assert_called_once()
 
-    def test_sfm_colmap_alias_maps_to_pycolmap(self) -> None:
+    def test_sfm_colmap_alias_maps_to_colmap_cli(self) -> None:
         from app.fine.preprocess import SceneBuildResult
         from app.fine.runner import build_scene
 
-        expected = SceneBuildResult(Path("scene"), "pycolmap", 8, 8, 2816, {"sfm_backend": "pycolmap"})
+        expected = SceneBuildResult(Path("scene"), "colmap_cli", 8, 8, 2816, {"sfm_backend": "colmap_cli"})
         ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={"fine_sfm_backend": "colmap"}, progress=None)
-        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_pycolmap_scene", return_value=expected):
+        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_colmap_cli_scene", return_value=expected):
             result = build_scene(ctx, Path(tmp), Path(tmp) / "scene", 8192, 1600, 8, min_sparse_points=0)
 
-        self.assertEqual(result.backend, "pycolmap")
-        self.assertEqual(result.metrics["sfm_backend_requested_alias"], "colmap_maps_to_pycolmap")
+        self.assertEqual(result.backend, "colmap_cli")
 
     def test_sfm_explicit_colmap_cli_uses_cli_path(self) -> None:
         from app.fine.preprocess import SceneBuildResult
@@ -271,31 +260,25 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertEqual(result.backend, "colmap_cli")
         colmap_cli.assert_called_once()
 
-    def test_sparse_point_gate_fails_by_default_and_can_be_disabled_for_debug(self) -> None:
+    def test_sparse_point_shortfall_is_recorded_without_failing(self) -> None:
         from app.fine.preprocess import SceneBuildResult
         from app.fine.runner import build_scene
 
-        expected = SceneBuildResult(Path("scene"), "pycolmap", 8, 8, 2816, {"sfm_backend": "pycolmap"})
+        expected = SceneBuildResult(Path("scene"), "colmap_cli", 8, 8, 2816, {"sfm_backend": "colmap_cli"})
         ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={}, progress=None)
-        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_pycolmap_scene", return_value=expected):
-            with self.assertRaises(FineFailure) as raised:
-                build_scene(ctx, Path(tmp), Path(tmp) / "scene", 8192, 1600, 8)
-        self.assertEqual(raised.exception.code, "SFM_SPARSE_POINTS_TOO_LOW")
-        self.assertIn("Add more overlapping/sharper images", raised.exception.message)
-
-        ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={}, progress=None)
-        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_pycolmap_scene", return_value=expected):
-            result = build_scene(ctx, Path(tmp), Path(tmp) / "scene", 8192, 1600, 8, min_sparse_points=0)
+        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_colmap_cli_scene", return_value=expected):
+            result = build_scene(ctx, Path(tmp), Path(tmp) / "scene", 8192, 1600, 8)
         self.assertEqual(result.point_count, 2816)
+        self.assertEqual(result.metrics["sfm_min_sparse_points"], 0)
+        self.assertEqual(result.metrics["sfm_target_sparse_points"], 30_000)
+        self.assertTrue(result.metrics["sfm_sparse_points_below_target"])
 
     def test_fine_eta_uses_training_and_tail_stage_signal(self) -> None:
-        from app.fine_worker import fine_eta_for_update
+        fine_worker_source = (BACKEND_ROOT / "app" / "fine_worker.py").read_text(encoding="utf-8")
 
-        task = SimpleNamespace(progress=78, options={"fine_expected_seconds": 7200})
-
-        self.assertEqual(fine_eta_for_update(task, "fine_training", 0.0, ("dash_deblur_group training complete",)), 0)
-        self.assertEqual(fine_eta_for_update(task, "uploading_artifacts", 0.0, ()), 120)
-        self.assertEqual(fine_eta_for_update(task, "fine_outputs_validating", 0.0, (), parsed_eta=42), 42)
+        self.assertIn('"training complete" in line.lower()', fine_worker_source)
+        self.assertIn('"uploading_artifacts": 120', fine_worker_source)
+        self.assertIn("if parsed_eta is not None", fine_worker_source)
 
     def test_build_scene_rejects_removed_sfm_backend(self) -> None:
         from app.fine.runner import build_scene

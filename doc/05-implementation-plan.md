@@ -192,7 +192,7 @@
 - M6 fine pipeline now uses `pycolmap` as the default production SfM frontend, with `colmap_cli` still available for explicit CLI runs.
 - Fine input contract is JPG/PNG images or extracted video frames. Missing EXIF camera metadata is normal; COLMAP estimates camera/intrinsics and sparse points from images.
 - Preview LiteVGGT remains separate from fine COLMAP and keeps its own runtime/package namespace.
-- GTnet deblur, DashGaussian scheduling, and Group Training live in the embedded DashDeblurGroupGS trainer, not in backend request handling code. Backend only resolves scene/deblur presets and writes config.
+- GTnet deblur, densification, and `add_points()` live in the embedded trainer, not in backend request handling code. Backend only resolves scene/deblur presets and writes config.
 - Worker dependency goal: one PyTorch/CUDA baseline and one repo-integrated DashDeblurGroupGS trainer. Do not add Speedy-Splat, duplicate renderer pruning paths, Kaolin, Open3D, Gradio, duplicate torch/CUDA, pip cuDNN, or non-native `birth_iter`/`protect_new_points_iters` pruning state.
 - Local Docker Compose bind-mounts backend app code, frontend code, and the embedded trainer. Ordinary Python/TypeScript edits require service recreation, not image rebuild.
 - Earlier FastGS large-scene notes map to the current DashDeblurGroupGS path: global COLMAP first, then chunk-compatible DashDeblurGroupGS training on one shared coordinate system.

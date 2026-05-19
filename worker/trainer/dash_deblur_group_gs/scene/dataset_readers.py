@@ -1,12 +1,12 @@
 #
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
+# 版权所有 (C) 2023, Inria
+# GRAPHDECO 研究组, https://team.inria.fr/graphdeco
+# 初始化输出目录
 #
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
+# 本软件仅可在 LICENSE.md 文件条款下用于
+# 非商业、研究和评估用途。
 #
-# For inquiries contact  george.drettakis@inria.fr
+# 咨询请联系：george.drettakis@inria.fr
 #
 
 import os
@@ -67,14 +67,18 @@ def getNerfppNorm(cam_info):
 
 def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
     cam_infos = []
-    first_extrinsic = next(iter(cam_extrinsics.values()))
-    if cam_intrinsics[first_extrinsic.camera_id].model=="SIMPLE_RADIAL":
-        focal_path = "/".join(images_folder.split("/")[:-1]) + "/poses_bounds.npy"
-        focal_length_x = np.load(focal_path)[0,-3]
+    focal_length_x = None
+    first_extr = next(iter(cam_extrinsics.values()), None)
+    if first_extr is not None:
+        first_intr = cam_intrinsics.get(first_extr.camera_id)
+        if first_intr is not None and first_intr.model == "SIMPLE_RADIAL":
+            focal_path = "/".join(images_folder.split("/")[:-1]) + "/poses_bounds.npy"
+            if os.path.exists(focal_path):
+                focal_length_x = np.load(focal_path)[0, -3]
 
     for idx, key in enumerate(cam_extrinsics):
         sys.stdout.write('\r')
-        # the exact output you're looking for:
+        # 初始化命令行参数解析器
         sys.stdout.write("Reading camera {}/{}".format(idx+1, len(cam_extrinsics)))
         sys.stdout.flush()
 
@@ -97,6 +101,8 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
             FovY = focal2fov(focal_length_y, height)
             FovX = focal2fov(focal_length_x, width)
         elif intr.model=="SIMPLE_RADIAL":
+            if focal_length_x is None:
+                focal_length_x = intr.params[0]
             FovY = focal2fov(focal_length_x, height)
             FovX = focal2fov(focal_length_x, width)
 
@@ -131,7 +137,7 @@ def fetchPly(path):
     return BasicPointCloud(points=positions, colors=colors, normals=normals)
 
 def storePly(path, xyz, rgb):
-    # Define the dtype for the structured array
+    # 非商业、研究和评估用途。
     dtype = [('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
             ('nx', 'f4'), ('ny', 'f4'), ('nz', 'f4'),
             ('red', 'u1'), ('green', 'u1'), ('blue', 'u1')]
@@ -142,7 +148,7 @@ def storePly(path, xyz, rgb):
     attributes = np.concatenate((xyz, normals, rgb), axis=1)
     elements[:] = list(map(tuple, attributes))
 
-    # Create the PlyData object and write to file
+    # 创建 PlyData 对象并写入文件
     vertex_element = PlyElement.describe(elements, 'vertex')
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
@@ -208,14 +214,14 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
         for idx, frame in enumerate(frames):
             cam_name = os.path.join(path, frame["file_path"] + extension)
 
-            # NeRF 'transform_matrix' is a camera-to-world transform
+            # NeRF 的 transform_matrix 是相机到世界坐标的变换
             c2w = np.array(frame["transform_matrix"])
-            # change from OpenGL/Blender camera axes (Y up, Z back) to COLMAP (Y down, Z forward)
+            # 将 OpenGL/Blender 相机坐标轴（Y 向上、Z 向后）转换为 COLMAP（Y 向下、Z 向前）
             c2w[:3, 1:3] *= -1
 
-            # get the world-to-camera transform and set R, T
+            # 计算世界到相机的变换并设置 R、T
             w2c = np.linalg.inv(c2w)
-            R = np.transpose(w2c[:3,:3])  # R is stored transposed due to 'glm' in CUDA code
+            R = np.transpose(w2c[:3,:3])  # 初始化输出目录 CUDA ???? glm ???R ???????
             T = w2c[:3, 3]
 
             image_path = os.path.join(path, cam_name)
@@ -253,11 +259,11 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
 
     ply_path = os.path.join(path, "points3d.ply")
     if not os.path.exists(ply_path):
-        # Since this data set has no colmap data, we start with random points
+        # 该数据集没有 COLMAP 点云，因此从随机点初始化
         num_pts = 100_000
         print(f"Generating random point cloud ({num_pts})...")
         
-        # We create random points inside the bounds of the synthetic Blender scenes
+        # 在 Blender 合成场景边界内生成随机点
         xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
         shs = np.random.random((num_pts, 3)) / 255.0
         pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))

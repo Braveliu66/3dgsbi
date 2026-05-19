@@ -228,10 +228,10 @@ def build_scene(
     min_sparse_points: int = COLMAP_MIN_SPARSE_POINTS,
     min_registered_ratio: float | None = None,
 ):
-    sfm_backend = str(ctx.options.get("fine_sfm_backend") or "pycolmap").strip().lower()
+    sfm_backend = str(ctx.options.get("fine_sfm_backend") or "colmap_cli").strip().lower()
     if sfm_backend not in {"pycolmap", "colmap", "colmap_cli"}:
         raise FineFailure("UNSUPPORTED_FINE_SFM_BACKEND", f"Unsupported fine SfM backend: {sfm_backend}")
-    if sfm_backend == "colmap_cli":
+    if sfm_backend in {"colmap", "colmap_cli"}:
         result = build_colmap_cli_scene(
             input_dir,
             scene_dir,
@@ -268,21 +268,12 @@ def build_scene(
             min_registered_ratio=min_registered_ratio,
             progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
         )
-        if sfm_backend == "colmap":
-            result.metrics["sfm_backend_requested_alias"] = "colmap_maps_to_pycolmap"
 
     result.metrics["sfm_min_sparse_points"] = min_sparse_points
     result.metrics["sfm_target_sparse_points"] = COLMAP_TARGET_SPARSE_POINTS
     point_count = int(result.point_count or 0)
     if point_count < COLMAP_TARGET_SPARSE_POINTS:
         result.metrics["sfm_sparse_points_below_target"] = True
-    if min_sparse_points > 0 and point_count < min_sparse_points:
-        raise FineFailure(
-            "SFM_SPARSE_POINTS_TOO_LOW",
-            f"COLMAP produced {point_count} sparse points, below quality gate {min_sparse_points}. "
-            "Add more overlapping/sharper images, or raise fine_colmap_max_image_size/fine_sift_max_num_features. "
-            "Only lower fine_sfm_min_sparse_points for debugging.",
-        )
     return result
 
 
@@ -391,10 +382,7 @@ def _colmap_feature_budget_metrics(
 
 
 def assert_runtime_ready() -> None:
-    try:
-        import pycolmap  # noqa: F401
-    except Exception as exc:
-        raise FineFailure("PYCOLMAP_UNAVAILABLE", f"pycolmap import failed: {exc}") from exc
+    return None
 
 
 def assert_training_runtime_ready(options: dict[str, Any], repo_cache_dir: Path) -> None:

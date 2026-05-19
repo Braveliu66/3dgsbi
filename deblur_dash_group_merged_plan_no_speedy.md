@@ -36,8 +36,6 @@ worker/trainer/dash_deblur_group_gs/
 Only used algorithm code is kept:
 
 - Deblurring-3DGS backbone: GaussianModel, GTnet, motion blur, defocus blur, `add_points()`, sharp canonical render.
-- Optional DashGaussian scheduler: frequency resolution schedule, render scale/size, densify rate, momentum budget.
-- Optional Group Training: temporary active/cached Gaussian split, non-destructive cache, merge-back.
 
 Not included:
 
@@ -55,24 +53,24 @@ The previous `birth_iter` idea was removed because Deblurring-3DGS densification
 Public option:
 
 ```text
-fine_deblur_mode = mix | motion | defocus | sharp
+fine_deblur_mode = motion | defocus | sharp
 ```
 
-Default is `mix`.
+Default is `motion`.
 
-`mix` means the backend keeps the mixed deblur preset instead of auto-selecting a single blur branch:
+Legacy `mix`, `auto`, and `automatic` requests are accepted as aliases for `motion`:
 
-- `mix` -> `deblur = 4` indoors, `deblur = 6` outdoors
 - `motion` -> `deblur = 1`
-- `defocus` -> same deblur kernel strength with position deltas disabled
+- `defocus` -> `deblur = 1` with position deltas disabled
+- `sharp` -> `deblur = 0`
 - explicit `motion`, `defocus`, or `sharp` skips auto selection
 
 The backend writes metrics:
 
 ```json
 {
-  "fine_deblur_mode_requested": "mix",
-  "fine_deblur_mode_effective": "mix",
+  "fine_deblur_mode_requested": "motion",
+  "fine_deblur_mode_effective": "motion",
   "deblur_auto_confidence": "explicit"
 }
 ```

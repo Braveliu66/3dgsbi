@@ -1,12 +1,12 @@
 #
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
+# 版权所有 (C) 2023, Inria
+# GRAPHDECO 研究组, https://team.inria.fr/graphdeco
+# 初始化输出目录
 #
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
+# 本软件仅可在 LICENSE.md 文件条款下用于
+# 非商业、研究和评估用途。
 #
-# For inquiries contact  george.drettakis@inria.fr
+# 咨询请联系：george.drettakis@inria.fr
 #
 
 from errno import EEXIST
@@ -14,10 +14,10 @@ from os import makedirs, path
 import os
 
 def mkdir_p(folder_path):
-    # Creates a directory. equivalent to using mkdir -p on the command line
+    # 创建目录，等价于命令行中的 mkdir -p。
     try:
         makedirs(folder_path)
-    except OSError as exc: # Python >2.5
+    except OSError as exc: # 初始化输出目录 Python 2.5 ????
         if exc.errno == EEXIST and path.isdir(folder_path):
             pass
         else:

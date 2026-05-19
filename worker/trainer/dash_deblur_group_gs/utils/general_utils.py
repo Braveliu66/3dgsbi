@@ -1,12 +1,12 @@
 #
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
+# 版权所有 (C) 2023, Inria
+# GRAPHDECO 研究组, https://team.inria.fr/graphdeco
+# 初始化输出目录
 #
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
+# 本软件仅可在 LICENSE.md 文件条款下用于
+# 非商业、研究和评估用途。
 #
-# For inquiries contact  george.drettakis@inria.fr
+# 咨询请联系：george.drettakis@inria.fr
 #
 
 import torch
@@ -46,10 +46,10 @@ def get_expon_lr_func(
 
     def helper(step):
         if step < 0 or (lr_init == 0.0 and lr_final == 0.0):
-            # Disable this parameter
+            # 非商业、研究和评估用途。
             return 0.0
         if lr_delay_steps > 0:
-            # A kind of reverse cosine decay.
+            # 初始化命令行参数解析器
             delay_rate = lr_delay_mult + (1 - lr_delay_mult) * np.sin(
                 0.5 * np.pi * np.clip(step / lr_delay_steps, 0, 1)
             )
@@ -110,23 +110,6 @@ def build_scaling_rotation(s, r):
     return L
 
 def safe_state(silent):
-    # old_f = sys.stdout
-    # class F:
-    #     def __init__(self, silent):
-    #         self.silent = silent
-
-    #     def write(self, x):
-    #         if not self.silent:
-    #             if x.endswith("\n"):
-    #                 old_f.write(x.replace("\n", " [{}]\n".format(str(datetime.now().strftime("%d/%m %H:%M:%S")))))
-    #             else:
-    #                 old_f.write(x)
-
-    #     def flush(self):
-    #         old_f.flush()
-
-    # sys.stdout = F(silent)
-
     random.seed(0)
     np.random.seed(0)
     torch.manual_seed(0)

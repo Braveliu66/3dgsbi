@@ -1,12 +1,12 @@
 #
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
+# 版权所有 (C) 2023, Inria
+# GRAPHDECO 研究组, https://team.inria.fr/graphdeco
+# 初始化输出目录
 #
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
+# 本软件仅可在 LICENSE.md 文件条款下用于
+# 非商业、研究和评估用途。
 #
-# For inquiries contact  george.drettakis@inria.fr
+# 咨询请联系：george.drettakis@inria.fr
 #
 
 import os
@@ -23,8 +23,13 @@ class Scene:
     gaussians : GaussianModel
 
     def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True, resolution_scales=[1.0]):
-        """b
-        :param path: Path to colmap scene main folder.
+        """
+        参数说明：
+            args:             模型与数据加载参数（路径、分辨率等）
+            gaussians:        高斯模型实例
+            load_iteration:   若指定则加载已训练迭代，否则从输入点云初始化
+            shuffle:          是否打乱训练相机顺序
+            resolution_scales:多尺度训练/评估时的缩放列表
         """
         self.model_path = args.model_path
         self.loaded_iter = None
@@ -41,6 +46,7 @@ class Scene:
         self.test_cameras = {}
 
         if os.path.exists(os.path.join(args.source_path, "sparse")):
+            # COLMAP 数据分支：从目录中的 hold 标记自动读取测试抽帧间隔。
             li = os.listdir(args.source_path)
             llffhold = 8
             for l in li:
@@ -50,12 +56,14 @@ class Scene:
             print("TEST VIEW HOLD: ", llffhold)
             scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval, llffhold)
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
+            # Blender 数据分支：走 transforms json 解析流程。
             print("Found transforms_train.json file, assuming Blender data set!")
             scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval)
         else:
             assert False, "Could not recognize scene type!"
 
         if not self.loaded_iter:
+            # 首次训练时把输入点云和相机参数写到输出目录，便于可视化与复现实验。
             with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
                 dest_file.write(src_file.read())
             json_cams = []
@@ -70,7 +78,7 @@ class Scene:
                 json.dump(json_cams, file)
 
         if shuffle:
-            random.shuffle(scene_info.train_cameras)  # Multi-res consistent random shuffling
+            random.shuffle(scene_info.train_cameras)  # 非商业、研究和评估用途。
 
         self.cameras_extent = scene_info.nerf_normalization["radius"]
 
@@ -81,19 +89,34 @@ class Scene:
             self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)
 
         if self.loaded_iter:
+            # 继续训练/评估：直接加载历史迭代点云。
             self.gaussians.load_ply(os.path.join(self.model_path,
                                                            "point_cloud",
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"))
         else:
+            # 首次训练：从输入点云初始化高斯参数。
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
 
     def save(self, iteration):
+        """保存当前迭代的高斯点云参数。"""
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
         self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
 
     def getTrainCameras(self, scale=1.0):
+        """返回指定分辨率缩放下的训练相机列表。"""
         return self.train_cameras[scale]
 
     def getTestCameras(self, scale=1.0):
+        """返回指定分辨率缩放下的测试相机列表。"""
         return self.test_cameras[scale]
+"""
+场景加载与相机划分入口。
+
+Scene 类负责把数据集组织为训练/测试相机列表，并与 GaussianModel 建立关联。
+典型流程：
+1. 解析数据源（COLMAP 或 Blender）；
+2. 按 hold 规则划分训练/测试视角；
+3. 初始化或加载高斯点云；
+4. 对外提供 getTrainCameras/getTestCameras 接口。
+"""

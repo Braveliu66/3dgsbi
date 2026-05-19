@@ -24,11 +24,9 @@ uploaded images / extracted frames
 The embedded trainer lives in `worker/trainer/dash_deblur_group_gs`.
 
 - Deblurring-3DGS is the training backbone. It owns GTnet, motion blur, defocus blur, point addition, and sharp canonical Gaussian rendering.
-- DashGaussian contributes default frequency resolution scheduling and Gaussian growth budgeting.
-- Group Training contributes optional non-destructive active/cached Gaussian splitting and merge-back.
 - Speedy-Splat, FastGS pruning, SparseAdam, Dash antialiasing, and renderer replacement are not part of the default path.
 
-The default training preset is balanced quality: motion deblur is enabled, Dash frequency scheduling starts at iteration 1, Group Training stays disabled, and random `add_points()` stays disabled.
+The default training preset follows the upstream real motion/defocus configs: motion deblur is enabled, `resolution=4`, `add_points()` triggers at iteration 2500 with the official `pts_N_pts=200000` default, and densification uses the Deblurring-3DGS path.
 
 The trainer is not a copied upstream repository. Only the used algorithmic pieces are integrated into this repo and shaped around the local fine worker contract.
 
@@ -40,12 +38,12 @@ The public option is:
 fine_deblur_mode = motion | defocus | sharp
 ```
 
-Default is `motion`.
+Default is `motion`. When deblur is enabled, GTnet deblur rendering is applied to every training image, not only frames classified as blurred by preprocessing.
 
 The upstream Deblurring-3DGS trainer selects the physical branch through `use_pos`: motion blur uses position deltas, while defocus blur disables them. The default no longer uses blur analysis to auto-switch branches. Legacy `mix`, `auto`, and `automatic` requests are accepted as aliases for `motion`.
 
 - `motion` -> trainer config `deblur = 1`
-- `defocus` -> trainer config `deblur = 4` indoors, `deblur = 6` outdoors, with position deltas disabled
+- `defocus` -> trainer config `deblur = 1` with position deltas disabled
 - `sharp` -> trainer config `deblur = 0`
 
 Metrics record both requested and effective modes:

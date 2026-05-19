@@ -1,12 +1,12 @@
 #
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
+# 版权所有 (C) 2023, Inria
+# GRAPHDECO 研究组, https://team.inria.fr/graphdeco
+# 初始化输出目录
 #
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
+# 本软件仅可在 LICENSE.md 文件条款下用于
+# 非商业、研究和评估用途。
 #
-# For inquiries contact  george.drettakis@inria.fr
+# 咨询请联系：george.drettakis@inria.fr
 #
 
 import torch
@@ -58,7 +58,6 @@ class GaussianModel:
         self.percent_dense = 0
         self.spatial_lr_scale = 0
         self.deblur = deblur
-        self.current_iteration = 0
         self.setup_functions()
 
     def create_GTnet(self, hidden=2, width=64, pos_delta=0, num_moments=4):
@@ -188,7 +187,7 @@ class GaussianModel:
 
     def construct_list_of_attributes(self):
         l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
-        # All channels except the 3 DC
+        # 除 3 个 DC 通道外的全部通道
         for i in range(self._features_dc.shape[1]*self._features_dc.shape[2]):
             l.append('f_dc_{}'.format(i))
         for i in range(self._features_rest.shape[1]*self._features_rest.shape[2]):
@@ -244,7 +243,7 @@ class GaussianModel:
         features_extra = np.zeros((xyz.shape[0], len(extra_f_names)))
         for idx, attr_name in enumerate(extra_f_names):
             features_extra[:, idx] = np.asarray(plydata.elements[0][attr_name])
-        # Reshape (P,F*SH_coeffs) to (P, F, SH_coeffs except DC)
+        # 将 (P,F*SH_coeffs) 重排为 (P, F, 去除 DC 的 SH_coeffs)
         features_extra = features_extra.reshape((features_extra.shape[0], 3, (self.max_sh_degree + 1) ** 2 - 1))
 
         scale_names = [p.name for p in plydata.elements[0].properties if (p.name.startswith("scale_") and len(p.name.split("_"))== 2)]
@@ -304,8 +303,6 @@ class GaussianModel:
         return optimizable_tensors
 
     def prune_points(self, mask):
-        if mask.shape[0] != self.get_xyz.shape[0]:
-            raise RuntimeError(f"prune mask has {mask.shape[0]} points, but GaussianModel has {self.get_xyz.shape[0]}")
         valid_points_mask = ~mask
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
 
@@ -364,30 +361,11 @@ class GaussianModel:
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
-    def _cap_mask_by_score(self, mask, score, max_items):
-        if max_items is None:
-            return mask
-
-        max_items = int(max_items)
-        if max_items <= 0:
-            return torch.zeros_like(mask, dtype=torch.bool)
-
-        idx = torch.where(mask)[0]
-        if idx.numel() <= max_items:
-            return mask
-
-        top = torch.topk(score[idx], k=max_items, largest=True).indices
-        capped = torch.zeros_like(mask, dtype=torch.bool)
-        capped[idx[top]] = True
-        return capped
-
-    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2, max_new_points=None, denom=None):
+    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
+        # 非商业、研究和评估用途。
         padded_grad = torch.zeros((n_init_points), device="cuda") 
         padded_grad[:grads.shape[0]] = grads.squeeze()  
-        padded_denom = torch.zeros((n_init_points), device="cuda")
-        source_denom = self.denom if denom is None else denom
-        padded_denom[:source_denom.shape[0]] = source_denom.squeeze()
 
         padded_grad_threshold = torch.ones((n_init_points), device="cuda")
         padded_grad_threshold[:grads.shape[0]] = grad_threshold
@@ -395,16 +373,6 @@ class GaussianModel:
         selected_pts_mask = torch.where(padded_grad >= padded_grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
-        opacity = self.get_opacity.squeeze()
-        seen = padded_denom >= 2.0
-        valid = torch.logical_and(opacity > 0.015, seen)
-        selected_pts_mask = torch.logical_and(selected_pts_mask, valid)
-
-        split_budget = None if max_new_points is None else max_new_points // N
-        score = padded_grad * opacity
-        selected_pts_mask = self._cap_mask_by_score(selected_pts_mask, score, split_budget)
-        if selected_pts_mask.sum() == 0:
-            return
 
         stds = self.get_scaling[selected_pts_mask].repeat(N,1)
         means =torch.zeros((stds.size(0), 3),device="cuda")
@@ -424,20 +392,11 @@ class GaussianModel:
         self.prune_points(prune_filter)
 
 
-    def densify_and_clone(self, grads, grad_threshold, scene_extent, max_new_points=None, denom=None):
+    def densify_and_clone(self, grads, grad_threshold, scene_extent):
+        # 非商业、研究和评估用途。
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
-        opacity = self.get_opacity.squeeze()
-        source_denom = self.denom if denom is None else denom
-        seen = source_denom.squeeze() >= 2.0
-        valid = torch.logical_and(opacity > 0.015, seen)
-        selected_pts_mask = torch.logical_and(selected_pts_mask, valid)
-
-        score = torch.norm(grads, dim=-1) * opacity
-        selected_pts_mask = self._cap_mask_by_score(selected_pts_mask, score, max_new_points)
-        if selected_pts_mask.sum() == 0:
-            return
         
         new_xyz = self._xyz[selected_pts_mask]
         new_features_dc = self._features_dc[selected_pts_mask]
@@ -448,67 +407,30 @@ class GaussianModel:
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, prune_depth=0, tar_range=3, max_new_points=None):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, prune_depth=0, tar_range=3):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
-        prune_mask = (self.get_opacity < min_opacity).squeeze()
+        self.densify_and_clone(grads, max_grad, extent)
+        self.densify_and_split(grads, max_grad, extent)
 
         if prune_depth: 
             depth = self.get_xyz[...,-1]
             _min = depth.amin(); _max = depth.amax() 
-            norm_depth = (depth - _min) / (_max - _min + 1e-8) * (tar_range-1) + 1
-            depth_prune_threshold = min_opacity * torch.sqrt(norm_depth)
-            prune_mask = torch.logical_or(
-                prune_mask,
-                (self.get_opacity < depth_prune_threshold[..., None]).squeeze(),
-            )
+            norm_depth = (depth - _min) / (_max - _min) * (tar_range-1) + 1
+            min_opacity = min_opacity / norm_depth
+            min_opacity = min_opacity[...,None]
+                
+        prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
 
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
 
-        if prune_mask.any().item():
-            keep_mask = ~prune_mask
-            self.prune_points(prune_mask)
-            grads = grads[keep_mask]
-
-        if max_new_points is None or max_new_points > 0:
-            densify_denom = self.denom.clone()
-            clone_budget = None if max_new_points is None else max_new_points // 2
-            split_budget = None if max_new_points is None else max_new_points - clone_budget
-            self.densify_and_clone(grads, max_grad, extent, max_new_points=clone_budget, denom=densify_denom)
-            self.densify_and_split(grads, max_grad, extent, max_new_points=split_budget, denom=densify_denom)
+        self.prune_points(prune_mask)
 
         torch.cuda.empty_cache()
-
-    def prune_and_densify_deblur_safe(
-        self,
-        max_grad,
-        min_opacity,
-        extent,
-        max_screen_size,
-        densify_with_depth=False,
-        prune_range=None,
-        densify_rate=1.0,
-        iteration=None,
-    ):
-        if iteration is not None:
-            self.current_iteration = iteration
-        n_before = int(self.get_xyz.shape[0])
-        densify_rate = max(0.0, float(densify_rate))
-        max_new_points = int(densify_rate * n_before)
-        self.densify_and_prune(
-            max_grad,
-            min_opacity,
-            extent,
-            max_screen_size,
-            densify_with_depth,
-            prune_range if prune_range is not None else 3,
-            max_new_points=max_new_points,
-        )
-        return int(self.get_xyz.shape[0]) - n_before
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter, d=1.0):
         if type(viewspace_point_tensor) == list:
@@ -565,7 +487,7 @@ class GaussianModel:
         fused_point_cloud = additional_points[mask_pts]
         features = interpolated_colors[mask_pts]
 
-        # concat all
+        # 初始化命令行参数解析器
         fused_point_cloud = torch.concat([self._xyz, fused_point_cloud])
         features = torch.concat([existing_color, features])
         

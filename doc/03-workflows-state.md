@@ -159,8 +159,8 @@ Fine workflow now runs:
 4. Run the PyCOLMAP path by default. The worker image still builds upstream COLMAP for explicit `fine_sfm_backend=colmap_cli` runs.
 5. Select indoor/outdoor PyCOLMAP matching policy by image count and capture order. Explicit CLI runs still use the COLMAP CLI policy code.
 6. Write a COLMAP-compatible scene with `images/` and `sparse/0`.
-7. Keep `fine_deblur_mode=mix` as the mixed deblur preset; explicit `motion`, `defocus`, or `sharp` still selects a single branch.
-8. Generate a scene-specific DashDeblurGroupGS config for `mix`, `motion`, `defocus`, or `sharp`.
+7. Use `fine_deblur_mode=motion` by default and apply the deblur branch to all training images; legacy `mix` requests are treated as `motion`.
+8. Generate a scene-specific DashDeblurGroupGS config for `motion`, `defocus`, or `sharp`.
 9. Train DashDeblurGroupGS from the COLMAP scene and surface progress from training logs.
 10. Export standard `final.ply`, transcode `final_web.spz`, write `final_viewer_meta.json`, and write `metrics.json`.
 

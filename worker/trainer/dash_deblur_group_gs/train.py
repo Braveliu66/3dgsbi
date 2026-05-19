@@ -1,12 +1,12 @@
 #
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
+# 版权所有 (C) 2023, Inria
+# GRAPHDECO 研究组, https://team.inria.fr/graphdeco
+# 初始化输出目录
 #
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
+# 本软件仅可在 LICENSE.md 文件条款下用于
+# 非商业、研究和评估用途。
 #
-# For inquiries contact  george.drettakis@inria.fr
+# 咨询请联系：george.drettakis@inria.fr
 #
 
 import os
@@ -32,17 +32,21 @@ import imageio
 import numpy as np
 from metrics import compute_img_metric
 import torch.nn.functional as F
-from gaussians_grouping import GroupingParams, gaussians_grouping_and_caching
-from utils.schedule_utils import DeblurDashScheduler
 
+def auto_point_addition_iter(total_iterations: int) -> int:
+    """根据总训练轮次自适应计算加点时机。
 
-def merge_group_cache_if_needed(gaussians, point_caching):
-    if point_caching is not None:
-        gaussians.densification_postfix(**point_caching)
-    return None
+    经验策略：
+    - 目标比例约为总轮次的 12%
+    - 下限 800：避免过早加点导致几何尚未稳定
+    - 上限 6000：避免在超长训练中过晚加点
+    """
+    if total_iterations <= 0:
+        return 2500
+    raw = int(total_iterations * 0.12)
+    return max(800, min(6000, raw))
 
-
-def training(dataset, opt, pipe, group_training, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, deblur=0):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, deblur=0):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, deblur)
@@ -52,10 +56,6 @@ def training(dataset, opt, pipe, group_training, testing_iterations, saving_iter
     gaussians.create_GTnet(hidden=opt.hidden, width=opt.width, pos_delta=opt.use_pos, num_moments=opt.num_moments)
     
     gaussians.training_setup(opt)
-    scheduler = None
-    if getattr(opt, "dash_enable", False):
-        scheduler = DeblurDashScheduler(opt, pipe, gaussians, [cam.original_image for cam in scene.getTrainCameras()])
-    point_caching = None
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         if first_iter == opt.iterations:
@@ -72,15 +72,18 @@ def training(dataset, opt, pipe, group_training, testing_iterations, saving_iter
     ema_loss_for_log = 0.0
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
-    zero_densify_since = None
-    grouping_disabled_by_densify_stall = False
-    auto_stop_densify = False
-    small_add_count = 0
 
     viewpoint_stack = scene.getTrainCameras().copy()
 
     pts_max = gaussians._xyz.amax(0)
     pts_min = gaussians._xyz.amin(0)
+
+    # 按训练轮次自适应优化加点时机（覆盖固定配置）。
+    # 这样在短轮次训练中不会加点过晚，在长轮次训练中也不会拖得太后。
+    auto_pts_iter = auto_point_addition_iter(opt.iterations)
+    if auto_pts_iter != opt.pts_iter:
+        print(f"[AutoSchedule] Adjust pts_iter: {opt.pts_iter} -> {auto_pts_iter} (iterations={opt.iterations})")
+        opt.pts_iter = auto_pts_iter
 
     for iteration in range(first_iter, opt.iterations + 1):
         if network_gui.conn == None:
@@ -102,147 +105,63 @@ def training(dataset, opt, pipe, group_training, testing_iterations, saving_iter
 
         gaussians.update_learning_rate(iteration)
 
-        # Every 1000 its we increase the levels of SH up to a maximum degree
+        # 每 1000 次迭代提升一次 SH 阶数，直到最大阶。
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
 
-        # Pick a random Camera
+        # 非商业、研究和评估用途。
         if not viewpoint_stack:
             viewpoint_stack = scene.getTrainCameras().copy()
         img_idx = randint(0, len(viewpoint_stack)-1)
         viewpoint_cam = viewpoint_stack.pop(img_idx)
         
-        # Render
+        # 初始化输出目录
         if (iteration - 1) == debug_from:
             pipe.debug = True
 
-        gaussians.current_iteration = iteration
-        dash_active = scheduler is not None and iteration >= opt.dash_start_iter
-        if dash_active:
-            render_scale = scheduler.get_res_scale(iteration)
-        else:
-            render_scale = 1
-
-        gt_image = viewpoint_cam.original_image.cuda()
-        if render_scale > 1:
-            gt_image = F.interpolate(
-                gt_image[None],
-                scale_factor=1.0 / render_scale,
-                mode="bilinear",
-                recompute_scale_factor=True,
-                antialias=True,
-            )[0]
-        render_size = gt_image.shape[-2:]
-
-        use_group_now = False
-        if group_training is not None and getattr(group_training, "Grouping", False):
-            in_group_window = iteration >= group_training.grouping_from_iter and iteration <= group_training.grouping_until_iter
-            away_from_pts = abs(iteration - opt.pts_iter) > group_training.grouping_freeze_around_pts
-            on_group_iter = iteration in group_training.grouping_iteration
-            use_group_now = in_group_window and away_from_pts and on_group_iter
-        if use_group_now:
-            point_caching = gaussians_grouping_and_caching(iteration, gaussians, group_training, _points_caching=point_caching)
-            progress_bar.write(f"[ITER {iteration}] group_active={group_training.active_count} group_cached={group_training.cached_count} UTR={group_training.UTR}")
-
         render_pkg = render(viewpoint_cam, gaussians, pipe, background, deblur=deblur, use_pos=opt.use_pos, 
-                            lambda_s=opt.lambda_s, lambda_p=opt.lambda_p, max_clamp=opt.max_clamp, render_size=render_size)
+                            lambda_s=opt.lambda_s, lambda_p=opt.lambda_p, max_clamp=opt.max_clamp)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
         denom = 1 / len(visibility_filter) if type(radii) == list else 1.0
-        # Loss
+        # 初始化输出目录
+        gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
         loss.backward()
         iter_end.record()
 
         with torch.no_grad():
-            # Progress bar
+            # 全部完成
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
-            if iteration % 200 == 0:
+            if iteration % 100 == 0:
                 Ll2 = l2_loss(image, gt_image)
                 psnr = (-10.0 * np.log(Ll2.cpu()) / np.log(10.0)).item()
                 progress_bar.set_postfix({"PSNR": f"{psnr:.{2}f}"})
-                progress_bar.update(200)
+                progress_bar.update(100)
             if iteration == opt.iterations:
                 progress_bar.close()
 
-            # Log and save
+            # 非商业、研究和评估用途。
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), dataset.model_path)
             if (iteration in saving_iterations):
-                point_caching = merge_group_cache_if_needed(gaussians, point_caching)
-                progress_bar.write("[ITER {}] Saving Gaussians".format(iteration))
+                print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
 
-            # Densification
-            if iteration < opt.densify_until_iter and not auto_stop_densify:
-                # Keep track of max radii in image-space for pruning
+            # 初始化输出目录
+            if iteration < opt.densify_until_iter:
+                # 非商业、研究和评估用途。
                 if type(visibility_filter) == list:
-                    for vf, rd in zip(visibility_filter, radii):
-                        gaussians.max_radii2D[vf] = torch.max(gaussians.max_radii2D[vf], rd[vf])
+                    gaussians.max_radii2D[visibility_filter[0]] = torch.max(gaussians.max_radii2D[visibility_filter[0]], radii[0][visibility_filter[0]])
                 else:
                     gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter, denom)
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = None
-                    point_caching = merge_group_cache_if_needed(gaussians, point_caching)
-                    densify_rate = 1.0
-                    momentum_add = 0
-                    if dash_active and opt.densify_mode == "freq":
-                        densify_rate = scheduler.get_densify_rate(iteration, gaussians.get_xyz.shape[0], render_scale)
-                        momentum_add = gaussians.prune_and_densify_deblur_safe(
-                            opt.densify_grad_threshold,
-                            opt.densify_prune_threshold,
-                            scene.cameras_extent,
-                            size_threshold,
-                            densify_with_depth=opt.densify_with_depth,
-                            prune_range=opt.prune_range,
-                            densify_rate=densify_rate,
-                            iteration=iteration,
-                        )
-                        scheduler.update_momentum(momentum_add)
-                    else:
-                        n_before = int(gaussians.get_xyz.shape[0])
-                        gaussians.densify_and_prune(opt.densify_grad_threshold, opt.densify_prune_threshold, scene.cameras_extent, size_threshold, opt.densify_with_depth, opt.prune_range)
-                        momentum_add = int(gaussians.get_xyz.shape[0]) - n_before
-                    point_caching = None
-                    n_gs = int(gaussians.get_xyz.shape[0])
-                    progress_bar.write(f"[ITER {iteration}] render_scale={render_scale} N_GS={n_gs} densify_rate={densify_rate:.4f} momentum_add={momentum_add}")
-                    rel_add = max(momentum_add, 0) / max(n_gs, 1)
-                    if iteration > 10000 and rel_add < 0.001:
-                        small_add_count += 1
-                    else:
-                        small_add_count = 0
-                    hit_point_cap = opt.max_n_gaussian > 0 and n_gs >= opt.max_n_gaussian
-                    hit_low_gain = small_add_count >= 5
-                    if hit_point_cap or hit_low_gain:
-                        auto_stop_densify = True
-                        progress_bar.write(
-                            f"[ITER {iteration}] auto_stop_densify=True "
-                            f"N_GS={n_gs} rel_add={rel_add:.6f} "
-                            f"reason={'point_cap' if hit_point_cap else 'low_gain'}"
-                        )
-                    if (
-                        group_training is not None
-                        and getattr(group_training, "Grouping", False)
-                        and iteration >= group_training.grouping_from_iter
-                        and iteration < opt.densify_until_iter
-                    ):
-                        if densify_rate <= 0.0:
-                            zero_densify_since = iteration if zero_densify_since is None else zero_densify_since
-                            if not grouping_disabled_by_densify_stall and iteration - zero_densify_since >= 500:
-                                point_caching = merge_group_cache_if_needed(gaussians, point_caching)
-                                group_training.Grouping = False
-                                grouping_disabled_by_densify_stall = True
-                                progress_bar.write(
-                                    f"[ITER {iteration}] grouping_disabled=True reason=densify_rate_zero "
-                                    f"stall_iters={iteration - zero_densify_since}"
-                                )
-                        else:
-                            zero_densify_since = None
+                    gaussians.densify_and_prune(opt.densify_grad_threshold, opt.densify_prune_threshold, scene.cameras_extent, size_threshold, opt.densify_with_depth, opt.prune_range)
 
-                # Point addition
+                # 全部完成
                 if iteration == opt.pts_iter:
-                    point_caching = merge_group_cache_if_needed(gaussians, point_caching)
                     bbox = pts_max - pts_min
                     volume = bbox[0] * bbox[1] * bbox[2]
                     if opt.pts_rate > 0.0:
@@ -251,23 +170,16 @@ def training(dataset, opt, pipe, group_training, testing_iterations, saving_iter
                         pts_N_pts = opt.pts_N_pts
                     print(f"Allocate {pts_N_pts} points\n")
 
-                    if pts_N_pts > 0:
-                        gaussians.add_points(training_args=opt, dist=opt.pts_dist, N=opt.pts_N_intpl, num_pts=pts_N_pts, bound=opt.pts_add_bound)
-                        point_caching = None
-                    else:
-                        progress_bar.write(f"[ITER {iteration}] add_points skipped because pts_N_pts={pts_N_pts}")
+                    gaussians.add_points(training_args=opt, dist=opt.pts_dist, N=opt.pts_N_intpl, num_pts=pts_N_pts, bound=opt.pts_add_bound)
 
-            # Optimizer step
+            # 非商业、研究和评估用途。
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
 
             if (iteration in checkpoint_iterations):
-                point_caching = merge_group_cache_if_needed(gaussians, point_caching)
-                progress_bar.write("[ITER {}] Saving Checkpoint".format(iteration))
+                print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
-
-    point_caching = merge_group_cache_if_needed(gaussians, point_caching)
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
@@ -278,7 +190,7 @@ def prepare_output_and_logger(args):
         tag = args.expname if args.expname != None else unique_str[0:10]
         args.model_path = os.path.join("./output/", tag)
         
-    # Set up output folder
+    # 初始化输出目录
     print("Output folder: {}".format(args.model_path))
     os.makedirs(args.model_path, exist_ok = True)
     os.makedirs(args.model_path+"/TEST", exist_ok = True)
@@ -286,7 +198,7 @@ def prepare_output_and_logger(args):
     with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
         cfg_log_f.write(str(Namespace(**vars(args))))
 
-    # Create Tensorboard writer
+    # 创建 TensorBoard 记录器
     tb_writer = None
     if TENSORBOARD_FOUND:
         tb_writer = SummaryWriter(args.model_path)
@@ -300,7 +212,7 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
         tb_writer.add_scalar('iter_time', elapsed, iteration)
 
-    # Report test and samples of training set
+    # 非商业、研究和评估用途。
     if iteration in testing_iterations:
         torch.cuda.empty_cache()
         validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
@@ -361,13 +273,12 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
         torch.cuda.empty_cache()
 
 if __name__ == "__main__":
-    # Set up command line argument parser
+    # 初始化命令行参数解析器
     parser = configargparse.ArgumentParser()
     parser.add_argument('--config', is_config_file=True, help='config file path')
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
-    gp = GroupingParams(parser)
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
@@ -377,20 +288,20 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[20_000])
     parser.add_argument("--start_checkpoint", type=str, default = None)
-    parser.add_argument('--deblur', type=int, default=4)
+    parser.add_argument('--deblur', type=int, default=1)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
     print("Optimizing " + args.model_path)
-    # Initialize system state (RNG)
+    # 初始化系统随机状态（RNG）
     safe_state(args.quiet)
 
-    # Start GUI server, configure and run training
-    # network_gui.init(args.ip, args.port)
+    # 启动 GUI 服务并开始训练（当前默认关闭）
+    # network_gui.init(args.ip, args.port)  # 如需 GUI 交互可取消注释
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), gp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.deblur)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.deblur)
 
-    # All done
+    # 初始化命令行参数解析器
     print("\nTraining complete.")
 
 
