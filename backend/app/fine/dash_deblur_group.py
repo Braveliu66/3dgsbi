@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -50,7 +51,7 @@ class EffectiveDeblurMode:
 
 
 INDOOR_MOTION = {
-    "iterations": 20000,
+    "iterations": 5000,
     "resolution": -1,
     "white_background": False,
     "eval": True,
@@ -66,6 +67,12 @@ INDOOR_MOTION = {
     "lambda_s": 0.01,
     "lambda_p": 0.01,
     "max_clamp": 1.10,
+    "per_image_blur": 0,
+    "blur_label_path": "",
+    "blur_code_dim": 16,
+    "lambda_code": 0.0001,
+    "lambda_delta": 0.001,
+    "sharp_weight": 2.0,
     "densify_from_iter": 500,
     "densify_until_iter": 15000,
     "densification_interval": 100,
@@ -125,6 +132,12 @@ MODE_LOCKED_KEYS = {
     "lambda_s",
     "lambda_p",
     "max_clamp",
+    "per_image_blur",
+    "blur_label_path",
+    "blur_code_dim",
+    "lambda_code",
+    "lambda_delta",
+    "sharp_weight",
     "densify_grad_threshold",
     "densify_prune_threshold",
     "densify_with_depth",
@@ -147,6 +160,8 @@ INT_KEYS = {
     "pts_N_intpl",
     "pts_N_pts",
     "pts_add_bound",
+    "per_image_blur",
+    "blur_code_dim",
 }
 FLOAT_KEYS = {
     "gtnet_lr",
@@ -156,12 +171,15 @@ FLOAT_KEYS = {
     "lambda_s",
     "lambda_p",
     "max_clamp",
+    "lambda_code",
+    "lambda_delta",
+    "sharp_weight",
     "densify_grad_threshold",
     "densify_prune_threshold",
     "pts_rate",
 }
 BOOL_KEYS = {"white_background", "eval"}
-STRING_KEYS: set[str] = set()
+STRING_KEYS: set[str] = {"blur_label_path"}
 
 
 def run_dash_deblur_group_training(
@@ -176,12 +194,25 @@ def run_dash_deblur_group_training(
     progress: Progress | None = None,
 ) -> DashDeblurGroupResult:
     paths = resolve_runtime_paths(options, repo_cache_dir)
-    deblur_mode = resolve_effective_deblur_mode(options, blur_analysis)
-    config = build_training_config(options, blur_analysis=blur_analysis)
     runtime_dir = work_dir / "dash_deblur_group"
     output_dir = runtime_dir / "model"
     config_path = runtime_dir / "train_config.txt"
     runtime_dir.mkdir(parents=True, exist_ok=True)
+    deblur_mode = resolve_effective_deblur_mode(options, blur_analysis)
+    config = build_training_config(options, blur_analysis=blur_analysis)
+    label_counts = {"motion": 0, "defocus": 0, "sharp": 0}
+    labels: dict[str, str] = {}
+    if normalize_deblur_mode(options) != "sharp":
+        label_path = runtime_dir / "blur_labels.json"
+        labels, label_counts = write_blur_label_file(label_path, blur_analysis)
+    if int(config.get("deblur", 0) or 0) != 0 and labels:
+        config["blur_label_path"] = str(runtime_dir / "blur_labels.json")
+        config["per_image_blur"] = 1
+        if label_counts["motion"] + label_counts["defocus"] == 0:
+            config["deblur"] = 0
+            config["per_image_blur"] = 0
+    else:
+        config["per_image_blur"] = 0
     write_training_config(config_path, config)
 
     command = build_training_command(
@@ -239,8 +270,12 @@ def run_dash_deblur_group_training(
         "deblur_auto_mixed_frames": deblur_mode.mixed_frames,
         "deblur_auto_sharp_frames": deblur_mode.sharp_frames,
         "deblur": int(config["deblur"]),
-        "deblur_strategy": "all_training_images" if int(config["deblur"]) != 0 else "disabled",
-        "deblur_applied_images": _deblur_applied_image_count(config, blur_analysis),
+        "deblur_strategy": _deblur_strategy(config),
+        "deblur_applied_images": _deblur_applied_image_count(config, blur_analysis, label_counts),
+        "deblur_label_motion_images": label_counts["motion"],
+        "deblur_label_defocus_images": label_counts["defocus"],
+        "deblur_label_sharp_images": label_counts["sharp"],
+        "blur_code_dim": int(config["blur_code_dim"]),
         "resolution": int(config["resolution"]),
         "use_pos": int(config["use_pos"]),
         "num_moments": int(config["num_moments"]),
@@ -263,9 +298,65 @@ def run_dash_deblur_group_training(
     )
 
 
-def _deblur_applied_image_count(config: dict[str, Any], blur_analysis: Any | None) -> int:
+def _deblur_strategy(config: dict[str, Any]) -> str:
+    if int(config.get("deblur", 0) or 0) == 0:
+        return "disabled"
+    if int(config.get("per_image_blur", 0) or 0) != 0:
+        return "per_image_blur_type"
+    return "all_training_images"
+
+
+def write_blur_label_file(path: Path, blur_analysis: Any | None) -> tuple[dict[str, str], dict[str, int]]:
+    labels = build_blur_labels(blur_analysis)
+    counts = {"motion": 0, "defocus": 0, "sharp": 0}
+    for value in labels.values():
+        counts[value] += 1
+    if labels:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"version": 1, "labels": labels}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return labels, counts
+
+
+def build_blur_labels(blur_analysis: Any | None) -> dict[str, str]:
+    registry = getattr(blur_analysis, "per_frame_blur", None)
+    if not isinstance(registry, dict):
+        return {}
+    labels: dict[str, str] = {}
+    for key, item in registry.items():
+        if not isinstance(item, dict) or item.get("rejected"):
+            continue
+        training_image = item.get("training_image") or key
+        if training_image is None or str(training_image).startswith("rejected:"):
+            continue
+        labels[str(training_image)] = normalize_blur_label(item)
+    return labels
+
+
+def normalize_blur_label(item: dict[str, Any]) -> str:
+    detector_label = str(item.get("detector_label") or "").strip().lower()
+    detector_blur_type = str(item.get("detector_blur_type") or "").strip().lower()
+    if detector_label == "sharp" or detector_blur_type in {"none", "sharp"}:
+        return "sharp"
+    if detector_blur_type in {"defocus", "defocus_blur"}:
+        return "defocus"
+    if detector_label in {"blurry", "uncertain"} or detector_blur_type in {"motion", "motion_blur", "blur_unknown", "uncertain"}:
+        return "motion"
+
+    if not bool(item.get("blurred")):
+        return "sharp"
+    kind = str(item.get("kind") or item.get("blur_type") or "").strip().lower()
+    if kind in {"defocus", "defocus_blur"}:
+        return "defocus"
+    if kind in {"sharp", "none"}:
+        return "sharp"
+    return "motion"
+
+
+def _deblur_applied_image_count(config: dict[str, Any], blur_analysis: Any | None, label_counts: dict[str, int] | None = None) -> int:
     if int(config.get("deblur", 0) or 0) == 0:
         return 0
+    if int(config.get("per_image_blur", 0) or 0) != 0 and label_counts is not None:
+        return int(label_counts.get("motion", 0)) + int(label_counts.get("defocus", 0))
     for attr in ("kept_images", "input_images", "normalized_image_count"):
         value = int(getattr(blur_analysis, attr, 0) or 0)
         if value > 0:
@@ -537,28 +628,59 @@ def normalize_deblur_mode(options: dict[str, Any]) -> str:
 
 def resolve_effective_deblur_mode(options: dict[str, Any], blur_analysis: Any | None = None) -> EffectiveDeblurMode:
     requested = normalize_deblur_mode(options)
-    return EffectiveDeblurMode(requested, requested, "explicit", "user_selected", 0, 0, 0, 0)
+    counts = count_training_blur_kinds(blur_analysis)
+    if requested == "sharp":
+        effective = "sharp"
+        reason = "user_selected"
+    elif counts["motion"] > 0:
+        effective = "motion"
+        reason = "per_image_blur_labels"
+    elif counts["defocus"] > 0:
+        effective = "defocus"
+        reason = "per_image_blur_labels"
+    elif counts["sharp"] > 0:
+        effective = "sharp"
+        reason = "per_image_blur_labels"
+    else:
+        effective = requested
+        reason = "user_selected"
+    return EffectiveDeblurMode(
+        requested,
+        effective,
+        "explicit",
+        reason,
+        counts["motion"],
+        counts["defocus"],
+        0,
+        counts["sharp"],
+    )
 
 
 def count_training_blur_kinds(blur_analysis: Any | None) -> dict[str, int]:
     counts = {"motion": 0, "defocus": 0, "mixed": 0, "sharp": 0}
     registry = getattr(blur_analysis, "per_frame_blur", None)
     if not isinstance(registry, dict):
-        mode = str(getattr(blur_analysis, "mode", "sharp") or "sharp").lower()
-        if mode in counts:
-            counts[mode] += int(getattr(blur_analysis, "training_blur_frames", 0) or 0) or 1
+        raw_mode = getattr(blur_analysis, "mode", None)
+        if raw_mode is None:
+            return counts
+        mode = str(raw_mode or "sharp").lower()
+        if mode == "defocus":
+            counts["defocus"] += int(getattr(blur_analysis, "training_blur_frames", 0) or 0) or 1
+        elif mode in {"motion", "mixed"}:
+            counts["motion"] += int(getattr(blur_analysis, "training_blur_frames", 0) or 0) or 1
+        elif mode == "sharp":
+            counts["sharp"] += int(getattr(blur_analysis, "kept_images", 0) or 0) or 1
         return counts
     for item in registry.values():
         if not isinstance(item, dict) or item.get("rejected"):
             continue
-        kind = str(item.get("kind") or "sharp").lower()
-        blurred = bool(item.get("blurred"))
-        if not blurred:
+        label = normalize_blur_label(item)
+        if label == "sharp":
             counts["sharp"] += 1
-        elif kind in {"motion", "defocus", "mixed"}:
-            counts[kind] += 1
+        elif label == "defocus":
+            counts["defocus"] += 1
         else:
-            counts["mixed"] += 1
+            counts["motion"] += 1
     return counts
 
 

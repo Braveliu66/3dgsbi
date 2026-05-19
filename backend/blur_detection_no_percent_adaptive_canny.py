@@ -1,9 +1,9 @@
 import argparse
+import csv
 from pathlib import Path
 
 import cv2
 import numpy as np
-import pandas as pd
 from tqdm import tqdm
 
 
@@ -279,6 +279,37 @@ def safe_percentile(values, q):
     return float(np.percentile(values, q))
 
 
+def is_missing(value):
+    if value is None:
+        return True
+    try:
+        return bool(np.isnan(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def nanmedian(values):
+    valid = [value for value in values if not is_missing(value)]
+    if len(valid) == 0:
+        return np.nan
+    return float(np.median(np.asarray(valid, dtype=np.float64)))
+
+
+def normalize_detected_blur_type(row):
+    label = str(row.get("label") or "").strip().lower()
+    blur_type = str(row.get("blur_type") or "").strip().lower()
+
+    if label == "sharp" or blur_type in {"none", "sharp"}:
+        return "sharp"
+    if blur_type in {"defocus", "defocus_blur"}:
+        return "defocus"
+    if blur_type in {"motion", "motion_blur", "blur_unknown", "uncertain"}:
+        return "motion"
+    if label in {"blurry", "uncertain"}:
+        return "motion"
+    return "motion"
+
+
 def analyze_image(path):
     gray = read_gray_image(path)
 
@@ -356,6 +387,244 @@ def analyze_image(path):
     }
 
 
+def classify_result_rows(
+    rows,
+    motion_directionality_threshold=1.35,
+    motion_soft_directionality_threshold=1.08,
+    blurry_patch_percentile=35,
+    blurry_patch_ratio_threshold=0.34,
+    edge_width_absolute_threshold=10.0,
+    motion_blur_weight_threshold=0.30,
+    clear_force_weight_threshold=0.22,
+    clear_force_lap_p20_threshold=120.0,
+    clear_force_patch_ratio_threshold=0.12,
+    possible_to_blurry_weight_threshold=0.28,
+):
+    rows = [dict(row) for row in rows]
+    scores = [row.get("raw_score") for row in rows if not is_missing(row.get("raw_score"))]
+
+    if len(scores) == 0:
+        for row in rows:
+            row["label"] = "uncertain"
+            row["blur_type"] = "uncertain"
+            row["blur_weight"] = 0.5
+            row["blurry_patch_ratio"] = np.nan
+        return rows
+
+    score_min = float(np.min(scores))
+    score_max = float(np.max(scores))
+    median_fft = nanmedian([row.get("fft_high_ratio") for row in rows])
+    median_power_fft = nanmedian([row.get("fft_power_high_ratio") for row in rows])
+    median_lap = nanmedian([row.get("lap_p20") for row in rows])
+    median_edge_width = nanmedian([row.get("edge_width_median") for row in rows])
+
+    all_patch_laps = []
+    for value in [row.get("lap_scores_list") for row in rows]:
+        if isinstance(value, list):
+            all_patch_laps.extend(value)
+
+    patch_blur_th = float(np.percentile(all_patch_laps, blurry_patch_percentile)) if len(all_patch_laps) > 0 else median_lap
+
+    for row in rows:
+        s = row.get("raw_score", np.nan)
+        if is_missing(s):
+            row["label"] = "uncertain"
+            row["blur_type"] = "uncertain"
+            row["blur_weight"] = 0.5
+            row["blurry_patch_ratio"] = np.nan
+            continue
+
+        blur_weight = (score_max - s) / max(score_max - score_min, 1e-6)
+        blur_weight = float(np.clip(blur_weight, 0.0, 1.0))
+        row["blur_weight"] = blur_weight
+
+        directionality = row.get("directionality", np.nan)
+        fft_high = row.get("fft_high_ratio", np.nan)
+        power_fft = row.get("fft_power_high_ratio", np.nan)
+        lap_p20 = row.get("lap_p20", np.nan)
+        edge_width = row.get("edge_width_median", np.nan)
+        patch_laps = row.get("lap_scores_list", [])
+
+        if isinstance(patch_laps, list) and len(patch_laps) > 0 and not is_missing(patch_blur_th):
+            blurry_patch_ratio = float(np.mean(np.array(patch_laps) < patch_blur_th))
+        else:
+            blurry_patch_ratio = np.nan
+        row["blurry_patch_ratio"] = blurry_patch_ratio
+
+        is_strong_directional = not is_missing(directionality) and directionality >= motion_directionality_threshold
+        is_soft_directional = not is_missing(directionality) and directionality >= motion_soft_directionality_threshold
+        low_freq_evidence = not is_missing(fft_high) and not is_missing(median_fft) and fft_high < median_fft
+        low_power_freq_evidence = not is_missing(power_fft) and not is_missing(median_power_fft) and power_fft < median_power_fft
+        low_lap_evidence = not is_missing(lap_p20) and not is_missing(median_lap) and lap_p20 < median_lap
+        patch_blur_evidence = not is_missing(blurry_patch_ratio) and blurry_patch_ratio >= blurry_patch_ratio_threshold
+        edge_width_absolute_evidence = not is_missing(edge_width) and edge_width >= edge_width_absolute_threshold
+        edge_width_relative_evidence = (
+            not is_missing(edge_width)
+            and not is_missing(median_edge_width)
+            and edge_width >= median_edge_width * 1.20
+        )
+        frequency_evidence = low_freq_evidence or low_power_freq_evidence
+
+        clear_force_evidence = (
+            blur_weight <= clear_force_weight_threshold
+            and not is_missing(lap_p20)
+            and lap_p20 >= clear_force_lap_p20_threshold
+            and not is_missing(blurry_patch_ratio)
+            and blurry_patch_ratio <= clear_force_patch_ratio_threshold
+        )
+        if clear_force_evidence:
+            row["label"] = "sharp"
+            row["blur_type"] = "none"
+            continue
+
+        strong_motion_blur_evidence = (
+            is_strong_directional
+            and (edge_width_absolute_evidence or (patch_blur_evidence and frequency_evidence))
+        )
+        soft_motion_blur_evidence = (
+            is_soft_directional
+            and edge_width_absolute_evidence
+            and blur_weight >= motion_blur_weight_threshold
+            and low_lap_evidence
+        )
+        defocus_blur_evidence = (
+            patch_blur_evidence
+            and low_lap_evidence
+            and low_power_freq_evidence
+            and (edge_width_absolute_evidence or edge_width_relative_evidence)
+        )
+        strong_blur_evidence = (
+            edge_width_absolute_evidence
+            and blur_weight >= possible_to_blurry_weight_threshold
+            and (low_power_freq_evidence or patch_blur_evidence or low_lap_evidence)
+        )
+        possible_motion_evidence = (
+            blur_weight >= possible_to_blurry_weight_threshold
+            and is_soft_directional
+            and edge_width_absolute_evidence
+            and (low_lap_evidence or patch_blur_evidence or frequency_evidence)
+        )
+        possible_defocus_evidence = (
+            blur_weight >= possible_to_blurry_weight_threshold
+            and (low_lap_evidence or low_freq_evidence or low_power_freq_evidence)
+            and (patch_blur_evidence or edge_width_absolute_evidence or edge_width_relative_evidence)
+        )
+
+        if strong_motion_blur_evidence or soft_motion_blur_evidence:
+            row["label"] = "blurry"
+            row["blur_type"] = "motion_blur"
+        elif defocus_blur_evidence:
+            row["label"] = "blurry"
+            row["blur_type"] = "defocus_blur"
+        elif strong_blur_evidence:
+            row["label"] = "blurry"
+            if possible_motion_evidence:
+                row["blur_type"] = "motion_blur"
+            elif possible_defocus_evidence:
+                row["blur_type"] = "defocus_blur"
+            else:
+                row["blur_type"] = "blur_unknown"
+        elif possible_motion_evidence:
+            row["label"] = "blurry"
+            row["blur_type"] = "motion_blur"
+        elif possible_defocus_evidence:
+            row["label"] = "blurry"
+            row["blur_type"] = "defocus_blur"
+        else:
+            row["label"] = "sharp"
+            row["blur_type"] = "none"
+
+    for row in rows:
+        row["score_min"] = score_min
+        row["score_max"] = score_max
+        row["patch_blur_threshold"] = patch_blur_th
+        row["median_edge_width"] = median_edge_width
+    return rows
+
+
+def enforce_motion_blur_by_weight_rows(rows):
+    blurry_rows = [
+        row
+        for row in rows
+        if row.get("label") == "blurry" and not is_missing(row.get("blur_weight"))
+    ]
+    if len(blurry_rows) == 0:
+        return rows
+
+    motion_weight_threshold = float(min(row["blur_weight"] for row in blurry_rows))
+    for row in rows:
+        blur_weight = row.get("blur_weight")
+        if not is_missing(blur_weight) and blur_weight >= motion_weight_threshold:
+            row["label"] = "blurry"
+            row["blur_type"] = "motion_blur"
+            row["motion_weight_threshold"] = motion_weight_threshold
+    return rows
+
+
+def analyze_image_paths(
+    image_paths,
+    motion_directionality_threshold=1.35,
+    motion_soft_directionality_threshold=1.08,
+    blurry_patch_percentile=35,
+    blurry_patch_ratio_threshold=0.34,
+    edge_width_absolute_threshold=10.0,
+    motion_blur_weight_threshold=0.30,
+):
+    rows = []
+    for path in image_paths:
+        p = Path(path)
+        try:
+            rows.append(analyze_image(p))
+        except Exception as e:
+            rows.append({
+                "path": str(p),
+                "filename": p.name,
+                "valid_patch_count": 0,
+                "lap_scores_list": [],
+                "lap_p10": np.nan,
+                "lap_p20": np.nan,
+                "lap_median": np.nan,
+                "lap_p80": np.nan,
+                "tenengrad_p20": np.nan,
+                "tenengrad_median": np.nan,
+                "directionality": np.nan,
+                "fft_high_ratio": np.nan,
+                "fft_power_high_ratio": np.nan,
+                "edge_width_median": np.nan,
+                "edge_width_p75": np.nan,
+                "edge_count": 0,
+                "noise": np.nan,
+                "raw_score": np.nan,
+                "error": str(e),
+            })
+
+    rows = classify_result_rows(
+        rows,
+        motion_directionality_threshold=motion_directionality_threshold,
+        motion_soft_directionality_threshold=motion_soft_directionality_threshold,
+        blurry_patch_percentile=blurry_patch_percentile,
+        blurry_patch_ratio_threshold=blurry_patch_ratio_threshold,
+        edge_width_absolute_threshold=edge_width_absolute_threshold,
+        motion_blur_weight_threshold=motion_blur_weight_threshold,
+    )
+    rows = enforce_motion_blur_by_weight_rows(rows)
+    for row in rows:
+        row["normalized_blur_type"] = normalize_detected_blur_type(row)
+    return rows
+
+
+def detect_image_blur_types(image_dir, recursive=True, **kwargs):
+    return analyze_image_paths(collect_images(image_dir, recursive=recursive), **kwargs)
+
+
+def format_cli_value(value):
+    if is_missing(value):
+        return "nan"
+    if isinstance(value, float):
+        return f"{value:.3f}"
+    return str(value)
+
+
 def classify_results(
     df,
     motion_directionality_threshold=1.35,
@@ -373,6 +642,32 @@ def classify_results(
     # 新增：possible 转 blurry 必须达到这个严重度
     possible_to_blurry_weight_threshold=0.28,
 ):
+    rows = classify_result_rows(
+        df.to_dict("records"),
+        motion_directionality_threshold=motion_directionality_threshold,
+        motion_soft_directionality_threshold=motion_soft_directionality_threshold,
+        blurry_patch_percentile=blurry_patch_percentile,
+        blurry_patch_ratio_threshold=blurry_patch_ratio_threshold,
+        edge_width_absolute_threshold=edge_width_absolute_threshold,
+        motion_blur_weight_threshold=motion_blur_weight_threshold,
+        clear_force_weight_threshold=clear_force_weight_threshold,
+        clear_force_lap_p20_threshold=clear_force_lap_p20_threshold,
+        clear_force_patch_ratio_threshold=clear_force_patch_ratio_threshold,
+        possible_to_blurry_weight_threshold=possible_to_blurry_weight_threshold,
+    )
+    for key in (
+        "label",
+        "blur_type",
+        "blur_weight",
+        "blurry_patch_ratio",
+        "score_min",
+        "score_max",
+        "patch_blur_threshold",
+        "median_edge_width",
+    ):
+        df[key] = [row.get(key, np.nan) for row in rows]
+    return df
+
     valid = df["raw_score"].notna()
     scores = df.loc[valid, "raw_score"].values
 
@@ -730,38 +1025,8 @@ def main():
     if len(image_paths) == 0:
         raise RuntimeError(f"No images found in: {image_dir}")
 
-    rows = []
-
-    for p in tqdm(image_paths, desc="Analyzing images"):
-        try:
-            rows.append(analyze_image(p))
-        except Exception as e:
-            rows.append({
-                "path": str(p),
-                "filename": p.name,
-                "valid_patch_count": 0,
-                "lap_scores_list": [],
-                "lap_p10": np.nan,
-                "lap_p20": np.nan,
-                "lap_median": np.nan,
-                "lap_p80": np.nan,
-                "tenengrad_p20": np.nan,
-                "tenengrad_median": np.nan,
-                "directionality": np.nan,
-                "fft_high_ratio": np.nan,
-                "fft_power_high_ratio": np.nan,
-                "edge_width_median": np.nan,
-                "edge_width_p75": np.nan,
-                "edge_count": 0,
-                "noise": np.nan,
-                "raw_score": np.nan,
-                "error": str(e),
-            })
-
-    df = pd.DataFrame(rows)
-
-    df = classify_results(
-        df,
+    rows = analyze_image_paths(
+        tqdm(image_paths, desc="Analyzing images"),
         motion_directionality_threshold=args.motion_threshold,
         motion_soft_directionality_threshold=args.motion_soft_threshold,
         blurry_patch_percentile=args.patch_blur_percentile,
@@ -770,16 +1035,15 @@ def main():
         motion_blur_weight_threshold=args.motion_blur_weight_threshold,
     )
 
-    df = enforce_motion_blur_by_weight(df)
-
-    df = df.sort_values(
-        ["blur_weight", "raw_score"],
-        ascending=[False, True],
+    rows = sorted(
+        rows,
+        key=lambda row: (
+            -(float(row["blur_weight"]) if not is_missing(row.get("blur_weight")) else -1.0),
+            float(row["raw_score"]) if not is_missing(row.get("raw_score")) else float("inf"),
+        ),
     )
 
     output_path = Path(args.output)
-    df.to_csv(output_path, index=False, encoding="utf-8-sig")
-
     show_cols = [
         "filename",
         "label",
@@ -794,36 +1058,43 @@ def main():
         "fft_high_ratio",
         "valid_patch_count",
     ]
+    fieldnames = list(dict.fromkeys(["path", *show_cols, "normalized_blur_type", "error"]))
+    with output_path.open("w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
 
     print("\n=== Blur Detection Results ===")
-    print(df[show_cols].to_string(index=False))
+    print(" | ".join(show_cols))
+    for row in rows:
+        print(" | ".join(format_cli_value(row.get(col)) for col in show_cols))
 
     print(f"\nSaved results to: {output_path.resolve()}")
 
     print("\n=== Blurry Images ===")
-    blurry_df = df[df["label"] == "blurry"]
+    blurry_rows = [row for row in rows if row.get("label") == "blurry"]
 
-    if len(blurry_df) == 0:
+    if len(blurry_rows) == 0:
         print("No blurry images detected.")
     else:
-        for _, row in blurry_df.iterrows():
+        for row in blurry_rows:
             print(
                 f"{row['filename']} | "
                 f"{row['blur_type']} | "
-                f"weight={row['blur_weight']:.3f} | "
-                f"patch_ratio={row['blurry_patch_ratio']:.3f} | "
-                f"edge_width={row['edge_width_median']:.2f} | "
-                f"directionality={row['directionality']:.3f} | "
-                f"raw_score={row['raw_score']:.3f}"
+                f"weight={format_cli_value(row.get('blur_weight'))} | "
+                f"patch_ratio={format_cli_value(row.get('blurry_patch_ratio'))} | "
+                f"edge_width={format_cli_value(row.get('edge_width_median'))} | "
+                f"directionality={format_cli_value(row.get('directionality'))} | "
+                f"raw_score={format_cli_value(row.get('raw_score'))}"
             )
     print("\n=== Sharp Images ===")
-    sharp_df = df[df["label"] == "sharp"]
+    sharp_rows = [row for row in rows if row.get("label") == "sharp"]
 
-    if len(sharp_df) == 0:
+    if len(sharp_rows) == 0:
         print("No sharp images detected.")
     else:
-        for filename in sharp_df["filename"].tolist():
-            print(filename)
+        for row in sharp_rows:
+            print(row["filename"])
     print("\n=== Suggested Deblur Usage ===")
     print("Deblur:")
     print("  deblur = label == 'blurry'")

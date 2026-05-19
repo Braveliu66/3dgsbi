@@ -43,7 +43,16 @@ while [ "$attempt" -le 5 ]; do
 done
 EOF
 
+RUN python - <<'PY'
+import cv2
+import numpy
+import tqdm
+
+print("backend blur detector deps import ok")
+PY
+
 COPY app ./app
+COPY blur_detection_no_percent_adaptive_canny.py ./blur_detection_no_percent_adaptive_canny.py
 
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

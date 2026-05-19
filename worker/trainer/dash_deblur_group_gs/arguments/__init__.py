@@ -71,7 +71,7 @@ class PipelineParams(ParamGroup):
 
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
-        self.iterations = 20_000
+        self.iterations = 5_000
         self.position_lr_init = 0.0016
         self.position_lr_final = 0.000016
         self.position_lr_delay_mult = 0.01
@@ -110,6 +110,12 @@ class OptimizationParams(ParamGroup):
         self.lambda_s=0.01
         self.lambda_p=0.01
         self.use_pos = 0
+        self.per_image_blur = 1
+        self.blur_label_path = ""
+        self.blur_code_dim = 16
+        self.lambda_code = 1e-4
+        self.lambda_delta = 1e-3
+        self.sharp_weight = 2.0
 
         super().__init__(parser, "Optimization Parameters")
 

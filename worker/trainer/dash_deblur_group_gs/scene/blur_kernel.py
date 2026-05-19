@@ -136,6 +136,66 @@ class GTnet(nn.Module):
             pos_delta = self.p(x1)
 
         return scales_delta, rotations_delta, pos_delta
+
+
+class ConditionalGTnet(nn.Module):
+    def __init__(self, num_images, blur_code_dim=16, res_pos=3, res_view=10, num_hidden=3, width=64, pos_delta=False, num_moments=4):
+        super().__init__()
+        self.pos_delta = pos_delta
+        self.num_moments = num_moments
+
+        self.blur_codes = nn.Embedding(num_images, blur_code_dim)
+        nn.init.normal_(self.blur_codes.weight, mean=0.0, std=0.01)
+
+        self.embed_pos, self.embed_pos_cnl = get_embedder(res_pos, 3)
+        self.embed_view, self.embed_view_cnl = get_embedder(res_view, 3)
+        in_cnl = self.embed_pos_cnl + self.embed_view_cnl + 7 + blur_code_dim
+
+        hiddens = [nn.Linear(width, width) if i % 2 == 0 else nn.ReLU()
+                    for i in range((num_hidden - 1) * 2)]
+
+        self.linears = nn.Sequential(
+                nn.Linear(in_cnl, width),
+                nn.ReLU(),
+                *hiddens,
+        ).to("cuda")
+        if not pos_delta:
+            self.s = nn.Linear(width, 3).to("cuda")
+            self.r = nn.Linear(width, 4).to("cuda")
+        else:
+            self.s = nn.Linear(width, 3*(num_moments + 1)).to("cuda")
+            self.r = nn.Linear(width, 4*(num_moments + 1)).to("cuda")
+            self.p = nn.Linear(width, 3*num_moments).to("cuda")
+
+        self.linears.apply(init_linear_weights)
+        self.s.apply(init_linear_weights)
+        self.r.apply(init_linear_weights)
+        if pos_delta:
+            self.p.apply(init_linear_weights)
+
+    def forward(self, pos, scales, rotations, viewdirs, image_id):
+        pos_delta = None
+        num_gaussians = pos.shape[0]
+        pos = self.embed_pos(pos)
+        viewdirs = self.embed_view(viewdirs)
+
+        if not torch.is_tensor(image_id):
+            image_id = torch.tensor(image_id, device=pos.device, dtype=torch.long)
+        else:
+            image_id = image_id.to(device=pos.device, dtype=torch.long)
+        image_id = image_id.view(-1)[0]
+
+        z = self.blur_codes(image_id).view(1, -1).expand(num_gaussians, -1)
+        x = torch.cat([pos, viewdirs, scales, rotations, z], dim=-1)
+        x1 = self.linears(x)
+
+        scales_delta = self.s(x1)
+        rotations_delta = self.r(x1)
+
+        if self.pos_delta:
+            pos_delta = self.p(x1)
+
+        return scales_delta, rotations_delta, pos_delta, z
         
 """
 去模糊核网络（GTnet）与位置编码工具。

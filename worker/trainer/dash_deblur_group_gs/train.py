@@ -10,6 +10,7 @@
 #
 
 import os
+import json
 import torch
 from random import randint
 from utils.loss_utils import l1_loss, ssim, l2_loss
@@ -32,6 +33,7 @@ import imageio
 import numpy as np
 from metrics import compute_img_metric
 import torch.nn.functional as F
+from scene.blur_types import BLUR_SHARP, normalize_blur_type
 
 def auto_point_addition_iter(total_iterations: int) -> int:
     """根据总训练轮次自适应计算加点时机。
@@ -46,6 +48,38 @@ def auto_point_addition_iter(total_iterations: int) -> int:
     raw = int(total_iterations * 0.12)
     return max(800, min(6000, raw))
 
+
+def apply_blur_labels(cameras, blur_label_path):
+    with open(blur_label_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    labels = payload.get("labels", payload)
+    if not isinstance(labels, dict) or len(labels) == 0:
+        raise RuntimeError(f"Blur label file is empty or invalid: {blur_label_path}")
+
+    label_map = {}
+    for name, value in labels.items():
+        label_value = value.get("blur_type") if isinstance(value, dict) else value
+        label_map[str(name)] = label_value
+        label_map[os.path.splitext(os.path.basename(str(name)))[0]] = label_value
+
+    for image_id, camera in enumerate(sorted(cameras, key=lambda cam: cam.image_name)):
+        camera.image_id = image_id
+        label_value = label_map.get(camera.image_name)
+        if label_value is None:
+            raise RuntimeError(f"Missing blur label for training image: {camera.image_name}")
+        camera.blur_type = normalize_blur_type(label_value)
+
+    counts = {0: 0, 1: 0, 2: 0}
+    for camera in cameras:
+        counts[camera.blur_type] += 1
+    print(f"[BlurLabel] sharp={counts[0]} motion={counts[1]} defocus={counts[2]}")
+    return len(cameras)
+
+
+def sharp_camera_subset(cameras):
+    return [camera for camera in cameras if getattr(camera, "blur_type", BLUR_SHARP) == BLUR_SHARP]
+
+
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, deblur=0):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
@@ -53,7 +87,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     scene = Scene(dataset, gaussians)
     bbox = gaussians._xyz.amax(0) - gaussians._xyz.amin(0)
 
-    gaussians.create_GTnet(hidden=opt.hidden, width=opt.width, pos_delta=opt.use_pos, num_moments=opt.num_moments)
+    per_image_blur = bool(opt.per_image_blur) and bool(opt.blur_label_path)
+    if deblur and per_image_blur:
+        num_images = apply_blur_labels(scene.getTrainCameras() + scene.getTestCameras(), opt.blur_label_path)
+        gaussians.create_conditional_GTnets(
+            num_images=num_images,
+            hidden=opt.hidden,
+            width=opt.width,
+            code_dim=opt.blur_code_dim,
+            num_moments=opt.num_moments,
+        )
+        print(f"[BlurCode] code_dim={opt.blur_code_dim} images={num_images}")
+    else:
+        per_image_blur = False
+        gaussians.create_GTnet(hidden=opt.hidden, width=opt.width, pos_delta=opt.use_pos, num_moments=opt.num_moments)
     
     gaussians.training_setup(opt)
     if checkpoint:
@@ -119,14 +166,27 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if (iteration - 1) == debug_from:
             pipe.debug = True
 
-        render_pkg = render(viewpoint_cam, gaussians, pipe, background, deblur=deblur, use_pos=opt.use_pos, 
-                            lambda_s=opt.lambda_s, lambda_p=opt.lambda_p, max_clamp=opt.max_clamp)
+        render_kwargs = {}
+        if per_image_blur:
+            render_kwargs["blur_type"] = viewpoint_cam.blur_type
+            render_kwargs["image_id"] = viewpoint_cam.image_id
+        render_pkg = render(viewpoint_cam, gaussians, pipe, background, deblur=deblur, use_pos=opt.use_pos,
+                            lambda_s=opt.lambda_s, lambda_p=opt.lambda_p, max_clamp=opt.max_clamp,
+                            **render_kwargs)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
         denom = 1 / len(visibility_filter) if type(radii) == list else 1.0
         # 初始化输出目录
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+        photo_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+        if per_image_blur:
+            loss = opt.sharp_weight * photo_loss if viewpoint_cam.blur_type == BLUR_SHARP else photo_loss
+            if "blur_code" in render_pkg:
+                loss = loss + opt.lambda_code * (render_pkg["blur_code"] ** 2).mean()
+            if "delta_reg" in render_pkg:
+                loss = loss + opt.lambda_delta * render_pkg["delta_reg"]
+        else:
+            loss = photo_loss
         loss.backward()
         iter_end.record()
 
@@ -142,7 +202,25 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.close()
 
             # 非商业、研究和评估用途。
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), dataset.model_path)
+            training_report(
+                tb_writer,
+                iteration,
+                Ll1,
+                loss,
+                l1_loss,
+                iter_start.elapsed_time(iter_end),
+                testing_iterations,
+                scene,
+                render,
+                (pipe, background),
+                dataset.model_path,
+                per_image_blur=per_image_blur,
+                deblur=deblur,
+                use_pos=opt.use_pos,
+                lambda_s=opt.lambda_s,
+                lambda_p=opt.lambda_p,
+                max_clamp=opt.max_clamp,
+            )
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
@@ -206,7 +284,25 @@ def prepare_output_and_logger(args):
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
-def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, savedir):
+def training_report(
+    tb_writer,
+    iteration,
+    Ll1,
+    loss,
+    l1_loss,
+    elapsed,
+    testing_iterations,
+    scene : Scene,
+    renderFunc,
+    renderArgs,
+    savedir,
+    per_image_blur=False,
+    deblur=0,
+    use_pos=False,
+    lambda_s=0.01,
+    lambda_p=0.01,
+    max_clamp=1.1,
+):
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
@@ -215,11 +311,18 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
     # 非商业、研究和评估用途。
     if iteration in testing_iterations:
         torch.cuda.empty_cache()
-        validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
-                              {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]})
+        if per_image_blur:
+            validation_configs = (
+                {'name': 'test_sharp', 'cameras' : sharp_camera_subset(scene.getTestCameras())},
+                {'name': 'train_sharp', 'cameras' : sharp_camera_subset(scene.getTrainCameras())[:5]},
+            )
+        else:
+            validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()},
+                                  {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]})
 
         for config in validation_configs:
             _type = config["name"].upper()
+            os.makedirs(f"{savedir}/{_type}", exist_ok=True)
             if _type == "TEST":
                 with open(f"{savedir}/psnr.txt", "a") as f:
                     f.write("[ITER {}] NUM GAUSSIAN: {} \n".format(iteration, scene.gaussians.get_xyz.shape[0]))
@@ -229,7 +332,18 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                 ssim_test = 0.0
                 lpips_test = 0.0
                 for idx, viewpoint in enumerate(config['cameras']):
-                    image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
+                    render_kwargs = {}
+                    if per_image_blur:
+                        render_kwargs = {
+                            "deblur": deblur,
+                            "use_pos": use_pos,
+                            "blur_type": viewpoint.blur_type,
+                            "image_id": viewpoint.image_id,
+                            "lambda_s": lambda_s,
+                            "lambda_p": lambda_p,
+                            "max_clamp": max_clamp,
+                        }
+                    image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs, **render_kwargs)["render"], 0.0, 1.0)
 
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
                     if tb_writer and (idx < 5):

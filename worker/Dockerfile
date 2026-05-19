@@ -399,5 +399,6 @@ fi
 EOF
 
 COPY backend/app ./app
+COPY backend/blur_detection_no_percent_adaptive_canny.py ./blur_detection_no_percent_adaptive_canny.py
 
 CMD ["python", "-m", "app.worker_bootstrap"]

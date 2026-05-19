@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import shutil
 import time
+from importlib import import_module, util
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -105,6 +106,88 @@ def analyze_blur(input_dir: Path, *, reject_ratio: float = 0.0) -> BlurAnalysis:
     return summarize_blur_scores(scores, reject_ratio=reject_ratio)
 
 
+def detect_training_image_blur_types(image_paths: list[Path]) -> dict[str, dict[str, Any]]:
+    try:
+        detector = import_module("blur_detection_no_percent_adaptive_canny")
+    except Exception as exc:
+        # Try a few candidate locations relative to this file and repo root.
+        candidates = []
+        # backend/app/fine -> parents[2] = backend
+        candidates.append(Path(__file__).resolve().parents[2] / "blur_detection_no_percent_adaptive_canny.py")
+        # repo root / backend
+        candidates.append(Path(__file__).resolve().parents[3] / "backend" / "blur_detection_no_percent_adaptive_canny.py")
+        # repo root top-level copy
+        candidates.append(Path.cwd() / "backend" / "blur_detection_no_percent_adaptive_canny.py")
+        candidates.append(Path.cwd() / "blur_detection_no_percent_adaptive_canny.py")
+
+        found = None
+        for detector_path in candidates:
+            try:
+                if detector_path.exists():
+                    spec = util.spec_from_file_location("blur_detection_no_percent_adaptive_canny", detector_path)
+                    if spec is not None and spec.loader is not None:
+                        detector = util.module_from_spec(spec)
+                        spec.loader.exec_module(detector)
+                        found = detector_path
+                        break
+            except Exception:
+                continue
+
+        if found is None:
+            tried = ", ".join(str(p) for p in candidates)
+            raise FineFailure(
+                "BLUR_DETECTION_UNAVAILABLE",
+                f"image blur detector is unavailable: {exc}; tried paths: {tried}",
+            ) from exc
+
+    rows = detector.analyze_image_paths(image_paths)
+    labels: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        filename = str(row.get("filename") or Path(str(row.get("path") or "")).name)
+        blur_type = normalize_detector_blur_type(row)
+        if blur_type not in {"sharp", "motion", "defocus"}:
+            blur_type = "motion"
+        labels[filename] = {
+            "blur_type": blur_type,
+            "raw_label": row.get("label"),
+            "raw_blur_type": row.get("blur_type"),
+            "normalized_blur_type": row.get("normalized_blur_type"),
+            "blur_weight": _optional_finite_float(row.get("blur_weight")),
+            "blurry_patch_ratio": _optional_finite_float(row.get("blurry_patch_ratio")),
+            "raw_score": _optional_finite_float(row.get("raw_score")),
+        }
+    return labels
+
+
+def normalize_detector_blur_type(row: dict[str, Any]) -> str:
+    raw_label = str(row.get("label") or "").strip().lower()
+    raw_blur_type = str(row.get("blur_type") or "").strip().lower()
+
+    if raw_label == "sharp" or raw_blur_type in {"none", "sharp"}:
+        return "sharp"
+    if raw_blur_type in {"defocus", "defocus_blur"}:
+        return "defocus"
+    if raw_label in {"blurry", "uncertain"} or raw_blur_type in {"motion", "motion_blur", "blur_unknown", "uncertain"}:
+        return "motion"
+
+    normalized = str(row.get("normalized_blur_type") or "").strip().lower()
+    if normalized in {"sharp", "motion", "defocus"}:
+        return normalized
+    return "motion"
+
+
+def _optional_finite_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(result) or math.isinf(result):
+        return None
+    return result
+
+
 def prepare_fine_images(
     input_dir: Path,
     output_dir: Path,
@@ -157,6 +240,25 @@ def prepare_fine_images(
         with Image.open(item.path) as original:
             image = ImageOps.exif_transpose(original).convert("RGB")
             image.save(output_dir / normalized_name, format="JPEG", quality=94)
+
+    detected_labels = detect_training_image_blur_types(sorted(output_dir.glob("*.jpg")))
+    for normalized_name, detected in detected_labels.items():
+        if normalized_name not in per_frame_blur:
+            continue
+        blur_type = str(detected["blur_type"])
+        per_frame_blur[normalized_name].update(
+            {
+                "blurred": blur_type != "sharp",
+                "kind": blur_type,
+                "detector_label": detected.get("raw_label"),
+                "detector_blur_type": detected.get("raw_blur_type"),
+                "detector_normalized_blur_type": detected.get("normalized_blur_type"),
+                "detector_blur_weight": detected.get("blur_weight"),
+                "detector_blurry_patch_ratio": detected.get("blurry_patch_ratio"),
+                "detector_raw_score": detected.get("raw_score"),
+            }
+        )
+
     for item in sorted(scores, key=lambda score: score.path.name):
         if item.path in kept_paths:
             continue
@@ -179,9 +281,9 @@ def prepare_fine_images(
             "sharp_score": round(item.sharp_score, 6),
             "quality_label": item.quality_label,
         }
-    kept_blur = [classifications[item.path] for item in kept if classifications[item.path].blurred]
-    all_blur = [classification for classification in classifications.values() if classification.blurred]
-    mode = blur_mode_from_classifications(all_blur)
+    kept_labels = [str(per_frame_blur[f"{index:06d}.jpg"]["kind"]) for index in range(len(kept))]
+    kept_blur = [label for label in kept_labels if label != "sharp"]
+    mode = blur_mode_from_training_labels(kept_labels)
     training_blur_frames = len(kept_blur)
     return output_dir, BlurAnalysis(
         mode=mode,
@@ -193,7 +295,7 @@ def prepare_fine_images(
         mean_sharp_score=analysis.mean_sharp_score,
         rejected_images=len(scores) - len(kept),
         kept_images=len(kept),
-        blurred_images=analysis.blurred_images,
+        blurred_images=len(kept_blur),
         training_blur_frames=training_blur_frames,
         rejected_blur_frames=analysis.rejected_blur_frames,
         quality_trigger_reason="image_quality",
@@ -419,6 +521,15 @@ def blur_mode_from_classifications(classifications: list[BlurClassification]) ->
     if len(kinds) > 1 or "mixed" in kinds:
         return "mixed"
     return next(iter(kinds))
+
+
+def blur_mode_from_training_labels(labels: list[str]) -> str:
+    kinds = {label for label in labels if label in {"motion", "defocus"}}
+    if "motion" in kinds:
+        return "motion"
+    if "defocus" in kinds:
+        return "defocus"
+    return "sharp"
 
 
 def _median(values: list[float]) -> float:

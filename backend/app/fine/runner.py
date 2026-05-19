@@ -130,6 +130,7 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         min_registered_ratio=min_registered_ratio,
     )
     scene_result.metrics.update(colmap_feature_metrics)
+    remap_blur_registry_to_scene_images(quality, train_input_dir, scene_result.scene_dir)
     print(
         "[fine-runner] scene build complete "
         f"backend={scene_result.backend} scene_dir={scene_result.scene_dir} "
@@ -282,6 +283,58 @@ def normalize_fine_pipeline(value: str | None) -> str:
     if normalized in LEGACY_FINE_PIPELINE_ALIASES:
         return PIPELINE_NAME
     return normalized
+
+
+def remap_blur_registry_to_scene_images(quality: Any, train_input_dir: Path, scene_dir: Path) -> None:
+    registry = getattr(quality, "per_frame_blur", None)
+    if not isinstance(registry, dict) or not registry:
+        return
+    source_images = image_files(train_input_dir)
+    scene_images_dir = scene_dir / "images"
+    if not scene_images_dir.exists():
+        return
+    scene_images = image_files(scene_images_dir)
+    if len(source_images) != len(scene_images):
+        print(
+            "[fine-runner] blur label remap skipped "
+            f"source_images={len(source_images)} scene_images={len(scene_images)}",
+            flush=True,
+        )
+        return
+
+    source_by_name = {path.name: path for path in source_images}
+    source_by_stem = {path.stem: path for path in source_images}
+    source_to_scene: dict[str, str] = {}
+    unused_scene = set(scene_images)
+    for source in source_images:
+        matched = None
+        for scene_image in list(unused_scene):
+            if scene_image.name == source.name or scene_image.stem == source.stem or scene_image.stem.endswith("_" + source.stem):
+                matched = scene_image
+                break
+        if matched is not None:
+            unused_scene.remove(matched)
+            source_to_scene[source.name] = matched.name
+
+    if len(source_to_scene) != len(source_images):
+        source_to_scene = {source.name: scene.name for source, scene in zip(source_images, scene_images)}
+
+    remapped: dict[str, dict[str, Any]] = {}
+    for key, item in registry.items():
+        if not isinstance(item, dict) or item.get("rejected"):
+            remapped[key] = item
+            continue
+        training_image = item.get("training_image") or key
+        source_path = source_by_name.get(str(training_image)) or source_by_stem.get(Path(str(training_image)).stem)
+        scene_name = source_to_scene.get(source_path.name) if source_path is not None else None
+        if scene_name is None:
+            remapped[key] = item
+            continue
+        updated = dict(item)
+        updated["training_image"] = scene_name
+        updated["training_stem"] = Path(scene_name).stem
+        remapped[scene_name] = updated
+    quality.per_frame_blur = remapped
 
 
 def resolve_fine_scene_profile(options: dict[str, Any]) -> str:

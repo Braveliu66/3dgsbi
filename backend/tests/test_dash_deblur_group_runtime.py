@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.fine.dash_deblur_group import (  # noqa: E402
     DashDeblurGroupPaths,
+    build_blur_labels,
     build_training_command,
     build_training_config,
     detect_trainer_flavor,
@@ -22,6 +23,8 @@ from app.fine.dash_deblur_group import (  # noqa: E402
     run_dash_deblur_group_training,
     write_training_config,
 )
+from app.fine.runner import remap_blur_registry_to_scene_images  # noqa: E402
+from app.fine.preprocess import normalize_detector_blur_type  # noqa: E402
 
 
 class DashDeblurGroupRuntimeTests(unittest.TestCase):
@@ -69,7 +72,7 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(config["deblur"], 1)
-        self.assertEqual(config["use_pos"], 1)
+        self.assertEqual(config["use_pos"], 0)
         self.assertEqual(config["num_moments"], 4)
         self.assertEqual(config["hidden"], 3)
         self.assertEqual(config["lambda_p"], 0.01)
@@ -113,8 +116,8 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
 
         self.assertEqual(mode.effective, "motion")
         self.assertEqual(mode.confidence, "explicit")
-        self.assertEqual(mode.reason, "user_selected")
-        self.assertEqual(mode.motion_frames, 0)
+        self.assertEqual(mode.reason, "per_image_blur_labels")
+        self.assertEqual(mode.motion_frames, 2)
         self.assertEqual(config["deblur"], 1)
 
     def test_mix_deblur_mode_ignores_defocus_vote(self) -> None:
@@ -129,10 +132,10 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         mode = resolve_effective_deblur_mode({"scene_type": "outdoor", "fine_deblur_mode": "mix"}, blur)
         config = build_training_config({"scene_type": "outdoor", "fine_deblur_mode": "mix"}, blur_analysis=blur)
 
-        self.assertEqual(mode.effective, "motion")
-        self.assertEqual(mode.defocus_frames, 0)
+        self.assertEqual(mode.effective, "defocus")
+        self.assertEqual(mode.defocus_frames, 2)
         self.assertEqual(config["deblur"], 1)
-        self.assertEqual(config["use_pos"], 1)
+        self.assertEqual(config["use_pos"], 0)
         self.assertEqual(config["num_moments"], 4)
 
     def test_mix_deblur_mode_ignores_auto_override_when_uncertain(self) -> None:
@@ -148,7 +151,7 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
 
         self.assertEqual(mode.effective, "motion")
         self.assertEqual(mode.confidence, "explicit")
-        self.assertEqual(mode.reason, "user_selected")
+        self.assertEqual(mode.reason, "per_image_blur_labels")
 
     def test_explicit_deblur_mode_overrides_blur_analysis(self) -> None:
         blur = SimpleNamespace(
@@ -161,7 +164,7 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         mode = resolve_effective_deblur_mode({"fine_deblur_mode": "motion"}, blur)
         config = build_training_config({"fine_deblur_mode": "motion"}, blur_analysis=blur)
 
-        self.assertEqual(mode.effective, "motion")
+        self.assertEqual(mode.effective, "defocus")
         self.assertEqual(mode.confidence, "explicit")
         self.assertEqual(config["deblur"], 1)
 
@@ -176,9 +179,78 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         mode = resolve_effective_deblur_mode({"fine_deblur_mode_requested": "mix"}, blur)
         config = build_training_config({"scene_type": "indoor", "fine_deblur_mode_requested": "mix"}, blur_analysis=blur)
 
-        self.assertEqual(mode.effective, "motion")
+        self.assertEqual(mode.effective, "defocus")
         self.assertEqual(config["deblur"], 1)
-        self.assertEqual(config["use_pos"], 1)
+        self.assertEqual(config["use_pos"], 0)
+
+    def test_build_blur_labels_normalizes_to_three_training_labels(self) -> None:
+        blur = SimpleNamespace(
+            per_frame_blur={
+                "000000.jpg": {"rejected": False, "training_image": "000000.jpg", "blurred": False, "kind": "sharp"},
+                "000001.jpg": {"rejected": False, "training_image": "000001.jpg", "blurred": True, "kind": "motion"},
+                "000002.jpg": {"rejected": False, "training_image": "000002.jpg", "blurred": True, "kind": "defocus"},
+                "000003.jpg": {"rejected": False, "training_image": "000003.jpg", "blurred": True, "kind": "blur_unknown"},
+                "000004.jpg": {"rejected": False, "training_image": "000004.jpg", "blurred": True, "kind": "motion", "detector_label": "sharp", "detector_blur_type": "none"},
+                "000005.jpg": {"rejected": False, "training_image": "000005.jpg", "blurred": True, "kind": "motion", "detector_label": "blurry", "detector_blur_type": "motion_blur", "detector_normalized_blur_type": "sharp"},
+                "rejected:old.jpg": {"rejected": True, "training_image": None, "blurred": True, "kind": "defocus"},
+            }
+        )
+
+        self.assertEqual(
+            build_blur_labels(blur),
+            {
+                "000000.jpg": "sharp",
+                "000001.jpg": "motion",
+                "000002.jpg": "defocus",
+                "000003.jpg": "motion",
+                "000004.jpg": "sharp",
+                "000005.jpg": "motion",
+            },
+        )
+
+    def test_detector_raw_label_is_trusted_before_normalized_label(self) -> None:
+        self.assertEqual(
+            normalize_detector_blur_type({"label": "sharp", "blur_type": "none", "normalized_blur_type": "motion"}),
+            "sharp",
+        )
+
+    def test_all_sharp_blur_labels_disable_deblur_config(self) -> None:
+        blur = SimpleNamespace(
+            per_frame_blur={
+                "000000.jpg": {"rejected": False, "training_image": "000000.jpg", "blurred": False, "kind": "sharp"},
+                "000001.jpg": {"rejected": False, "training_image": "000001.jpg", "blurred": False, "kind": "sharp"},
+            }
+        )
+
+        config = build_training_config({"fine_deblur_mode": "motion"}, blur_analysis=blur)
+
+        self.assertEqual(config["deblur"], 0)
+        self.assertEqual(config["use_pos"], 0)
+
+    def test_blur_registry_remaps_to_colmap_scene_image_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fine_input = root / "fine_input"
+            scene_dir = root / "fine_scene" / "colmap"
+            images_dir = scene_dir / "images"
+            fine_input.mkdir(parents=True)
+            images_dir.mkdir(parents=True)
+            for name in ("000000.jpg", "000001.jpg"):
+                (fine_input / name).write_bytes(b"image")
+            (images_dir / "001_000000.jpg").write_bytes(b"image")
+            (images_dir / "002_000001.jpg").write_bytes(b"image")
+            blur = SimpleNamespace(
+                per_frame_blur={
+                    "000000.jpg": {"rejected": False, "training_image": "000000.jpg", "blurred": False, "kind": "sharp"},
+                    "000001.jpg": {"rejected": False, "training_image": "000001.jpg", "blurred": True, "kind": "motion"},
+                }
+            )
+
+            remap_blur_registry_to_scene_images(blur, fine_input, scene_dir)
+
+        self.assertEqual(sorted(blur.per_frame_blur), ["001_000000.jpg", "002_000001.jpg"])
+        self.assertEqual(blur.per_frame_blur["002_000001.jpg"]["training_image"], "002_000001.jpg")
+        self.assertEqual(build_blur_labels(blur)["002_000001.jpg"], "motion")
 
     def test_write_training_config_preserves_deblur_keys(self) -> None:
         config = build_training_config({"scene_type": "indoor", "fine_deblur_mode": "motion"})
@@ -199,6 +271,7 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         self.assertIn("pts_N_pts = 200000", text)
         self.assertIn("pts_iter = 2500", text)
         self.assertIn("pts_rate = 1.1", text)
+        self.assertIn("blur_code_dim = 16", text)
         self.assertNotIn("dash_enable", text)
         self.assertNotIn("Grouping", text)
         self.assertNotIn("protect_new_points_iters", text)
@@ -223,6 +296,16 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         self.assertNotIn("def resolve_add_points_count", train_source)
         self.assertNotIn("kept={add_stats['kept']} rejected={add_stats['rejected']}", train_source)
         self.assertNotIn("torch.cdist", gaussian_source)
+
+    def test_trainer_uses_sharp_images_for_per_image_blur_eval_and_16_dim_codes(self) -> None:
+        trainer_root = Path(__file__).resolve().parents[2] / "worker" / "trainer" / "dash_deblur_group_gs"
+        train_source = (trainer_root / "train.py").read_text(encoding="utf-8")
+        blur_kernel_source = (trainer_root / "scene" / "blur_kernel.py").read_text(encoding="utf-8")
+
+        self.assertIn("sharp_camera_subset(scene.getTestCameras())", train_source)
+        self.assertIn("sharp_camera_subset(scene.getTrainCameras())[:5]", train_source)
+        self.assertIn("code_dim=opt.blur_code_dim", train_source)
+        self.assertIn("nn.Embedding(num_images, blur_code_dim)", blur_kernel_source)
 
     def test_build_training_command_uses_colmap_scene_and_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -252,7 +335,7 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         self.assertIn(str(output_dir), command)
         self.assertIn("--config", command)
         self.assertIn("--test_iterations", command)
-        self.assertIn("20001", command)
+        self.assertIn("5001", command)
 
     def test_training_exports_filtered_final_ply(self) -> None:
         try:

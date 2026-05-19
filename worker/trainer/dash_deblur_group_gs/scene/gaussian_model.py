@@ -20,7 +20,7 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
-from scene.blur_kernel import GTnet
+from scene.blur_kernel import GTnet, ConditionalGTnet
 
 
 class GaussianModel:
@@ -58,10 +58,51 @@ class GaussianModel:
         self.percent_dense = 0
         self.spatial_lr_scale = 0
         self.deblur = deblur
+        self.GTnet = None
+        self.motion_GTnet = None
+        self.defocus_GTnet = None
         self.setup_functions()
 
     def create_GTnet(self, hidden=2, width=64, pos_delta=0, num_moments=4):
         self.GTnet = GTnet(num_hidden=hidden, width=width, pos_delta=pos_delta, num_moments=num_moments)
+
+    def create_conditional_GTnets(self, num_images, hidden=2, width=64, code_dim=16, num_moments=4):
+        self.motion_GTnet = ConditionalGTnet(
+            num_images=num_images,
+            blur_code_dim=code_dim,
+            num_hidden=hidden,
+            width=width,
+            pos_delta=True,
+            num_moments=num_moments,
+        ).cuda()
+        self.defocus_GTnet = ConditionalGTnet(
+            num_images=num_images,
+            blur_code_dim=code_dim,
+            num_hidden=hidden,
+            width=width,
+            pos_delta=False,
+            num_moments=num_moments,
+        ).cuda()
+
+    def blur_state_dict(self):
+        state = {}
+        if self.GTnet is not None:
+            state["GTnet"] = self.GTnet.state_dict()
+        if self.motion_GTnet is not None:
+            state["motion_GTnet"] = self.motion_GTnet.state_dict()
+        if self.defocus_GTnet is not None:
+            state["defocus_GTnet"] = self.defocus_GTnet.state_dict()
+        return state
+
+    def load_blur_state_dict(self, state):
+        if not isinstance(state, dict):
+            return
+        if self.GTnet is not None and "GTnet" in state:
+            self.GTnet.load_state_dict(state["GTnet"])
+        if self.motion_GTnet is not None and "motion_GTnet" in state:
+            self.motion_GTnet.load_state_dict(state["motion_GTnet"])
+        if self.defocus_GTnet is not None and "defocus_GTnet" in state:
+            self.defocus_GTnet.load_state_dict(state["defocus_GTnet"])
             
     def capture(self):
         return (
@@ -77,25 +118,44 @@ class GaussianModel:
             self.denom,
             self.optimizer.state_dict(),
             self.spatial_lr_scale,
+            self.blur_state_dict(),
         )
     
     def restore(self, model_args, training_args):
-        (self.active_sh_degree, 
-        self._xyz, 
-        self._features_dc, 
-        self._features_rest,
-        self._scaling, 
-        self._rotation, 
-        self._opacity,
-        self.max_radii2D, 
-        xyz_gradient_accum, 
-        denom,
-        opt_dict, 
-        self.spatial_lr_scale,
-        ) = model_args
+        blur_state = None
+        if len(model_args) == 13:
+            (self.active_sh_degree, 
+            self._xyz, 
+            self._features_dc, 
+            self._features_rest,
+            self._scaling, 
+            self._rotation, 
+            self._opacity,
+            self.max_radii2D, 
+            xyz_gradient_accum, 
+            denom,
+            opt_dict, 
+            self.spatial_lr_scale,
+            blur_state,
+            ) = model_args
+        else:
+            (self.active_sh_degree, 
+            self._xyz, 
+            self._features_dc, 
+            self._features_rest,
+            self._scaling, 
+            self._rotation, 
+            self._opacity,
+            self.max_radii2D, 
+            xyz_gradient_accum, 
+            denom,
+            opt_dict, 
+            self.spatial_lr_scale,
+            ) = model_args
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
+        self.load_blur_state_dict(blur_state)
         self.optimizer.load_state_dict(opt_dict)
 
     @property
@@ -169,7 +229,13 @@ class GaussianModel:
         ]
 
         if self.deblur:
-            l+=[{'params': self.GTnet.parameters(), 'lr': training_args.gtnet_lr, "name": "GTnet"}]
+            if self.motion_GTnet is not None and self.defocus_GTnet is not None:
+                l += [
+                    {'params': self.motion_GTnet.parameters(), 'lr': training_args.gtnet_lr, "name": "motion_GTnet"},
+                    {'params': self.defocus_GTnet.parameters(), 'lr': training_args.gtnet_lr, "name": "defocus_GTnet"},
+                ]
+            elif self.GTnet is not None:
+                l+=[{'params': self.GTnet.parameters(), 'lr': training_args.gtnet_lr, "name": "GTnet"}]
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
 
@@ -285,7 +351,7 @@ class GaussianModel:
     def _prune_optimizer(self, mask):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
-            if group['name'] == "GTnet":
+            if group['name'] in {"GTnet", "motion_GTnet", "defocus_GTnet"}:
                 continue
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
@@ -320,7 +386,7 @@ class GaussianModel:
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
-            if group['name'] == "GTnet":
+            if group['name'] in {"GTnet", "motion_GTnet", "defocus_GTnet"}:
                 continue
             assert len(group["params"]) == 1
             extension_tensor = tensors_dict[group["name"]]
@@ -517,6 +583,12 @@ class GaussianModel:
         ]
 
 
-        l += [{'params': self.GTnet.parameters(), 'lr': training_args.gtnet_lr, "name": "GTnet"}]
+        if self.motion_GTnet is not None and self.defocus_GTnet is not None:
+            l += [
+                {'params': self.motion_GTnet.parameters(), 'lr': training_args.gtnet_lr, "name": "motion_GTnet"},
+                {'params': self.defocus_GTnet.parameters(), 'lr': training_args.gtnet_lr, "name": "defocus_GTnet"},
+            ]
+        elif self.GTnet is not None:
+            l += [{'params': self.GTnet.parameters(), 'lr': training_args.gtnet_lr, "name": "GTnet"}]
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
