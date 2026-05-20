@@ -326,7 +326,11 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         self.assertIn("pts_N_pts = 0", text)
         self.assertIn("pts_iter = 999999", text)
         self.assertIn("pts_rate = 0.0", text)
-        self.assertIn("blur_code_dim = 16", text)
+        self.assertIn("blur_code_dim = 4", text)
+        self.assertIn("pre_deblur_warmup_enable = True", text)
+        self.assertIn("pre_deblur_warmup_iters = 500", text)
+        self.assertIn("luminance_enable = True", text)
+        self.assertIn("gdags_stats_enable = True", text)
         self.assertIn("pc_name = points3D_eap", text)
         self.assertIn("renderer_backend = original", text)
         self.assertIn("renderer_backend_deblur = original", text)
@@ -351,13 +355,15 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         self.assertIn("def auto_point_addition_iter", train_source)
         self.assertIn("def auto_densify_until_iter", train_source)
         self.assertIn("def random_point_addition_enabled", train_source)
+        self.assertIn("warmup_active", train_source)
+        self.assertIn("densify_warmup_clone_split", train_source)
         self.assertIn("opt.pts_iter = auto_pts_iter", train_source)
         self.assertIn("pts_N_pts = int(min(volume / (opt.pts_rate ** 3), 200000))", train_source)
         self.assertNotIn("def resolve_add_points_count", train_source)
         self.assertNotIn("kept={add_stats['kept']} rejected={add_stats['rejected']}", train_source)
         self.assertNotIn("torch.cdist", gaussian_source)
 
-    def test_trainer_uses_sharp_images_for_per_image_blur_eval_and_16_dim_codes(self) -> None:
+    def test_trainer_uses_sharp_images_for_per_image_blur_eval_and_configurable_codes(self) -> None:
         trainer_root = Path(__file__).resolve().parents[2] / "worker" / "trainer" / "dash_deblur_group_gs"
         train_source = (trainer_root / "train.py").read_text(encoding="utf-8")
         blur_kernel_source = (trainer_root / "scene" / "blur_kernel.py").read_text(encoding="utf-8")
@@ -366,6 +372,11 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         self.assertIn("sharp_camera_subset(scene.getTrainCameras())[:5]", train_source)
         self.assertIn("code_dim=opt.blur_code_dim", train_source)
         self.assertIn("nn.Embedding(num_images, blur_code_dim)", blur_kernel_source)
+
+    def test_blur_code_dim_can_be_set_to_four_eight_or_sixteen(self) -> None:
+        self.assertEqual(build_training_config({"blur_code_dim": 4})["blur_code_dim"], 4)
+        self.assertEqual(build_training_config({"blur_code_dim": 8})["blur_code_dim"], 8)
+        self.assertEqual(build_training_config({"blur_code_dim": 16})["blur_code_dim"], 16)
 
     def test_trainer_accepts_eap_pointcloud_and_lazy_gsplat_backend(self) -> None:
         trainer_root = Path(__file__).resolve().parents[2] / "worker" / "trainer" / "dash_deblur_group_gs"
@@ -413,7 +424,7 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         self.assertIn(str(output_dir), command)
         self.assertIn("--config", command)
         self.assertIn("--test_iterations", command)
-        self.assertIn("5001", command)
+        self.assertIn("3001", command)
 
     def test_training_exports_filtered_final_ply(self) -> None:
         try:

@@ -74,7 +74,7 @@ class PipelineParams(ParamGroup):
 
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
-        self.iterations = 5_000
+        self.iterations = 3_000
         self.position_lr_init = 0.0016
         self.position_lr_final = 0.000016
         self.position_lr_delay_mult = 0.01
@@ -115,10 +115,34 @@ class OptimizationParams(ParamGroup):
         self.use_pos = 0
         self.per_image_blur = 1
         self.blur_label_path = ""
-        self.blur_code_dim = 16
+        self.blur_code_dim = 4
         self.lambda_code = 1e-4
         self.lambda_delta = 1e-3
-        self.sharp_weight = 2.0
+        self.sharp_weight = 1.0
+        self.motion_weight = 1.0
+        self.defocus_weight = 1.0
+        self.pre_deblur_warmup_enable = True
+        self.pre_deblur_warmup_iters = 500
+        self.pre_deblur_warmup_densify = True
+        self.pre_deblur_warmup_densify_from_iter = 100
+        self.luminance_enable = True
+        self.luminance_start_iter = 1000
+        self.luminance_lr = 1e-3
+        self.luminance_lambda_gain = 5e-3
+        self.luminance_lambda_bias = 1e-2
+        self.luminance_mode = "exposure_gain_bias"
+        self.luminance_per_channel = False
+        self.luminance_matrix_enable = False
+        self.luminance_curve_enable = False
+        self.gdags_stats_enable = True
+        self.gdags_enable = False
+        self.gdags_start_iter = 3000
+        self.gdags_probe_interval = 100
+        self.gdags_probe_use_autograd_grad = True
+        self.gdags_clone_enable = False
+        self.gdags_split_enable = False
+        self.gdags_prune_enable = False
+        self.gdags_newborn_protect_iters = 1000
 
         super().__init__(parser, "Optimization Parameters")
 

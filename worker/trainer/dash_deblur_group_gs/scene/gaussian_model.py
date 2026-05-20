@@ -21,6 +21,7 @@ from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 from scene.blur_kernel import GTnet, ConditionalGTnet
+from scene.gdags import DeblurAwareGDAGS, SOURCE_EAP
 
 
 class GaussianModel:
@@ -61,6 +62,7 @@ class GaussianModel:
         self.GTnet = None
         self.motion_GTnet = None
         self.defocus_GTnet = None
+        self.gdags = None
         self.setup_functions()
 
     def create_GTnet(self, hidden=2, width=64, pos_delta=0, num_moments=4):
@@ -83,6 +85,9 @@ class GaussianModel:
             pos_delta=False,
             num_moments=num_moments,
         ).cuda()
+
+    def create_gdags(self, source_type=0):
+        self.gdags = DeblurAwareGDAGS(self.get_xyz.shape[0], device=self.get_xyz.device, source_type=source_type)
 
     def blur_state_dict(self):
         state = {}
@@ -382,6 +387,9 @@ class GaussianModel:
 
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
+        if self.gdags is not None:
+            self.gdags.on_prune(valid_points_mask)
+            self.gdags.assert_shape(self.get_xyz.shape[0])
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -427,7 +435,7 @@ class GaussianModel:
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
-    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
+    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2, current_iter=0, gdags_protect_iters=1000):
         n_init_points = self.get_xyz.shape[0]
         # 非商业、研究和评估用途。
         padded_grad = torch.zeros((n_init_points), device="cuda") 
@@ -439,6 +447,7 @@ class GaussianModel:
         selected_pts_mask = torch.where(padded_grad >= padded_grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
+        parent_idx = torch.nonzero(selected_pts_mask, as_tuple=False).squeeze(-1)
 
         stds = self.get_scaling[selected_pts_mask].repeat(N,1)
         means =torch.zeros((stds.size(0), 3),device="cuda")
@@ -453,16 +462,19 @@ class GaussianModel:
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
         
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation)
+        if self.gdags is not None and parent_idx.numel() > 0:
+            self.gdags.on_split(parent_idx.repeat(N), current_iter, gdags_protect_iters)
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
 
 
-    def densify_and_clone(self, grads, grad_threshold, scene_extent):
+    def densify_and_clone(self, grads, grad_threshold, scene_extent, current_iter=0, gdags_protect_iters=1000):
         # 非商业、研究和评估用途。
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
+        parent_idx = torch.nonzero(selected_pts_mask, as_tuple=False).squeeze(-1)
         
         new_xyz = self._xyz[selected_pts_mask]
         new_features_dc = self._features_dc[selected_pts_mask]
@@ -472,13 +484,15 @@ class GaussianModel:
         new_rotation = self._rotation[selected_pts_mask]
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation)
+        if self.gdags is not None and parent_idx.numel() > 0:
+            self.gdags.on_clone(parent_idx, current_iter, gdags_protect_iters)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, prune_depth=0, tar_range=3):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, prune_depth=0, tar_range=3, current_iter=0, gdags_protect_iters=1000):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
-        self.densify_and_clone(grads, max_grad, extent)
-        self.densify_and_split(grads, max_grad, extent)
+        self.densify_and_clone(grads, max_grad, extent, current_iter=current_iter, gdags_protect_iters=gdags_protect_iters)
+        self.densify_and_split(grads, max_grad, extent, current_iter=current_iter, gdags_protect_iters=gdags_protect_iters)
 
         if prune_depth: 
             depth = self.get_xyz[...,-1]
@@ -495,7 +509,20 @@ class GaussianModel:
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
 
         self.prune_points(prune_mask)
+        if self.gdags is not None:
+            self.gdags.assert_shape(self.get_xyz.shape[0])
 
+        torch.cuda.empty_cache()
+
+    def densify_warmup_clone_split(self, max_grad, extent, current_iter=0, gdags_protect_iters=1000):
+        grads = self.xyz_gradient_accum / self.denom
+        grads[grads.isnan()] = 0.0
+
+        self.densify_and_clone(grads, max_grad, extent, current_iter=current_iter, gdags_protect_iters=gdags_protect_iters)
+        self.densify_and_split(grads, max_grad, extent, current_iter=current_iter, gdags_protect_iters=gdags_protect_iters)
+
+        if self.gdags is not None:
+            self.gdags.assert_shape(self.get_xyz.shape[0])
         torch.cuda.empty_cache()
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter, d=1.0):
@@ -592,3 +619,7 @@ class GaussianModel:
             l += [{'params': self.GTnet.parameters(), 'lr': training_args.gtnet_lr, "name": "GTnet"}]
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+        if self.gdags is not None:
+            num_new = int(mask_pts.sum().item())
+            self.gdags.on_external_add(num_new, SOURCE_EAP, 0, getattr(training_args, "gdags_eap_protect_iters", 5000))
+            self.gdags.assert_shape(self.get_xyz.shape[0])

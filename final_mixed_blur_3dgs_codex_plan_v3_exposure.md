@@ -1,4 +1,4 @@
-# 混合模糊 3DGS 融合方案：Codex 实施版 v2
+# 混合模糊 3DGS 融合方案：Codex 实施版 v3
 
 > 目标：把原“融合方案综合评估与完整优化版”改成一份可直接交给 Codex 落代码的工程规格。
 >
@@ -8,7 +8,7 @@
 > 2. GDAGS 统计 buffer 必须随 clone / split / prune 同步扩容、复制、裁剪。
 > 3. motion 分支不要再叫 moment-0；原始位置渲染统一命名为 `identity_moment` / `canonical_moment`。
 > 4. defocus 分支默认只学习 scale；rotation delta 默认关闭，开启时必须保证 quaternion 合法。
-> 5. Luminance 模型第一版只用 per-image RGB scale + bias，禁止一开始启用完整 3x3 matrix 和 tone curve。
+> 5. Luminance 模型第一版只用 per-image scalar exposure gain + scalar brightness bias，禁止一开始启用 per-channel RGB、完整 3x3 matrix 和 tone curve。
 > 6. loss 拆成 `photo_loss_raw`、`photo_loss_weighted`、`reg_loss`，避免 blur type 权重不透明地改变正则相对比例。
 
 ---
@@ -30,7 +30,7 @@ Phase 1: mixed blur routing
     - 不开 GDAGS、不开发光照校正、不改 densify/prune
 
 Phase 2: safe luminance
-    - 只启用 per-image RGB scale + bias
+    - 只启用 per-image scalar exposure gain + scalar brightness bias
     - 只作用在 loss 端
     - 记录 raw / weighted photo loss
 
@@ -62,9 +62,10 @@ Phase 5: optional advanced features
 --renderer_backend_deblur original
 
 --luminance_enable
---luminance_mode rgb_scale_bias
+--luminance_mode exposure_gain_bias
 --luminance_matrix_enable false
 --luminance_curve_enable false
+--luminance_per_channel false
 
 --gdags_enable false
 --gdags_stats_enable false
@@ -458,72 +459,121 @@ assert torch.allclose(norm.mean(), torch.ones_like(norm.mean()), atol=1e-3)
 
 ---
 
-## 4. Luminance 模型：第一版只用 RGB scale + bias
+## 4. Luminance 模型：第一版只做曝光归一化
 
-### 4.1 禁止第一版启用 3x3 matrix / tone curve
+### 4.1 第一版定位
+
+你的手机数据里主要问题是曝光和整体亮度不一致，不是色偏。因此 Luminance 第一版不应该作为“颜色校正模块”，而应该只是一个曝光归一化模块。
+
+第一版只允许每张图学习两个标量：
+
+```python
+image_corrected = image * exposure_gain[image_id] + brightness_bias[image_id]
+```
+
+其中：
+
+```text
+exposure_gain: 乘法项，用于修曝光
+brightness_bias: 加法项，用于修整体亮度 / 黑电平偏移
+```
+
+禁止第一版启用：
+
+```text
+per-channel RGB scale
+per-channel RGB bias
+3x3 color matrix
+tone curve
+```
 
 原因：
 
 - `blur_code` 和 Luminance 都是 per-image 低频适应。
+- 手机数据没有明显色偏时，per-channel RGB scale / bias 会引入不必要颜色自由度。
 - 3x3 matrix + bias + tone curve 容量过强，容易解释 blur residual。
 - 这会导致 GTnet 学不到干净的 motion / defocus compensation。
-
-第一版只允许：
-
-```python
-image_corrected[c] = image[c] * scale[image_id, c] + bias[image_id, c]
-```
 
 ### 4.2 推荐实现
 
 ```python
-class PerViewLuminanceModel(nn.Module):
+class PerImageExposureModel(nn.Module):
     def __init__(self, num_images):
         super().__init__()
-        # log_scale 初始化为 0，等价 scale=1
-        self.rgb_log_scale = nn.Parameter(torch.zeros(num_images, 3))
-        self.rgb_bias = nn.Parameter(torch.zeros(num_images, 3))
+
+        # 每张图一个曝光增益，初始化为 0，exp(0)=1
+        self.log_gain = nn.Parameter(torch.zeros(num_images, 1, 1, 1))
+
+        # 每张图一个亮度偏置，初始化为 0
+        self.bias = nn.Parameter(torch.zeros(num_images, 1, 1, 1))
 
     def forward(self, image, image_id):
         """
         image: [3, H, W]
+        image_id: int
         """
-        log_s = self.rgb_log_scale[image_id].view(3, 1, 1)
-        b = self.rgb_bias[image_id].view(3, 1, 1)
 
-        # 限制 scale 范围，避免 luminance 吃掉模糊误差
-        scale = torch.exp(torch.clamp(log_s, min=-0.20, max=0.20))
-        corrected = image * scale + b
+        log_gain = self.log_gain[image_id]
+        bias = self.bias[image_id]
 
-        # 可选：loss 前 clamp。若发现梯度饱和，可改成只在 metric 时 clamp。
+        # 限制范围，防止 luminance 解释模糊残差
+        gain = torch.exp(torch.clamp(log_gain, min=-0.30, max=0.30))
+        bias = torch.clamp(bias, min=-0.05, max=0.05)
+
+        corrected = image * gain + bias
         return torch.clamp(corrected, 0.0, 1.0)
 
-    def regularization_loss(self, lambda_scale=5e-3, lambda_bias=5e-3):
-        scale_reg = (self.rgb_log_scale ** 2).mean()
-        bias_reg = (self.rgb_bias ** 2).mean()
-        return lambda_scale * scale_reg + lambda_bias * bias_reg
+    def regularization_loss(self, lambda_gain=5e-3, lambda_bias=1e-2):
+        return (
+            lambda_gain * (self.log_gain ** 2).mean()
+            + lambda_bias * (self.bias ** 2).mean()
+        )
 ```
 
-### 4.3 调度建议
+### 4.3 与 scalar exposure gain + brightness bias 的区别
+
+| 方案 | 参数量 | 能修什么 | 风险 |
+|---|---:|---|---|
+| scalar exposure gain + brightness bias | 每图 6 个参数 | 曝光、亮度、轻微色偏 | 可能引入不必要颜色自由度 |
+| scalar gain + bias | 每图 2 个参数 | 曝光、整体亮度 | 最安全，最不容易干扰 deblur |
+| 3x3 matrix + bias | 每图 12 个参数 | 色彩混合、白平衡、复杂颜色偏差 | 对当前场景过强 |
+| tone curve | 更多 | 非线性响应 / HDR 差异 | 最容易抢解释权 |
+
+### 4.4 调度建议
 
 ```bash
 --luminance_start_iter 1000
 --luminance_lr 1e-3
---luminance_lambda_scale 5e-3
---luminance_lambda_bias 5e-3
+--luminance_lambda_gain 5e-3
+--luminance_lambda_bias 1e-2
 ```
 
-如果 motion / defocus 的 `delta_reg` 持续变小但图像仍糊，且 luminance scale/bias 变大，说明 Luminance 在抢解释权。应降低 luminance lr 或延后 start iter。
-
-### 4.4 后续可选升级
-
-只有当 RGB scale + bias 稳定后，才允许升级：
+第一版默认配置：
 
 ```bash
---luminance_matrix_enable true
+--luminance_enable
+--luminance_mode exposure_gain_bias
+--luminance_matrix_enable false
+--luminance_curve_enable false
+--luminance_per_channel false
 ```
 
-3x3 matrix 也必须是 residual identity：
+范围建议：
+
+```text
+log_gain clamp: [-0.30, 0.30]
+gain range: approximately [0.74, 1.35]
+
+bias clamp: [-0.05, 0.05]
+```
+
+如果 motion / defocus 的 `delta_reg` 持续变小但图像仍糊，且 luminance gain / bias 变大，说明 Luminance 在抢解释权。应降低 luminance lr 或延后 start iter。
+
+### 4.5 后续可选升级
+
+只有当 scalar exposure gain + brightness bias 稳定后，并且确认数据确实存在色偏，才允许升级到 per-channel scalar exposure gain + brightness bias。
+
+3x3 matrix 必须更晚再开，且必须是 residual identity：
 
 ```python
 M = I + matrix_delta
@@ -1110,7 +1160,7 @@ for iteration in range(1, opt.iterations + 1):
     if opt.luminance_enable and iteration >= opt.luminance_start_iter:
         image_for_loss = luminance_model(image, image_id)
         lum_reg = luminance_model.regularization_loss(
-            lambda_scale=opt.luminance_lambda_scale,
+            lambda_gain=opt.luminance_lambda_gain,
             lambda_bias=opt.luminance_lambda_bias,
         )
     else:
@@ -1240,11 +1290,12 @@ parser.add_argument("--defocus_weight", type=float, default=1.0)
 parser.add_argument("--luminance_enable", action="store_true")
 parser.add_argument("--luminance_start_iter", type=int, default=1000)
 parser.add_argument("--luminance_lr", type=float, default=1e-3)
-parser.add_argument("--luminance_lambda_scale", type=float, default=5e-3)
-parser.add_argument("--luminance_lambda_bias", type=float, default=5e-3)
+parser.add_argument("--luminance_lambda_gain", type=float, default=5e-3)
+parser.add_argument("--luminance_lambda_bias", type=float, default=1e-2)
 
-parser.add_argument("--luminance_mode", type=str, default="rgb_scale_bias",
-                    choices=["rgb_scale_bias", "matrix", "tone_curve"])
+parser.add_argument("--luminance_mode", type=str, default="exposure_gain_bias",
+                    choices=["exposure_gain_bias", "rgb_scale_bias", "matrix", "tone_curve"])
+parser.add_argument("--luminance_per_channel", action="store_true")
 parser.add_argument("--luminance_matrix_enable", action="store_true")
 parser.add_argument("--luminance_curve_enable", action="store_true")
 ```
@@ -1252,7 +1303,8 @@ parser.add_argument("--luminance_curve_enable", action="store_true")
 第一版必须保持：
 
 ```text
-luminance_mode = rgb_scale_bias
+luminance_mode = exposure_gain_bias
+luminance_per_channel = false
 luminance_matrix_enable = false
 luminance_curve_enable = false
 ```
@@ -1363,15 +1415,15 @@ train.py
 
 实现：
 
-- `PerViewLuminanceModel` 只用 RGB log scale + bias。
+- `PerImageExposureModel` 只用 scalar log_gain + scalar brightness bias。
 - loss 端调用。
-- 记录 luminance reg、scale/bias norm。
+- 记录 luminance reg、gain/bias norm。
 
 验收：
 
 - 初始化时等价 identity。
 - 关闭 Luminance 时训练结果完全不受影响。
-- 开启后 scale 范围受限。
+- 开启后 gain / bias 范围受限。
 
 ### Task 4: 改 loss 结构
 
@@ -1527,7 +1579,7 @@ assert torch.allclose(
 ### 12.5 luminance identity 测试
 
 ```python
-model = PerViewLuminanceModel(num_images=10).cuda()
+model = PerImageExposureModel(num_images=10).cuda()
 img = torch.rand(3, 64, 64, device="cuda")
 out = model(img, image_id=0)
 assert torch.allclose(out, img, atol=1e-6)
@@ -1559,7 +1611,7 @@ reg/lum=...
 z_norm=...
 delta_pos_mean=...
 delta_scale_mean=...
-lum_scale_max=...
+lum_gain_max=...
 lum_bias_abs_mean=...
 gdags/canonical_count_mean=...
 gdags/gcr_mean=...
@@ -1569,8 +1621,8 @@ gaussians/N=...
 ### 13.2 必须报警的情况
 
 ```python
-if abs(luminance.rgb_log_scale).max() > 0.20:
-    warn("Luminance scale reached clamp boundary; may be absorbing blur residual.")
+if abs(luminance.log_gain).max() > 0.30:
+    warn("Luminance gain reached clamp boundary; may be absorbing blur residual.")
 
 if render_pkg["delta_reg"].item() > opt.delta_reg_warn_threshold:
     warn("GTnet delta too large.")
@@ -1605,7 +1657,7 @@ if gaussians.gdags is not None:
 ### 14.2 Phase 2 验收
 
 - Luminance 初始化等价 identity。
-- `rgb_log_scale` 不长期顶到 clamp 边界。
+- `log_gain` 和 `bias` 不长期顶到 clamp 边界。
 - `photo_loss_raw` 与 `photo_loss_weighted` 都可见。
 - GTnet delta 没有因为 Luminance 开启而明显塌缩。
 
@@ -1631,7 +1683,7 @@ if gaussians.gdags is not None:
 ```text
 baseline original
 + mixed blur routing
-+ luminance rgb scale bias
++ luminance exposure gain bias
 + GDAGS stats only
 + GDAGS density control
 ```
@@ -1659,7 +1711,7 @@ Codex 写代码时必须遵守：
 3. GDAGS 所有 buffer 必须随 Gaussian clone / split / prune 同步。
 4. motion 原始位置渲染只能叫 `identity_moment` 或 `canonical_moment`，禁止叫 `moment0`。
 5. defocus 第一版不学 rotation；如果学 rotation，必须 normalize quaternion。
-6. Luminance 第一版只用 per-image RGB scale + bias。
+6. Luminance 第一版只用 per-image scalar exposure gain + scalar brightness bias，禁止 per-channel RGB 自由度。
 7. blur_type 权重只乘 photo loss，不乘正则项。
 8. 日志必须同时记录 `photo_loss_raw` 和 `photo_loss_weighted`。
 9. `gdags_stats_viewspace_points` 必须是显式返回字段，不能依赖 list 的 `[-1]`。
@@ -1677,7 +1729,7 @@ Codex 写代码时必须遵守：
 优先级：
 1. blur_type / image_id / mixed blur routing
 2. render 返回 identity_moment 与 gdags_stats_viewspace_points
-3. Luminance 只做 per-image RGB log_scale + bias
+3. Luminance 只做 per-image scalar log_gain + brightness bias
 4. loss 拆成 photo_loss_raw / photo_loss_weighted / reg_loss
 5. GDAGS canonical probe 用 torch.autograd.grad，禁止污染 optimizer grad
 6. GDAGS buffers 实现 on_clone / on_split / on_prune / on_external_add

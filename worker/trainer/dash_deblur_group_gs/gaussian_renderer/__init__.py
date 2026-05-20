@@ -19,7 +19,7 @@ from scene.blur_types import BLUR_SHARP, BLUR_MOTION, BLUR_DEFOCUS, normalize_bl
 
 def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier=1.0, deblur=0, use_pos=False,
            blur_type=None, image_id=None,
-           lambda_s=0.01, lambda_p=0.01, max_clamp=1.1, force_original_backend=False ):
+           lambda_s=0.01, lambda_p=0.01, max_clamp=1.1, force_original_backend=False, return_identity_moment_only=False ):
     """
     ?????
     
@@ -98,7 +98,9 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             return {"render": rendered_image,
             "viewspace_points": screenspace_points,
             "visibility_filter" : radii > 0,
-            "radii": radii}
+            "radii": radii,
+            "gdags_stats_viewspace_points": screenspace_points,
+            "gdags_stats_visibility": radii > 0}
 
         else:
             scales = pc.get_scaling 
@@ -134,6 +136,8 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
                         "viewspace_points": screenspace_points,
                         "visibility_filter" : radii > 0,
                         "radii": radii,
+                        "gdags_stats_viewspace_points": screenspace_points,
+                        "gdags_stats_visibility": radii > 0,
                         "blur_code": blur_code,
                         "delta_reg": delta_reg}
 
@@ -167,6 +171,24 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
                 viewspace_points = [screenspace_points]
                 visibility_filter = [_radii > 0]
                 radii = [_radii]
+                identity_moment = {
+                    "render": rendered_image,
+                    "viewspace_points": screenspace_points,
+                    "visibility_filter": _radii > 0,
+                    "radii": _radii,
+                }
+                if return_identity_moment_only:
+                    return {
+                        "render": rendered_image,
+                        "viewspace_points": screenspace_points,
+                        "visibility_filter": _radii > 0,
+                        "radii": _radii,
+                        "identity_moment": identity_moment,
+                        "gdags_stats_viewspace_points": screenspace_points,
+                        "gdags_stats_visibility": _radii > 0,
+                        "blur_code": blur_code,
+                        "delta_reg": torch.zeros((), device=means3D.device),
+                    }
 
                 for i in range(M):
                     screenspace_points_i = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
@@ -199,6 +221,9 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
                     "viewspace_points": viewspace_points,
                     "visibility_filter" : visibility_filter,
                     "radii": radii,
+                    "identity_moment": identity_moment,
+                    "gdags_stats_viewspace_points": screenspace_points,
+                    "gdags_stats_visibility": identity_moment["visibility_filter"],
                     "blur_code": blur_code,
                     "delta_reg": delta_reg}
 
@@ -224,7 +249,9 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
                 return {"render": rendered_image,
                         "viewspace_points": screenspace_points,
                         "visibility_filter" : radii > 0,
-                        "radii": radii}
+                        "radii": radii,
+                        "gdags_stats_viewspace_points": screenspace_points,
+                        "gdags_stats_visibility": radii > 0}
             
             elif use_pos:   # 初始化命令行参数解析器
                 pos_delta = lambda_p * pos_delta
@@ -284,6 +311,8 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
                 return {"render": render,
                     "viewspace_points": viewspace_points,
                     "visibility_filter" : visibility_filter,
-                    "radii": radii}
+                    "radii": radii,
+                    "gdags_stats_viewspace_points": viewspace_points[0],
+                    "gdags_stats_visibility": visibility_filter[0]}
 
 

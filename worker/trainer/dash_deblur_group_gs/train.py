@@ -13,7 +13,7 @@ import os
 import json
 import torch
 import time
-from random import randint
+from random import randint, choice
 from utils.loss_utils import l1_loss, ssim, l2_loss
 from gaussian_renderer import render, network_gui
 import sys
@@ -34,7 +34,9 @@ import imageio
 import numpy as np
 from metrics import compute_img_metric
 import torch.nn.functional as F
-from scene.blur_types import BLUR_SHARP, normalize_blur_type
+from scene.blur_types import BLUR_SHARP, BLUR_MOTION, BLUR_DEFOCUS, normalize_blur_type
+from scene.gdags import SOURCE_EAP, SOURCE_SFM
+from scene.luminance_model import PerImageExposureModel
 
 def auto_point_addition_iter(total_iterations: int) -> int:
     """根据总训练轮次自适应计算加点时机。
@@ -101,8 +103,80 @@ def apply_blur_labels(cameras, blur_label_path):
     return len(cameras)
 
 
+def ensure_camera_image_ids(cameras):
+    for image_id, camera in enumerate(sorted(cameras, key=lambda cam: cam.image_name)):
+        if not hasattr(camera, "image_id"):
+            camera.image_id = image_id
+        if not hasattr(camera, "blur_type"):
+            camera.blur_type = BLUR_SHARP
+    return len(cameras)
+
+
 def sharp_camera_subset(cameras):
     return [camera for camera in cameras if getattr(camera, "blur_type", BLUR_SHARP) == BLUR_SHARP]
+
+
+def compute_photo_loss(pred, gt, opt):
+    Ll1 = l1_loss(pred, gt)
+    return (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(pred, gt)), Ll1
+
+
+def blur_type_weight(blur_type, opt):
+    blur_type = normalize_blur_type(blur_type)
+    if blur_type == BLUR_SHARP:
+        return float(opt.sharp_weight)
+    if blur_type == BLUR_DEFOCUS:
+        return float(opt.defocus_weight)
+    return float(opt.motion_weight)
+
+
+def compute_regularization_loss(render_pkg, opt, luminance_model=None, luminance_active=False):
+    ref = render_pkg["render"]
+    code_reg = torch.zeros((), device=ref.device)
+    delta_reg = torch.zeros((), device=ref.device)
+    lum_reg = torch.zeros((), device=ref.device)
+    if "blur_code" in render_pkg:
+        code_reg = opt.lambda_code * (render_pkg["blur_code"] ** 2).mean()
+    if "delta_reg" in render_pkg:
+        delta_reg = opt.lambda_delta * render_pkg["delta_reg"]
+    if luminance_active and luminance_model is not None:
+        lum_reg = luminance_model.regularization_loss(
+            lambda_gain=opt.luminance_lambda_gain,
+            lambda_bias=opt.luminance_lambda_bias,
+        )
+    return code_reg, delta_reg, lum_reg, code_reg + delta_reg + lum_reg
+
+
+def run_gdags_canonical_probe(gaussians, sharp_cameras, pipe, background, opt, optimizer, luminance_optimizer=None):
+    if gaussians.gdags is None:
+        return
+    if not sharp_cameras:
+        if not getattr(gaussians, "_gdags_no_sharp_warned", False):
+            print("[GDAGS] canonical probe skipped: no sharp cameras")
+            gaussians._gdags_no_sharp_warned = True
+        return
+
+    probe_cam = choice(sharp_cameras)
+    optimizer.zero_grad(set_to_none=True)
+    if luminance_optimizer is not None:
+        luminance_optimizer.zero_grad(set_to_none=True)
+
+    probe_pkg = render(probe_cam, gaussians, pipe, background, deblur=0, force_original_backend=True)
+    proxy_loss, _ = compute_photo_loss(probe_pkg["render"], probe_cam.original_image.cuda(), opt)
+    vsp = probe_pkg["gdags_stats_viewspace_points"]
+    vis = probe_pkg["gdags_stats_visibility"]
+    grad_vsp = torch.autograd.grad(
+        outputs=proxy_loss,
+        inputs=vsp,
+        retain_graph=False,
+        create_graph=False,
+        allow_unused=True,
+    )[0]
+    gaussians.gdags.update_canonical_stats(vsp, vis, grad=grad_vsp)
+
+    optimizer.zero_grad(set_to_none=True)
+    if luminance_optimizer is not None:
+        luminance_optimizer.zero_grad(set_to_none=True)
 
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, deblur=0):
@@ -111,10 +185,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians = GaussianModel(dataset.sh_degree, deblur)
     scene = Scene(dataset, gaussians)
     bbox = gaussians._xyz.amax(0) - gaussians._xyz.amin(0)
+    all_cameras = scene.getTrainCameras() + scene.getTestCameras()
 
     per_image_blur = bool(opt.per_image_blur) and bool(opt.blur_label_path)
     if deblur and per_image_blur:
-        num_images = apply_blur_labels(scene.getTrainCameras() + scene.getTestCameras(), opt.blur_label_path)
+        num_images = apply_blur_labels(all_cameras, opt.blur_label_path)
         gaussians.create_conditional_GTnets(
             num_images=num_images,
             hidden=opt.hidden,
@@ -125,7 +200,28 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         print(f"[BlurCode] code_dim={opt.blur_code_dim} images={num_images}")
     else:
         per_image_blur = False
+        num_images = ensure_camera_image_ids(all_cameras)
         gaussians.create_GTnet(hidden=opt.hidden, width=opt.width, pos_delta=opt.use_pos, num_moments=opt.num_moments)
+
+    if bool(opt.luminance_enable):
+        if (
+            opt.luminance_mode != "exposure_gain_bias"
+            or bool(opt.luminance_per_channel)
+            or bool(opt.luminance_matrix_enable)
+            or bool(opt.luminance_curve_enable)
+        ):
+            raise RuntimeError("First luminance implementation only supports scalar exposure_gain_bias")
+        luminance_model = PerImageExposureModel(num_images).cuda()
+        luminance_optimizer = torch.optim.Adam(luminance_model.parameters(), lr=opt.luminance_lr, eps=1e-15)
+        print(f"[Luminance] exposure_gain_bias images={num_images} start_iter={opt.luminance_start_iter}")
+    else:
+        luminance_model = None
+        luminance_optimizer = None
+
+    if bool(opt.gdags_stats_enable) or bool(opt.gdags_enable):
+        source_type = SOURCE_EAP if getattr(dataset, "pc_name", "points3D") == "points3D_eap" else SOURCE_SFM
+        gaussians.create_gdags(source_type=source_type)
+        print(f"[GDAGS] stats_enable={bool(opt.gdags_stats_enable)} enable={bool(opt.gdags_enable)}")
     
     gaussians.training_setup(opt)
     if checkpoint:
@@ -133,6 +229,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if first_iter == opt.iterations:
             first_iter -= 1
         gaussians.restore(model_params, opt)
+        if bool(opt.gdags_stats_enable) or bool(opt.gdags_enable):
+            source_type = SOURCE_EAP if getattr(dataset, "pc_name", "points3D") == "points3D_eap" else SOURCE_SFM
+            gaussians.create_gdags(source_type=source_type)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -203,11 +302,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if (iteration - 1) == debug_from:
             pipe.debug = True
 
+        warmup_active = (
+            bool(opt.pre_deblur_warmup_enable)
+            and int(opt.pre_deblur_warmup_iters) > 0
+            and iteration <= int(opt.pre_deblur_warmup_iters)
+        )
         render_kwargs = {}
-        if per_image_blur:
+        if per_image_blur and not warmup_active:
             render_kwargs["blur_type"] = viewpoint_cam.blur_type
             render_kwargs["image_id"] = viewpoint_cam.image_id
-        render_pkg = render(viewpoint_cam, gaussians, pipe, background, deblur=deblur, use_pos=opt.use_pos,
+        render_pkg = render(viewpoint_cam, gaussians, pipe, background, deblur=0 if warmup_active else deblur, use_pos=opt.use_pos,
                             lambda_s=opt.lambda_s, lambda_p=opt.lambda_p, max_clamp=opt.max_clamp,
                             force_original_backend=(iteration < opt.densify_until_iter),
                             **render_kwargs)
@@ -215,18 +319,38 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         denom = 1 / len(visibility_filter) if type(radii) == list else 1.0
         # 初始化输出目录
         gt_image = viewpoint_cam.original_image.cuda()
-        Ll1 = l1_loss(image, gt_image)
-        photo_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
-        if per_image_blur:
-            loss = opt.sharp_weight * photo_loss if viewpoint_cam.blur_type == BLUR_SHARP else photo_loss
-            if "blur_code" in render_pkg:
-                loss = loss + opt.lambda_code * (render_pkg["blur_code"] ** 2).mean()
-            if "delta_reg" in render_pkg:
-                loss = loss + opt.lambda_delta * render_pkg["delta_reg"]
-        else:
-            loss = photo_loss
+        image_for_loss = image
+        luminance_active = (
+            not warmup_active
+            and
+            luminance_model is not None
+            and iteration >= int(opt.luminance_start_iter)
+            and hasattr(viewpoint_cam, "image_id")
+        )
+        if luminance_active:
+            image_for_loss = luminance_model(image, viewpoint_cam.image_id)
+
+        photo_loss_raw, Ll1 = compute_photo_loss(image_for_loss, gt_image, opt)
+        current_blur_type = BLUR_SHARP if warmup_active else getattr(viewpoint_cam, "blur_type", BLUR_SHARP)
+        weight = blur_type_weight(current_blur_type, opt) if per_image_blur and not warmup_active else 1.0
+        photo_loss_weighted = weight * photo_loss_raw
+        code_reg, delta_reg, lum_reg, reg_loss = compute_regularization_loss(
+            render_pkg,
+            opt,
+            luminance_model=luminance_model,
+            luminance_active=luminance_active,
+        )
+        loss = photo_loss_weighted + reg_loss
         loss.backward()
         iter_end.record()
+
+        if gaussians.gdags is not None and bool(opt.gdags_stats_enable):
+            gdags_points = render_pkg.get("gdags_stats_viewspace_points", viewspace_point_tensor)
+            gdags_visibility = render_pkg.get("gdags_stats_visibility", visibility_filter)
+            if warmup_active:
+                gaussians.gdags.update_canonical_stats(gdags_points, gdags_visibility)
+            else:
+                gaussians.gdags.update_blur_stats(gdags_points, gdags_visibility, current_blur_type)
 
         with torch.no_grad():
             # 全部完成
@@ -234,8 +358,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration % 100 == 0:
                 Ll2 = l2_loss(image, gt_image)
                 psnr = (-10.0 * np.log(Ll2.cpu()) / np.log(10.0)).item()
-                progress_bar.set_postfix({"PSNR": f"{psnr:.{2}f}"})
+                progress_bar.set_postfix({"PSNR": f"{psnr:.{2}f}", "raw": f"{photo_loss_raw.item():.4f}", "reg": f"{reg_loss.item():.4f}"})
                 progress_bar.update(100)
+                print(
+                    f"\n[Loss] iter={iteration} warmup={int(warmup_active)} blur_type={int(current_blur_type)} "
+                    f"weight={weight:.3f} photo_raw={photo_loss_raw.item():.6f} "
+                    f"photo_weighted={photo_loss_weighted.item():.6f} reg={reg_loss.item():.6f} "
+                    f"code={code_reg.item():.6f} delta={delta_reg.item():.6f} lum={lum_reg.item():.6f}"
+                )
             if iteration == opt.iterations:
                 progress_bar.close()
 
@@ -273,9 +403,30 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter, denom)
 
-                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                if (
+                    warmup_active
+                    and bool(opt.pre_deblur_warmup_densify)
+                    and iteration >= int(opt.pre_deblur_warmup_densify_from_iter)
+                    and iteration % opt.densification_interval == 0
+                ):
+                    gaussians.densify_warmup_clone_split(
+                        opt.densify_grad_threshold,
+                        scene.cameras_extent,
+                        current_iter=iteration,
+                        gdags_protect_iters=opt.gdags_newborn_protect_iters,
+                    )
+                elif (not warmup_active) and iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = None
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, opt.densify_prune_threshold, scene.cameras_extent, size_threshold, opt.densify_with_depth, opt.prune_range)
+                    gaussians.densify_and_prune(
+                        opt.densify_grad_threshold,
+                        opt.densify_prune_threshold,
+                        scene.cameras_extent,
+                        size_threshold,
+                        opt.densify_with_depth,
+                        opt.prune_range,
+                        current_iter=iteration,
+                        gdags_protect_iters=opt.gdags_newborn_protect_iters,
+                    )
 
                 # 全部完成
                 if random_point_addition_enabled(opt) and iteration == opt.pts_iter:
@@ -293,7 +444,32 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # 非商业、研究和评估用途。
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
+                if luminance_optimizer is not None and luminance_active:
+                    luminance_optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
+                if luminance_optimizer is not None:
+                    luminance_optimizer.zero_grad(set_to_none=True)
+
+                if (
+                    gaussians.gdags is not None
+                    and bool(opt.gdags_stats_enable)
+                    and iteration >= int(opt.gdags_start_iter)
+                    and int(opt.gdags_probe_interval) > 0
+                    and iteration % int(opt.gdags_probe_interval) == 0
+                ):
+                    with torch.enable_grad():
+                        run_gdags_canonical_probe(
+                            gaussians,
+                            sharp_camera_subset(scene.getTrainCameras()),
+                            pipe,
+                            background,
+                            opt,
+                            gaussians.optimizer,
+                            luminance_optimizer=luminance_optimizer,
+                        )
+                if gaussians.gdags is not None:
+                    gaussians.gdags.step_age()
+                    gaussians.gdags.assert_shape(gaussians.get_xyz.shape[0])
 
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
@@ -465,10 +641,10 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[10_000, 20_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[20_000])
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[3_000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[3_000])
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[20_000])
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[3_000])
     parser.add_argument("--start_checkpoint", type=str, default = None)
     parser.add_argument('--deblur', type=int, default=1)
     args = parser.parse_args(sys.argv[1:])
