@@ -1,5 +1,7 @@
 import argparse
 import csv
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import cv2
@@ -11,6 +13,21 @@ IMAGE_EXTS = {
     ".jpg", ".jpeg", ".png", ".bmp",
     ".tif", ".tiff", ".webp"
 }
+
+BLUR_EFFECT_BLURRY_THRESHOLD = 0.33
+BLUR_EFFECT_SHARP_THRESHOLD = 0.22
+
+
+def resolve_worker_count(workers=None, image_count=0):
+    if workers is not None:
+        workers = int(workers)
+        if workers > 0:
+            return workers
+
+    cpu_count = os.cpu_count() or 1
+    if image_count <= 1:
+        return 1
+    return max(1, min(8, cpu_count, image_count))
 
 
 def read_gray_image(path, max_size=1600):
@@ -39,6 +56,28 @@ def read_gray_image(path, max_size=1600):
         img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
     return img
+
+
+def calc_blur_effect_from_gray(gray, h_size=11):
+    from skimage import measure
+
+    gray_f = gray.astype(np.float32)
+    max_value = float(np.max(gray_f)) if gray_f.size else 0.0
+    if max_value > 1.0:
+        gray_f = gray_f / 255.0
+
+    score = measure.blur_effect(gray_f, h_size=h_size)
+    return float(score)
+
+
+def classify_blur_effect(score):
+    if is_missing(score):
+        return "uncertain"
+    if score >= BLUR_EFFECT_BLURRY_THRESHOLD:
+        return "blurry"
+    if score <= BLUR_EFFECT_SHARP_THRESHOLD:
+        return "sharp"
+    return "uncertain"
 
 
 def estimate_noise(gray):
@@ -310,8 +349,38 @@ def normalize_detected_blur_type(row):
     return "motion"
 
 
+def apply_blur_effect_motion_policy_rows(rows):
+    for row in rows:
+        row["original_label"] = row.get("label")
+        row["original_blur_type"] = row.get("blur_type")
+
+        blur_type = str(row.get("blur_type") or "").strip().lower()
+        if blur_type in {"defocus", "defocus_blur"}:
+            row["label"] = "blurry"
+            row["blur_type"] = "defocus_blur"
+            row["blur_policy"] = "preserve_defocus"
+            continue
+
+        blur_effect_label = classify_blur_effect(row.get("blur_effect"))
+        row["blur_effect_label"] = blur_effect_label
+
+        if blur_effect_label == "blurry":
+            row["label"] = "blurry"
+            row["blur_type"] = "motion_blur"
+            row["blur_policy"] = "blur_effect_motion"
+        else:
+            row["label"] = "sharp"
+            row["blur_type"] = "none"
+            row["blur_policy"] = "blur_effect_clear"
+
+    return rows
+
+
 def analyze_image(path):
     gray = read_gray_image(path)
+
+    blur_effect = calc_blur_effect_from_gray(gray, h_size=11)
+    blur_effect_label = classify_blur_effect(blur_effect)
 
     noise = estimate_noise(gray)
     directionality = directionality_score(gray)
@@ -342,6 +411,8 @@ def analyze_image(path):
             "edge_count": edge_count,
             "noise": noise,
             "raw_score": np.nan,
+            "blur_effect": blur_effect,
+            "blur_effect_label": blur_effect_label,
         }
 
     lap_scores, ten_scores = patch_data
@@ -384,6 +455,8 @@ def analyze_image(path):
         "edge_count": edge_count,
         "noise": float(noise),
         "raw_score": float(raw_score),
+        "blur_effect": blur_effect,
+        "blur_effect_label": blur_effect_label,
     }
 
 
@@ -409,7 +482,7 @@ def classify_result_rows(
             row["blur_type"] = "uncertain"
             row["blur_weight"] = 0.5
             row["blurry_patch_ratio"] = np.nan
-        return rows
+        return apply_blur_effect_motion_policy_rows(rows)
 
     score_min = float(np.min(scores))
     score_max = float(np.max(scores))
@@ -534,6 +607,8 @@ def classify_result_rows(
             row["label"] = "sharp"
             row["blur_type"] = "none"
 
+    rows = apply_blur_effect_motion_policy_rows(rows)
+
     for row in rows:
         row["score_min"] = score_min
         row["score_max"] = score_max
@@ -561,6 +636,38 @@ def enforce_motion_blur_by_weight_rows(rows):
     return rows
 
 
+def analyze_image_path(path):
+    p = Path(path)
+    try:
+        return analyze_image(p)
+    except Exception as e:
+        if isinstance(e, ModuleNotFoundError) and e.name == "skimage":
+            raise
+        return {
+            "path": str(p),
+            "filename": p.name,
+            "valid_patch_count": 0,
+            "lap_scores_list": [],
+            "lap_p10": np.nan,
+            "lap_p20": np.nan,
+            "lap_median": np.nan,
+            "lap_p80": np.nan,
+            "tenengrad_p20": np.nan,
+            "tenengrad_median": np.nan,
+            "directionality": np.nan,
+            "fft_high_ratio": np.nan,
+            "fft_power_high_ratio": np.nan,
+            "edge_width_median": np.nan,
+            "edge_width_p75": np.nan,
+            "edge_count": 0,
+            "noise": np.nan,
+            "raw_score": np.nan,
+            "blur_effect": np.nan,
+            "blur_effect_label": "uncertain",
+            "error": str(e),
+        }
+
+
 def analyze_image_paths(
     image_paths,
     motion_directionality_threshold=1.35,
@@ -569,34 +676,29 @@ def analyze_image_paths(
     blurry_patch_ratio_threshold=0.34,
     edge_width_absolute_threshold=10.0,
     motion_blur_weight_threshold=0.30,
+    workers=None,
+    progress=False,
 ):
-    rows = []
-    for path in image_paths:
-        p = Path(path)
-        try:
-            rows.append(analyze_image(p))
-        except Exception as e:
-            rows.append({
-                "path": str(p),
-                "filename": p.name,
-                "valid_patch_count": 0,
-                "lap_scores_list": [],
-                "lap_p10": np.nan,
-                "lap_p20": np.nan,
-                "lap_median": np.nan,
-                "lap_p80": np.nan,
-                "tenengrad_p20": np.nan,
-                "tenengrad_median": np.nan,
-                "directionality": np.nan,
-                "fft_high_ratio": np.nan,
-                "fft_power_high_ratio": np.nan,
-                "edge_width_median": np.nan,
-                "edge_width_p75": np.nan,
-                "edge_count": 0,
-                "noise": np.nan,
-                "raw_score": np.nan,
-                "error": str(e),
-            })
+    image_paths = [Path(path) for path in image_paths]
+    worker_count = resolve_worker_count(workers, len(image_paths))
+
+    if worker_count <= 1:
+        iterator = image_paths
+        if progress:
+            iterator = tqdm(iterator, desc="Analyzing images")
+        rows = [analyze_image_path(path) for path in iterator]
+    else:
+        rows = [None] * len(image_paths)
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {
+                executor.submit(analyze_image_path, path): index
+                for index, path in enumerate(image_paths)
+            }
+            completed = as_completed(futures)
+            if progress:
+                completed = tqdm(completed, total=len(futures), desc=f"Analyzing images ({worker_count} workers)")
+            for future in completed:
+                rows[futures[future]] = future.result()
 
     rows = classify_result_rows(
         rows,
@@ -607,7 +709,6 @@ def analyze_image_paths(
         edge_width_absolute_threshold=edge_width_absolute_threshold,
         motion_blur_weight_threshold=motion_blur_weight_threshold,
     )
-    rows = enforce_motion_blur_by_weight_rows(rows)
     for row in rows:
         row["normalized_blur_type"] = normalize_detected_blur_type(row)
     return rows
@@ -664,6 +765,11 @@ def classify_results(
         "score_max",
         "patch_blur_threshold",
         "median_edge_width",
+        "blur_effect",
+        "blur_effect_label",
+        "original_label",
+        "original_blur_type",
+        "blur_policy",
     ):
         df[key] = [row.get(key, np.nan) for row in rows]
     return df
@@ -1010,6 +1116,13 @@ def main():
         help="Absolute edge spread width threshold. Default: 10.0",
     )
 
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="Parallel image analysis workers. Use 0 for auto, 1 for serial. Default: 0",
+    )
+
     args = parser.parse_args()
 
     image_dir = Path(args.image_dir)
@@ -1026,13 +1139,15 @@ def main():
         raise RuntimeError(f"No images found in: {image_dir}")
 
     rows = analyze_image_paths(
-        tqdm(image_paths, desc="Analyzing images"),
+        image_paths,
         motion_directionality_threshold=args.motion_threshold,
         motion_soft_directionality_threshold=args.motion_soft_threshold,
         blurry_patch_percentile=args.patch_blur_percentile,
         blurry_patch_ratio_threshold=args.patch_ratio_threshold,
         edge_width_absolute_threshold=args.edge_width_threshold,
         motion_blur_weight_threshold=args.motion_blur_weight_threshold,
+        workers=args.workers,
+        progress=True,
     )
 
     rows = sorted(
@@ -1049,6 +1164,9 @@ def main():
         "label",
         "blur_type",
         "blur_weight",
+        "blur_effect",
+        "blur_effect_label",
+        "original_blur_type",
         "blurry_patch_ratio",
         "raw_score",
         "lap_p20",
