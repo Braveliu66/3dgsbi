@@ -10,7 +10,10 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.fine.colmap_cli import (  # noqa: E402
+    ColmapCapabilities,
+    _build_mapper_command,
     _colmap_option_family_compat_command,
+    _resolve_matcher_command,
     _run_colmap_with_gpu_fallback,
     detect_colmap_capabilities,
     write_filtered_sparse_points_ply,
@@ -25,8 +28,11 @@ Usage:
 Available commands:
     feature_extractor
     exhaustive_matcher
+    sequential_matcher
     mapper
+    global_mapper
     image_undistorter
+    point_triangulator
 """
 
 
@@ -41,10 +47,12 @@ class ColmapCliPolicyTests(unittest.TestCase):
         self.assertIn("feature_extractor", capabilities.commands)
         self.assertIn("exhaustive_matcher", capabilities.commands)
         self.assertIn("mapper", capabilities.commands)
+        self.assertIn("global_mapper", capabilities.commands)
         self.assertIn("image_undistorter", capabilities.commands)
+        self.assertIn("point_triangulator", capabilities.commands)
 
     def test_colmap_help_detection_handles_unindented_commands(self) -> None:
-        help_text = "Available commands: feature_extractor exhaustive_matcher mapper image_undistorter"
+        help_text = "Available commands: feature_extractor exhaustive_matcher mapper image_undistorter point_triangulator"
         with patch("app.fine.colmap_cli.shutil.which", return_value="/usr/bin/colmap"), patch(
             "app.fine.colmap_cli.subprocess.run",
             return_value=SimpleNamespace(returncode=0, stdout=help_text),
@@ -52,6 +60,46 @@ class ColmapCliPolicyTests(unittest.TestCase):
             capabilities = detect_colmap_capabilities()
 
         self.assertIn("exhaustive_matcher", capabilities.commands)
+
+    def test_auto_matcher_uses_sequential_for_large_sets(self) -> None:
+        self.assertEqual(_resolve_matcher_command("auto", 80), "exhaustive_matcher")
+        self.assertEqual(_resolve_matcher_command("auto", 81), "sequential_matcher")
+
+    def test_global_mapper_command_uses_global_mapper(self) -> None:
+        capabilities = ColmapCapabilities(
+            executable="colmap",
+            help_text="",
+            commands={"global_mapper"},
+        )
+
+        command = _build_mapper_command(
+            capabilities,
+            "global_mapper",
+            Path("database.db"),
+            Path("images"),
+            Path("sparse"),
+            use_gpu=True,
+        )
+
+        self.assertEqual(command[1], "global_mapper")
+
+    def test_incremental_mapper_command_still_uses_mapper(self) -> None:
+        capabilities = ColmapCapabilities(
+            executable="colmap",
+            help_text="",
+            commands={"mapper"},
+        )
+
+        command = _build_mapper_command(
+            capabilities,
+            "mapper",
+            Path("database.db"),
+            Path("images"),
+            Path("sparse"),
+            use_gpu=True,
+        )
+
+        self.assertEqual(command[1], "mapper")
 
     def test_sift_extraction_gpu_option_retries_with_generic_colmap_option(self) -> None:
         command = [

@@ -19,7 +19,7 @@ from scene.blur_types import BLUR_SHARP, BLUR_MOTION, BLUR_DEFOCUS, normalize_bl
 
 def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier=1.0, deblur=0, use_pos=False,
            blur_type=None, image_id=None,
-           lambda_s=0.01, lambda_p=0.01, max_clamp=1.1 ):
+           lambda_s=0.01, lambda_p=0.01, max_clamp=1.1, force_original_backend=False ):
     """
     ?????
     
@@ -70,21 +70,30 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         cov3D_precomp = pc.get_covariance(scaling_modifier)
     else: 
         if not deblur or blur_type == BLUR_SHARP:  # 初始化命令行参数解析器
-            scales = pc.get_scaling 
+            scales = pc.get_scaling
             rotations = pc.get_rotation 
 
             shs = None
             colors_precomp = None
             shs = pc.get_features
-            rendered_image, radii = rasterizer(
-                means3D = means3D,
-                means2D = means2D,
-                shs = shs,
-                colors_precomp = colors_precomp,
-                opacities = opacity,
-                scales = scales,
-                rotations = rotations,
-                cov3D_precomp = cov3D_precomp)
+            if not force_original_backend and getattr(pipe, "renderer_backend", "original") == "gsplat":
+                from gaussian_renderer.backends.gsplat_backend import gsplat_rasterize
+                rendered_image, radii, screenspace_points = gsplat_rasterize(
+                    viewpoint_camera,
+                    pc,
+                    bg_color,
+                    scaling_modifier=scaling_modifier,
+                )
+            else:
+                rendered_image, radii = rasterizer(
+                    means3D = means3D,
+                    means2D = means2D,
+                    shs = shs,
+                    colors_precomp = colors_precomp,
+                    opacities = opacity,
+                    scales = scales,
+                    rotations = rotations,
+                    cov3D_precomp = cov3D_precomp)
             
             return {"render": rendered_image,
             "viewspace_points": screenspace_points,

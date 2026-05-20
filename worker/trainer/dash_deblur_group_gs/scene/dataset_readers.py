@@ -153,7 +153,7 @@ def storePly(path, xyz, rgb):
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
 
-def readColmapSceneInfo(path, images, eval, llffhold=8):
+def readColmapSceneInfo(path, images, eval, llffhold=8, pc_name="points3D"):
     try:
         cameras_extrinsic_file = os.path.join(path, f"sparse/0", "images.bin")
         cameras_intrinsic_file = os.path.join(path, f"sparse/0", "cameras.bin")
@@ -180,12 +180,15 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
     
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
-    ply_path = os.path.join(path, f"sparse/0/points3D.ply")
-    bin_path = os.path.join(path, f"sparse/0/points3D.bin")
-    txt_path = os.path.join(path, f"sparse/0/points3D.txt")
+    pointcloud_name = os.path.basename(str(pc_name or "points3D"))
+    ply_path = os.path.join(path, f"sparse/0/{pointcloud_name}.ply")
+    bin_path = os.path.join(path, f"sparse/0/{pointcloud_name}.bin")
+    txt_path = os.path.join(path, f"sparse/0/{pointcloud_name}.txt")
     
     if not os.path.exists(ply_path):
-        print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
+        print(f"Converting {pointcloud_name}.bin to .ply, will happen only the first time you open the scene.")
+        if not os.path.exists(bin_path) and not os.path.exists(txt_path):
+            raise FileNotFoundError(f"COLMAP point cloud not found for pc_name={pointcloud_name}: {bin_path} or {txt_path}")
         try:
             xyz, rgb, _ = read_points3D_binary(bin_path)
         except:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -40,6 +41,26 @@ class DashDeblurGroupDatasetReaderTests(unittest.TestCase):
         self.assertEqual(len(cameras), 1)
         self.assertEqual(cameras[0].uid, 11)
         self.assertEqual(cameras[0].image_name, "000010")
+
+    def test_read_colmap_scene_info_selects_named_pointcloud(self) -> None:
+        dataset_readers = load_dataset_readers_with_stubs()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sparse_dir = root / "sparse" / "0"
+            sparse_dir.mkdir(parents=True)
+            (sparse_dir / "points3D_eap.ply").write_text("ply\n", encoding="ascii")
+
+            dataset_readers.read_extrinsics_binary = lambda path: {}
+            dataset_readers.read_intrinsics_binary = lambda path: {}
+            dataset_readers.readColmapCameras = lambda cam_extrinsics, cam_intrinsics, images_folder: [SimpleNamespace(image_name="000010")]
+            dataset_readers.getNerfppNorm = lambda cameras: {"radius": 1.0}
+            dataset_readers.fetchPly = lambda path: SimpleNamespace(path=path)
+
+            scene_info = dataset_readers.readColmapSceneInfo(str(root), None, False, pc_name="../points3D_eap")
+
+        self.assertTrue(scene_info.ply_path.replace("\\", "/").endswith("sparse/0/points3D_eap.ply"))
+        self.assertEqual(scene_info.point_cloud.path, scene_info.ply_path)
 
 
 def load_dataset_readers_with_stubs():

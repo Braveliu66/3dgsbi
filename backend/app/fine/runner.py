@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import get_settings, resolve_local_path
-from app.fine.colmap_cli import build_colmap_cli_scene
+from app.fine.colmap_cli import build_colmap_cli_scene, build_colmap_global_scene
 from app.fine.colmap_defaults import (
     COLMAP_GUIDED_MATCHING,
     COLMAP_MATCHER,
@@ -29,6 +29,7 @@ from app.fine.colmap_defaults import (
     LEGACY_FINE_PIPELINE_ALIASES,
 )
 from app.fine.dash_deblur_group import resolve_runtime_paths, run_dash_deblur_group_training
+from app.fine.eap import run_eap_augmentation
 from app.fine.option_utils import read_float, read_int
 from app.fine.preprocess import build_pycolmap_scene, prepare_fine_images
 from app.fine.types import FineContext, FineFailure, FineResult
@@ -130,6 +131,40 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         min_registered_ratio=min_registered_ratio,
     )
     scene_result.metrics.update(colmap_feature_metrics)
+    if read_bool(ctx.options.get("fine_eap_enabled"), True):
+        ctx_progress(ctx, "fine_eap_start", 41, "running EAP pointcloud augmentation")
+        eap_result = run_eap_augmentation(
+            scene_result.scene_dir,
+            ctx.options,
+            prefer_gpu=read_bool(ctx.options.get("prefer_gpu"), True),
+            gpu_index=str(ctx.options.get("fine_colmap_gpu_index") or "").strip() or None,
+            progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
+        )
+        scene_result.point_count = eap_result.eap_points
+        scene_result.metrics.update(eap_result.metrics())
+        print(
+            "[fine-runner] EAP pointcloud summary "
+            f"original_points={eap_result.original_points} eap_points={eap_result.eap_points} "
+            f"multiplier={eap_result.multiplier} aug_images={eap_result.aug_images} "
+            f"points_bin={eap_result.points_bin}",
+            flush=True,
+        )
+        ctx_progress(
+            ctx,
+            "fine_eap_ready",
+            42,
+            f"EAP pointcloud ready: {eap_result.original_points} -> {eap_result.eap_points} points "
+            f"({eap_result.multiplier}x, {eap_result.aug_images} augmented images)",
+        )
+    else:
+        scene_result.metrics.update(
+            {
+                "fine_eap_enabled": False,
+                "fine_eap_original_points": None,
+                "fine_eap_points": None,
+                "fine_eap_multiplier": None,
+            }
+        )
     remap_blur_registry_to_scene_images(quality, train_input_dir, scene_result.scene_dir)
     print(
         "[fine-runner] scene build complete "
@@ -229,11 +264,29 @@ def build_scene(
     min_sparse_points: int = COLMAP_MIN_SPARSE_POINTS,
     min_registered_ratio: float | None = None,
 ):
-    sfm_backend = str(ctx.options.get("fine_sfm_backend") or "colmap_cli").strip().lower()
-    if sfm_backend not in {"pycolmap", "colmap", "colmap_cli"}:
+    sfm_backend = normalize_fine_sfm_backend(ctx.options.get("fine_sfm_backend"))
+    if sfm_backend not in {"pycolmap", "colmap", "colmap_cli", "colmap_global"}:
         raise FineFailure("UNSUPPORTED_FINE_SFM_BACKEND", f"Unsupported fine SfM backend: {sfm_backend}")
     if sfm_backend in {"colmap", "colmap_cli"}:
         result = build_colmap_cli_scene(
+            input_dir,
+            scene_dir,
+            scene_type=str(ctx.options.get("fine_scene_type") or ctx.options.get("scene_type") or "indoor"),
+            input_type=str(ctx.options.get("input_type") or ("video" if getattr(ctx, "input_video", None) else "images")),
+            quality_mode=str(ctx.options.get("quality_mode") or "auto"),
+            capture_order=str(ctx.options.get("fine_capture_order") or "auto"),
+            matcher_policy=matcher,
+            prefer_gpu=read_bool(ctx.options.get("prefer_gpu"), True),
+            gpu_index=str(ctx.options.get("fine_colmap_gpu_index") or "").strip() or None,
+            min_registered_ratio=min_registered_ratio,
+            max_num_features=colmap_features,
+            max_image_size=colmap_max_size,
+            max_num_matches=colmap_max_matches,
+            sequential_overlap=colmap_sequential_overlap,
+            progress=lambda stage, progress, message: ctx_progress(ctx, stage, progress, message),
+        )
+    elif sfm_backend == "colmap_global":
+        result = build_colmap_global_scene(
             input_dir,
             scene_dir,
             scene_type=str(ctx.options.get("fine_scene_type") or ctx.options.get("scene_type") or "indoor"),
@@ -282,6 +335,13 @@ def normalize_fine_pipeline(value: str | None) -> str:
     normalized = (value or PIPELINE_NAME).strip().lower()
     if normalized in LEGACY_FINE_PIPELINE_ALIASES:
         return PIPELINE_NAME
+    return normalized
+
+
+def normalize_fine_sfm_backend(value: Any) -> str:
+    normalized = str(value or "colmap_global").strip().lower()
+    if normalized in {"gcolmap", "global", "global_mapper", "colmap_glomap"}:
+        return "colmap_global"
     return normalized
 
 

@@ -146,7 +146,7 @@ viewer          Spark 2.0
 - Fine reconstruction accepts ordinary JPG/PNG uploads. EXIF camera parameters are not required; EXIF is used only for orientation correction.
 - Preview LiteVGGT remains isolated under the preview vendor path. Fine SfM metrics include `sfm_backend=colmap_cli` or `pycolmap`, registered image count, and sparse point count.
 - The active fine pipeline is `dash_deblur_group_gs`: existing COLMAP scene construction feeds the embedded DashDeblurGroupGS trainer.
-- Deblurring-3DGS GTnet, motion/defocus blur, densification, and `add_points()` live under `worker/trainer/dash_deblur_group_gs`; backend code defaults to motion deblur for all training images, generates scene-specific motion/defocus presets, runs `train.py`, validates `final.ply`, and converts `final_web.spz`.
+- Deblurring-3DGS GTnet, motion/defocus blur, densification, and the disabled-by-default `add_points()` path live under `worker/trainer/dash_deblur_group_gs`; backend code defaults to motion deblur for all training images, generates scene-specific motion/defocus presets, runs `train.py`, validates `final.ply`, and converts `final_web.spz`.
 - The backend does not vendor Speedy-Splat, FastGS pruning, duplicate rasterizers, or `fused_ssim`.
 - Where earlier planning notes say "FastGS chunk training", this platform now means DashDeblurGroupGS chunk-compatible training on one global COLMAP `sparse/0` coordinate system.
 - Worker Docker builds upstream COLMAP with large-scene commands (`global_mapper`, `hierarchical_mapper`, `model_clusterer`, `model_splitter`) so large-scene behavior is an image guarantee, not a runtime surprise.

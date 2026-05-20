@@ -15,9 +15,12 @@ from app.fine.dash_deblur_group import (  # noqa: E402
     build_blur_labels,
     build_training_command,
     build_training_config,
+    config_uses_gsplat,
     detect_trainer_flavor,
+    gsplat_kernels_are_precompiled,
     locate_final_ply,
     parse_iteration,
+    prewarm_gsplat_kernels,
     resolve_runtime_paths,
     resolve_effective_deblur_mode,
     run_dash_deblur_group_training,
@@ -43,12 +46,64 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         self.assertEqual(config["use_pos"], 0)
         self.assertEqual(config["densify_with_depth"], 1)
         self.assertEqual(config["lambda_p"], 0.01)
-        self.assertEqual(config["densify_until_iter"], 15000)
+        self.assertEqual(config["densify_until_iter"], 740)
         self.assertEqual(config["densification_interval"], 100)
         self.assertEqual(config["densify_grad_threshold"], 0.0002)
-        self.assertEqual(config["pts_iter"], 2500)
-        self.assertEqual(config["pts_rate"], 1.1)
-        self.assertEqual(config["pts_N_pts"], 200000)
+        self.assertEqual(config["pts_iter"], 999999)
+        self.assertEqual(config["pts_rate"], 0.0)
+        self.assertEqual(config["pts_N_pts"], 0)
+        self.assertEqual(config["pc_name"], "points3D_eap")
+        self.assertEqual(config["renderer_backend"], "original")
+        self.assertEqual(config["renderer_backend_deblur"], "original")
+
+    def test_eap_switch_selects_enhanced_initial_pointcloud(self) -> None:
+        self.assertEqual(build_training_config({})["pc_name"], "points3D_eap")
+        self.assertEqual(build_training_config({"fine_eap_enabled": False})["pc_name"], "points3D")
+        self.assertEqual(build_training_config({"fine_eap_enabled": True})["pc_name"], "points3D_eap")
+
+    def test_gsplat_switch_only_changes_sharp_renderer_backend(self) -> None:
+        config = build_training_config({"fine_gsplat_enabled": True})
+
+        self.assertEqual(config["renderer_backend"], "gsplat")
+        self.assertEqual(config["renderer_backend_deblur"], "original")
+        self.assertTrue(config_uses_gsplat(config))
+
+    def test_gsplat_prewarm_runs_tiny_cuda_rasterization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = DashDeblurGroupPaths(repo_dir=root, train_py=root / "train.py", python="python")
+            events: list[tuple[str, int, str]] = []
+
+            with patch("app.fine.dash_deblur_group.subprocess.run") as run:
+                run.return_value = SimpleNamespace(returncode=0, stdout="gsplat CUDA kernels ready\n")
+                prewarm_gsplat_kernels(paths, progress=lambda stage, value, message: events.append((stage, value, message)))
+
+        run.assert_called_once()
+        command = run.call_args.args[0]
+        self.assertEqual(command[:3], ["python", "-u", "-c"])
+        self.assertIn("from gsplat import rasterization", command[3])
+        self.assertIn("torch.cuda.synchronize()", command[3])
+        self.assertIn(("fine_training_preflight", 42, "precompiling gsplat CUDA kernels"), events)
+        self.assertIn(("fine_training_preflight", 42, "gsplat kernels ready"), events)
+
+    def test_gsplat_prewarm_skips_when_baked_extensions_are_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            extension_dir = Path(tmp) / "torch_extensions"
+            extension_dir.mkdir()
+            marker = extension_dir / ".gsplat_precompiled"
+            marker.write_text("ready\n", encoding="utf-8")
+            paths = DashDeblurGroupPaths(repo_dir=Path(tmp), train_py=Path(tmp) / "train.py", python="python")
+            events: list[tuple[str, int, str]] = []
+
+            with (
+                patch.dict("os.environ", {"TORCH_EXTENSIONS_DIR": str(extension_dir), "GSPLAT_PRECOMPILED_MARKER": str(marker)}),
+                patch("app.fine.dash_deblur_group.subprocess.run") as run,
+            ):
+                self.assertTrue(gsplat_kernels_are_precompiled())
+                prewarm_gsplat_kernels(paths, progress=lambda stage, value, message: events.append((stage, value, message)))
+
+        run.assert_not_called()
+        self.assertEqual(events, [("fine_training_preflight", 42, "gsplat kernels ready")])
 
     def test_legacy_mix_maps_to_motion_even_with_defocus_analysis(self) -> None:
         blur = SimpleNamespace(
@@ -268,10 +323,13 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         self.assertIn("densify_with_depth = 1", text)
         self.assertIn("densify_grad_threshold = 0.0005", text)
         self.assertIn("densify_prune_threshold = 0.01", text)
-        self.assertIn("pts_N_pts = 200000", text)
-        self.assertIn("pts_iter = 2500", text)
-        self.assertIn("pts_rate = 1.1", text)
+        self.assertIn("pts_N_pts = 0", text)
+        self.assertIn("pts_iter = 999999", text)
+        self.assertIn("pts_rate = 0.0", text)
         self.assertIn("blur_code_dim = 16", text)
+        self.assertIn("pc_name = points3D_eap", text)
+        self.assertIn("renderer_backend = original", text)
+        self.assertIn("renderer_backend_deblur = original", text)
         self.assertNotIn("dash_enable", text)
         self.assertNotIn("Grouping", text)
         self.assertNotIn("protect_new_points_iters", text)
@@ -291,6 +349,8 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         gaussian_source = (trainer_root / "scene" / "gaussian_model.py").read_text(encoding="utf-8")
 
         self.assertIn("def auto_point_addition_iter", train_source)
+        self.assertIn("def auto_densify_until_iter", train_source)
+        self.assertIn("def random_point_addition_enabled", train_source)
         self.assertIn("opt.pts_iter = auto_pts_iter", train_source)
         self.assertIn("pts_N_pts = int(min(volume / (opt.pts_rate ** 3), 200000))", train_source)
         self.assertNotIn("def resolve_add_points_count", train_source)
@@ -306,6 +366,24 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         self.assertIn("sharp_camera_subset(scene.getTrainCameras())[:5]", train_source)
         self.assertIn("code_dim=opt.blur_code_dim", train_source)
         self.assertIn("nn.Embedding(num_images, blur_code_dim)", blur_kernel_source)
+
+    def test_trainer_accepts_eap_pointcloud_and_lazy_gsplat_backend(self) -> None:
+        trainer_root = Path(__file__).resolve().parents[2] / "worker" / "trainer" / "dash_deblur_group_gs"
+        args_source = (trainer_root / "arguments" / "__init__.py").read_text(encoding="utf-8")
+        scene_source = (trainer_root / "scene" / "__init__.py").read_text(encoding="utf-8")
+        train_source = (trainer_root / "train.py").read_text(encoding="utf-8")
+        renderer_source = (trainer_root / "gaussian_renderer" / "__init__.py").read_text(encoding="utf-8")
+        backend_source = (trainer_root / "gaussian_renderer" / "backends" / "gsplat_backend.py").read_text(encoding="utf-8")
+
+        self.assertIn('self.pc_name = "points3D"', args_source)
+        self.assertIn('self.renderer_backend = "original"', args_source)
+        self.assertIn('self.renderer_backend_deblur = "original"', args_source)
+        self.assertIn('getattr(args, "pc_name", "points3D")', scene_source)
+        self.assertIn("force_original_backend=(iteration < opt.densify_until_iter)", train_source)
+        self.assertIn('not force_original_backend and getattr(pipe, "renderer_backend", "original") == "gsplat"', renderer_source)
+        self.assertIn("from gaussian_renderer.backends.gsplat_backend import gsplat_rasterize", renderer_source)
+        self.assertNotIn("from gsplat", backend_source.split("def gsplat_rasterize", 1)[0])
+        self.assertIn("from gsplat import rasterization", backend_source.split("def gsplat_rasterize", 1)[1])
 
     def test_build_training_command_uses_colmap_scene_and_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

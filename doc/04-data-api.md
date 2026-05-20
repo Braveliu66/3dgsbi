@@ -344,8 +344,8 @@ Fine tasks accept uploaded JPG/PNG images without EXIF camera metadata. Valid ta
 - `fine_deblur_enabled=true|false`. `false` writes `deblur=0` for sharp canonical training.
 - `fine_deblur_mode=motion|defocus|sharp`. Default is `motion`; legacy `mix`, `auto`, and `automatic` requests are accepted as aliases for `motion`. Deblur is applied to every training image when enabled.
 - `num_moments` controls the GTnet motion branch moment count.
-- `resolution` controls trainer image downsampling. Default `resolution=4` follows the upstream real motion/defocus configs.
-- `pts_iter`, `pts_rate`, `pts_N_pts`, `pts_N_intpl`, and `pts_add_bound` control Deblurring-3DGS `add_points()`. Defaults trigger random point addition at iteration 2500 with `pts_N_pts=200000`; `pts_rate` is only used for volume-based sizing when `pts_N_pts=0`.
+- `resolution` controls trainer image downsampling. Default `resolution=-1` uses the trainer's automatic image-resolution policy.
+- `pts_iter`, `pts_rate`, `pts_N_pts`, `pts_N_intpl`, and `pts_add_bound` control Deblurring-3DGS `add_points()`. Defaults disable random point addition (`pts_iter=999999`, `pts_rate=0`, `pts_N_pts=0`); `pts_rate` is only used for volume-based sizing when random point addition is explicitly re-enabled.
 - `fine_trainer_repo` can point at a compatible DashDeblurGroupGS checkout; empty uses the embedded trainer or `DASH_DEBLUR_GROUP_REPO`.
 - `protect_new_points_iters` is removed and must not be sent by the UI/API. It is not part of the fused trainer contract.
 

@@ -12,6 +12,7 @@
 import os
 import json
 import torch
+import time
 from random import randint
 from utils.loss_utils import l1_loss, ssim, l2_loss
 from gaussian_renderer import render, network_gui
@@ -47,6 +48,30 @@ def auto_point_addition_iter(total_iterations: int) -> int:
         return 2500
     raw = int(total_iterations * 0.12)
     return max(800, min(6000, raw))
+
+
+def auto_densify_until_iter(total_iterations: int, densify_from_iter: int, densification_interval: int) -> int:
+    if total_iterations <= 0:
+        return 0
+    interval = max(1, int(densification_interval))
+    from_iter = max(0, int(densify_from_iter))
+    target = max(int(total_iterations * 0.6), from_iter + interval)
+    return min(int(total_iterations), target)
+
+
+def uses_legacy_random_point_defaults(opt) -> bool:
+    return (
+        int(opt.pts_iter) == 2500
+        and abs(float(opt.pts_rate) - 1.1) < 1e-9
+        and int(opt.pts_N_pts) == 200000
+    )
+
+
+def random_point_addition_enabled(opt) -> bool:
+    return (
+        int(opt.pts_iter) <= int(opt.iterations)
+        and (float(opt.pts_rate) > 0.0 or int(opt.pts_N_pts) > 0)
+    )
 
 
 def apply_blur_labels(cameras, blur_label_path):
@@ -125,12 +150,24 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     pts_max = gaussians._xyz.amax(0)
     pts_min = gaussians._xyz.amin(0)
 
-    # 按训练轮次自适应优化加点时机（覆盖固定配置）。
-    # 这样在短轮次训练中不会加点过晚，在长轮次训练中也不会拖得太后。
-    auto_pts_iter = auto_point_addition_iter(opt.iterations)
-    if auto_pts_iter != opt.pts_iter:
+    if uses_legacy_random_point_defaults(opt):
+        print("[AutoSchedule] Disable legacy random add_points default (pts_iter=2500 pts_rate=1.1 pts_N_pts=200000)")
+        opt.pts_iter = int(opt.iterations) + 1
+        opt.pts_rate = 0.0
+        opt.pts_N_pts = 0
+
+    if random_point_addition_enabled(opt):
+        auto_pts_iter = auto_point_addition_iter(opt.iterations)
+    else:
+        auto_pts_iter = int(opt.pts_iter)
+    if random_point_addition_enabled(opt) and auto_pts_iter != opt.pts_iter:
         print(f"[AutoSchedule] Adjust pts_iter: {opt.pts_iter} -> {auto_pts_iter} (iterations={opt.iterations})")
         opt.pts_iter = auto_pts_iter
+
+    auto_densify_until = auto_densify_until_iter(opt.iterations, opt.densify_from_iter, opt.densification_interval)
+    if opt.densify_until_iter > auto_densify_until:
+        print(f"[AutoSchedule] Adjust densify_until_iter: {opt.densify_until_iter} -> {auto_densify_until} (iterations={opt.iterations})")
+        opt.densify_until_iter = auto_densify_until
 
     for iteration in range(first_iter, opt.iterations + 1):
         if network_gui.conn == None:
@@ -172,6 +209,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             render_kwargs["image_id"] = viewpoint_cam.image_id
         render_pkg = render(viewpoint_cam, gaussians, pipe, background, deblur=deblur, use_pos=opt.use_pos,
                             lambda_s=opt.lambda_s, lambda_p=opt.lambda_p, max_clamp=opt.max_clamp,
+                            force_original_backend=(iteration < opt.densify_until_iter),
                             **render_kwargs)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
         denom = 1 / len(visibility_filter) if type(radii) == list else 1.0
@@ -220,6 +258,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 lambda_s=opt.lambda_s,
                 lambda_p=opt.lambda_p,
                 max_clamp=opt.max_clamp,
+                final_iteration=(iteration == opt.iterations),
             )
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
@@ -239,7 +278,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.densify_and_prune(opt.densify_grad_threshold, opt.densify_prune_threshold, scene.cameras_extent, size_threshold, opt.densify_with_depth, opt.prune_range)
 
                 # 全部完成
-                if iteration == opt.pts_iter:
+                if random_point_addition_enabled(opt) and iteration == opt.pts_iter:
                     bbox = pts_max - pts_min
                     volume = bbox[0] * bbox[1] * bbox[2]
                     if opt.pts_rate > 0.0:
@@ -248,7 +287,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         pts_N_pts = opt.pts_N_pts
                     print(f"Allocate {pts_N_pts} points\n")
 
-                    gaussians.add_points(training_args=opt, dist=opt.pts_dist, N=opt.pts_N_intpl, num_pts=pts_N_pts, bound=opt.pts_add_bound)
+                    if pts_N_pts > 0:
+                        gaussians.add_points(training_args=opt, dist=opt.pts_dist, N=opt.pts_N_intpl, num_pts=pts_N_pts, bound=opt.pts_add_bound)
 
             # 非商业、研究和评估用途。
             if iteration < opt.iterations:
@@ -282,6 +322,12 @@ def prepare_output_and_logger(args):
         tb_writer = SummaryWriter(args.model_path)
     else:
         print("Tensorboard not available: not logging progress")
+    # 记录训练开始时间（module 级变量），用于最终汇总
+    try:
+        global TRAIN_START_TIME
+        TRAIN_START_TIME = time.time()
+    except Exception:
+        TRAIN_START_TIME = None
     return tb_writer
 
 def training_report(
@@ -302,6 +348,7 @@ def training_report(
     lambda_s=0.01,
     lambda_p=0.01,
     max_clamp=1.1,
+    final_iteration: bool = False,
 ):
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
@@ -309,7 +356,8 @@ def training_report(
         tb_writer.add_scalar('iter_time', elapsed, iteration)
 
     # 非商业、研究和评估用途。
-    if iteration in testing_iterations:
+    # 在测试迭代或最后一次迭代也执行评估，确保训练结束时有最终指标。
+    if iteration in testing_iterations or final_iteration:
         torch.cuda.empty_cache()
         if per_image_blur:
             validation_configs = (
@@ -375,6 +423,26 @@ def training_report(
                 with open(f"{savedir}/psnr.txt", "a") as f:
                     f.write("[ITER {}] Evaluating {}: L1 {} PSNR {}\n".format(iteration, config['name'], l1_test, psnr_test))
                     f.write("[ITER {}] Evaluating {}: SSIM {:.4f} LPIPS {:.4f}\n".format(iteration, config['name'], ssim_test, lpips_test))
+                # 如果这是最终迭代，写入一份 final_metrics.txt，包含训练耗时与高斯点数
+                if final_iteration:
+                    total_points = int(scene.gaussians.get_xyz.shape[0])
+                    train_time = None
+                    try:
+                        if globals().get('TRAIN_START_TIME'):
+                            train_time = time.time() - globals().get('TRAIN_START_TIME')
+                    except Exception:
+                        train_time = None
+                    summary = (
+                        f"FINAL ITERATION {iteration} - {config['name']}\n"
+                        f"PSNR: {psnr_test}\n"
+                        f"SSIM: {ssim_test:.6f}\n"
+                        f"LPIPS: {lpips_test:.6f}\n"
+                        f"NUM_GAUSSIAN: {total_points}\n"
+                        f"TRAIN_SECONDS: {train_time if train_time is not None else 'unknown'}\n"
+                    )
+                    with open(f"{savedir}/final_metrics.txt", "a") as ff:
+                        ff.write(summary)
+                    print("\n" + summary)
                     
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)

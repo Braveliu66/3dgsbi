@@ -22,7 +22,13 @@ from app.preview.utils import image_files
 
 
 Progress = Callable[[str, int, str], None]
-REQUIRED_COLMAP_COMMANDS = {"feature_extractor", "exhaustive_matcher", "mapper", "image_undistorter"}
+REQUIRED_COLMAP_COMMANDS = {
+    "feature_extractor",
+    "exhaustive_matcher",
+    "mapper",
+    "image_undistorter",
+}
+GLOBAL_COLMAP_COMMAND = "global_mapper"
 
 
 @dataclass(slots=True)
@@ -58,9 +64,52 @@ def build_colmap_cli_scene(
 
     capabilities = detect_colmap_capabilities()
     return _run_braveliu_colmap(
-        capabilities.executable,
+        capabilities,
         input_dir,
         scene_dir,
+        mapper_command="mapper",
+        backend="colmap_cli",
+        matcher_policy=matcher_policy,
+        use_gpu=prefer_gpu,
+        gpu_index=gpu_index,
+        min_registered_ratio=min_registered_ratio,
+        max_num_features=max_num_features,
+        max_image_size=max_image_size,
+        progress=progress,
+    )
+
+
+def build_colmap_global_scene(
+    input_dir: Path,
+    scene_dir: Path,
+    *,
+    scene_type: str,
+    input_type: str,
+    quality_mode: str = "auto",
+    capture_order: str = "auto",
+    matcher_policy: str = "auto",
+    prefer_gpu: bool = True,
+    gpu_index: str | None = None,
+    min_registered_ratio: float | None = None,
+    max_num_features: int | None = None,
+    max_image_size: int | None = None,
+    max_num_matches: int | None = None,
+    sequential_overlap: int | None = None,
+    progress: Progress,
+) -> SceneBuildResult:
+    files = image_files(input_dir)
+    if len(files) < 3:
+        raise FineFailure("INSUFFICIENT_IMAGES", "COLMAP initialization requires at least 3 images")
+
+    capabilities = detect_colmap_capabilities()
+    _require_colmap_command(capabilities, GLOBAL_COLMAP_COMMAND, "COLMAP global mapper backend")
+    return _run_braveliu_colmap(
+        capabilities,
+        input_dir,
+        scene_dir,
+        mapper_command=GLOBAL_COLMAP_COMMAND,
+        backend="colmap_global",
+        matcher_policy=matcher_policy,
         use_gpu=prefer_gpu,
         gpu_index=gpu_index,
         min_registered_ratio=min_registered_ratio,
@@ -105,10 +154,13 @@ def detect_colmap_capabilities() -> ColmapCapabilities:
 
 
 def _run_braveliu_colmap(
-    executable: str,
+    capabilities_or_executable: ColmapCapabilities | str,
     input_dir: Path,
     scene_dir: Path,
     *,
+    mapper_command: str,
+    backend: str,
+    matcher_policy: str,
     use_gpu: bool,
     gpu_index: str | None,
     min_registered_ratio: float | None,
@@ -118,6 +170,11 @@ def _run_braveliu_colmap(
 ) -> SceneBuildResult:
     if scene_dir.exists():
         shutil.rmtree(scene_dir)
+    if isinstance(capabilities_or_executable, ColmapCapabilities):
+        capabilities = capabilities_or_executable
+    else:
+        capabilities = ColmapCapabilities(executable=capabilities_or_executable, help_text="", commands=set(REQUIRED_COLMAP_COMMANDS))
+    executable = capabilities.executable
     workspace = scene_dir / "colmap_workspace"
     images_dir = workspace / "images"
     sparse_dir = workspace / "sparse"
@@ -132,6 +189,8 @@ def _run_braveliu_colmap(
     database_path = workspace / "database.db"
     gpu_flag = "1" if use_gpu else "0"
     started = time.monotonic()
+    matcher_command = _resolve_matcher_command(matcher_policy, len(files))
+    _require_colmap_command(capabilities, matcher_command, "COLMAP matching")
 
     progress("fine_colmap_features", 24, "running COLMAP feature extraction")
     feature_cmd = [
@@ -150,31 +209,13 @@ def _run_braveliu_colmap(
         feature_cmd.extend(["--SiftExtraction.gpu_index", gpu_index])
     _run_colmap_with_gpu_fallback(feature_cmd, "--SiftExtraction.use_gpu", progress, "fine_colmap_features", 26)
 
-    progress("fine_colmap_matching", 30, "running COLMAP exhaustive matcher")
-    match_cmd = [
-        executable,
-        "exhaustive_matcher",
-        "--database_path",
-        str(database_path),
-        "--SiftMatching.use_gpu",
-        gpu_flag,
-    ]
-    if gpu_index:
-        match_cmd.extend(["--SiftMatching.gpu_index", gpu_index])
+    progress("fine_colmap_matching", 30, f"running COLMAP {matcher_command}")
+    match_cmd = _build_matcher_command(executable, matcher_command, database_path, use_gpu=gpu_flag, gpu_index=gpu_index)
     _run_colmap_with_gpu_fallback(match_cmd, "--SiftMatching.use_gpu", progress, "fine_colmap_matching", 32)
 
-    progress("fine_colmap_mapping", 36, "running COLMAP mapper")
+    progress("fine_colmap_mapping", 36, f"running COLMAP {mapper_command}")
     _run_colmap_command(
-        [
-            executable,
-            "mapper",
-            "--database_path",
-            str(database_path),
-            "--image_path",
-            str(images_dir),
-            "--output_path",
-            str(sparse_dir),
-        ],
+        _build_mapper_command(capabilities, mapper_command, database_path, images_dir, sparse_dir, use_gpu=use_gpu),
         stage="fine_colmap_mapping",
         progress=progress,
         progress_value=38,
@@ -224,13 +265,13 @@ def _run_braveliu_colmap(
 
     return SceneBuildResult(
         scene_dir=undistorted_dir,
-        backend="colmap_cli",
+        backend=backend,
         image_count=len(files),
         registered_images=registered,
         point_count=point_count,
         metrics={
-            "sfm_backend": "colmap_cli",
-            "colmap_backend": "braveliu66_colmap_cli",
+            "sfm_backend": backend,
+            "colmap_backend": backend,
             "sfm_elapsed_seconds": round(time.monotonic() - started, 3),
             "sfm_registered_images": registered,
             "sfm_registered_ratio": registered_ratio,
@@ -239,14 +280,88 @@ def _run_braveliu_colmap(
             "sfm_sparse_points_raw": raw_point_count,
             "sfm_sparse_points_filtered": filtered_point_count,
             "sfm_undistorted": True,
-            "colmap_matcher": "exhaustive_matcher",
-            "colmap_mapper": "mapper",
+            "colmap_matcher": matcher_command,
+            "colmap_mapper": mapper_command,
             "colmap_use_gpu": use_gpu,
             "colmap_gpu_index": gpu_index,
             "colmap_sift_max_num_features": max_num_features,
             "colmap_max_image_size": max_image_size,
         },
     )
+
+
+def _resolve_matcher_command(matcher_policy: str | None, image_count: int) -> str:
+    matcher = str(matcher_policy or "auto").strip().lower()
+    if matcher == "auto":
+        matcher = "exhaustive" if image_count <= 80 else "sequential"
+    if matcher == "exhaustive":
+        return "exhaustive_matcher"
+    if matcher == "sequential":
+        return "sequential_matcher"
+    if matcher in {"vocab_tree", "spatial"}:
+        raise FineFailure(
+            "COLMAP_MATCHER_UNSUPPORTED",
+            f"COLMAP matcher '{matcher}' requires additional configuration and is not enabled for this pipeline",
+        )
+    raise FineFailure("COLMAP_MATCHER_UNSUPPORTED", f"Unsupported COLMAP matcher: {matcher}")
+
+
+def _build_matcher_command(
+    executable: str,
+    matcher_command: str,
+    database_path: Path,
+    *,
+    use_gpu: str,
+    gpu_index: str | None,
+) -> list[str]:
+    command = [
+        executable,
+        matcher_command,
+        "--database_path",
+        str(database_path),
+        "--SiftMatching.use_gpu",
+        use_gpu,
+    ]
+    if gpu_index:
+        command.extend(["--SiftMatching.gpu_index", gpu_index])
+    return command
+
+
+def _build_mapper_command(
+    capabilities: ColmapCapabilities,
+    mapper_command: str,
+    database_path: Path,
+    images_dir: Path,
+    sparse_dir: Path,
+    *,
+    use_gpu: bool,
+) -> list[str]:
+    command = [
+        capabilities.executable,
+        mapper_command,
+        "--database_path",
+        str(database_path),
+        "--image_path",
+        str(images_dir),
+        "--output_path",
+        str(sparse_dir),
+    ]
+    if use_gpu and mapper_command == GLOBAL_COLMAP_COMMAND:
+        command.extend(_global_mapper_gpu_options(capabilities.help_text))
+    return command
+
+
+def _global_mapper_gpu_options(help_text: str) -> list[str]:
+    for option in ("--Mapper.ba_use_gpu", "--GlobalMapper.ba_use_gpu"):
+        if option in help_text:
+            return [option, "1"]
+    return []
+
+
+def _require_colmap_command(capabilities: ColmapCapabilities, command: str, context: str) -> None:
+    if command in capabilities.commands or _help_mentions_command(capabilities.help_text, command):
+        return
+    raise FineFailure("COLMAP_CLI_UNSUPPORTED", f"{context} requires COLMAP command '{command}'")
 
 
 def _run_colmap_with_gpu_fallback(command: list[str], gpu_option: str, progress: Progress, stage: str, progress_value: int) -> None:

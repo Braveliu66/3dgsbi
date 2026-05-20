@@ -6,6 +6,79 @@
 
 ---
 
+## 0. Current Implementation Progress (2026-05-20)
+
+This section is the active progress record for the current EAP + gsplat integration and supersedes the older Phase 3/Phase 4 notes below where they conflict.
+
+### 0.1 Implemented
+
+- Admin pipeline parameters are now schema-driven:
+  - `fine_eap_enabled` defaults to `true`
+  - `fine_eap_dbscan_eps = 30`
+  - `fine_eap_min_samples = 10`
+  - `fine_eap_mask_radius = 20`
+  - `fine_eap_max_point_multiplier = 10`
+  - `fine_gsplat_enabled` defaults to `false`
+- EAP is implemented as an initialization-stage augmentation after COLMAP/undistort and before DashDeblurGroupGS training:
+  - Reads `scene_dir/images` and `scene_dir/sparse/0`
+  - Writes `points3D_eap.bin` or `points3D_eap.txt`, plus `points3D_eap.ply` and `points3D_eap_meta.json`
+  - Does not overwrite original `points3D.*`
+  - Reuses original camera poses for `_aug` images
+  - Fails if EAP output exceeds `original_points * fine_eap_max_point_multiplier`
+- DashDeblurGroupGS config generation now writes:
+  - EAP on: `pc_name = points3D_eap`
+  - EAP off: `pc_name = points3D`
+  - gsplat on: `renderer_backend = gsplat`
+  - deblur renderer fixed: `renderer_backend_deblur = original`
+- Trainer scene loading now supports `pc_name` instead of always reading `points3D.*`.
+- gsplat is wired only into the sharp/canonical render path and imported lazily. Motion/defocus multi-moment render paths keep the original rasterizer.
+- Metrics now include `fine_eap_enabled`, `fine_eap_original_points`, `fine_eap_points`, `fine_eap_multiplier`, `fine_gsplat_enabled`, `pc_name`, `renderer_backend`, and `renderer_backend_deblur`.
+
+### 0.2 Environment And Dependency Status
+
+- No new Python requirement files need package additions:
+  - `Pillow` and `numpy` already come from `backend/requirements.txt`
+  - `scikit-learn` and `gsplat` already come from `worker/requirements.txt`
+  - `pycolmap==3.12.6` is installed separately in `worker/Dockerfile`
+- Environment checks have been tightened for the new default behavior:
+  - `gsplat` is included in fine runtime dependency status
+  - worker image COLMAP build validation checks `exhaustive_matcher` and `point_triangulator`
+  - runtime COLMAP status treats `exhaustive_matcher` and `point_triangulator` as required for default fine worker capability
+- If EAP is enabled and COLMAP CLI or `point_triangulator` is unavailable, the task must fail clearly. It must not silently fall back to raw `points3D`.
+
+### 0.3 Key Files Updated
+
+- Backend: `backend/app/pipeline_parameters.py`, `backend/app/main.py`, `backend/app/algorithms.py`, `backend/app/fine/runner.py`, `backend/app/fine/eap.py`, `backend/app/fine/dash_deblur_group.py`, `backend/app/fine/colmap_cli.py`
+- Trainer: `worker/trainer/dash_deblur_group_gs/arguments/__init__.py`, `worker/trainer/dash_deblur_group_gs/scene/__init__.py`, `worker/trainer/dash_deblur_group_gs/scene/dataset_readers.py`, `worker/trainer/dash_deblur_group_gs/gaussian_renderer/__init__.py`, `worker/trainer/dash_deblur_group_gs/gaussian_renderer/backends/__init__.py`, `worker/trainer/dash_deblur_group_gs/gaussian_renderer/backends/gsplat_backend.py`
+- Environment: `worker/Dockerfile`
+- Tests: `backend/tests/test_eap_augmentation.py`, `backend/tests/test_gsplat_backend.py`, `backend/tests/test_dash_deblur_group_runtime.py`, `backend/tests/test_dash_deblur_group_dataset_readers.py`, `backend/tests/test_colmap_cli_policy.py`, `backend/tests/test_fine_runtime.py`, `backend/tests/test_storage_responses.py`
+
+### 0.4 Verification
+
+Passed:
+
+```bash
+python -m py_compile backend/app/fine/colmap_cli.py backend/app/algorithms.py backend/tests/test_colmap_cli_policy.py backend/tests/test_fine_runtime.py
+
+python -m unittest backend.tests.test_colmap_cli_policy backend.tests.test_fine_runtime backend.tests.test_eap_augmentation backend.tests.test_gsplat_backend backend.tests.test_dash_deblur_group_dataset_readers backend.tests.test_dash_deblur_group_runtime
+```
+
+Result: 57 tests passed, 4 skipped.
+
+Not yet verified:
+
+- `backend.tests.test_storage_responses`: local Python environment is missing `sqlalchemy`.
+- `backend.tests.test_worker_logging`: local Python environment is missing `redis`.
+- Real COLMAP + EAP end-to-end smoke test on an image set.
+- Real CUDA `gsplat` render smoke test.
+
+### 0.5 Differences From Older Notes Below
+
+- The old rule "all modules default off" no longer applies to EAP. Current admin requirement is `fine_eap_enabled = true` by default.
+- EAP is not a training-loop dynamic module in this implementation. It only produces initialization point cloud files `points3D_eap.*`.
+- First version does not integrate DetectorFreeSfM. It implements the COLMAP + augmentation flow only.
+- gsplat is only an optional rasterizer backend. It does not use gsplat strategy, densification, or pruning.
+
 ## 目录
 
 1. 背景与核心问题

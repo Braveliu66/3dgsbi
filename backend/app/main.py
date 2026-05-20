@@ -1289,7 +1289,7 @@ def create_fine_task(
         "camera_distortion": normalize_fine_camera_distortion(payload_options.get("camera_distortion")),
         "prefer_gpu": normalize_bool_option(payload_options.get("prefer_gpu"), True),
         "fine_capture_order": normalize_fine_capture_order(payload_options.get("fine_capture_order")),
-        "fine_sfm_backend": str(payload_options.get("fine_sfm_backend") or "pycolmap").strip().lower(),
+        "fine_sfm_backend": str(payload_options.get("fine_sfm_backend") or "colmap_global").strip().lower(),
         "source_version": project.source_version,
         "fine_expected_seconds": eta_seconds,
         "fine_iterations": int(payload_options.get("fine_iterations") or settings.fine_iterations),

@@ -82,9 +82,14 @@ def compute_img_metric(im1t: torch.Tensor, im2t: torch.Tensor,
                 pixelnum = mask[i, ..., 0].sum()
                 value = value - 10 * np.log10(hei * wid / pixelnum)
         elif metric in ["ssim"]:
-            value, ssimmap = photometric["ssim"](
-                im1[i], im2[i], multichannel=True, full=True
-            )
+            try:
+                value, ssimmap = photometric["ssim"](
+                    im1[i], im2[i], channel_axis=-1, data_range=2.0, full=True
+                )
+            except TypeError:
+                value, ssimmap = photometric["ssim"](
+                    im1[i], im2[i], multichannel=True, data_range=2.0, full=True
+                )
             if mask is not None:
                 value = (ssimmap * mask[i]).sum() / mask[i].sum()
         elif metric in ["lpips"]:

@@ -31,7 +31,8 @@ ENV TORCH_HOME=/model-cache/torch
 ENV HF_HOME=/model-cache/huggingface
 ENV HF_HUB_CACHE=/model-cache/huggingface/hub
 ENV XDG_CACHE_HOME=/model-cache/xdg
-ENV TORCH_EXTENSIONS_DIR=/model-cache/torch_extensions
+ENV TORCH_EXTENSIONS_DIR=/opt/torch_extensions
+ENV GSPLAT_PRECOMPILED_MARKER=/opt/torch_extensions/.gsplat_precompiled
 
 RUN mkdir -p /model-cache /repo-cache
 
@@ -65,7 +66,8 @@ RUN --mount=type=cache,id=three-dgs-worker-apt-cache,target=/var/cache/apt,shari
     find /usr/local/cuda/include /usr/include /usr -path '*/cudnn.h' -print -quit 2>/dev/null | grep -q .
 
 RUN --mount=type=cache,id=three-dgs-worker-colmap-git-cache,target=/repo-cache/colmap,sharing=locked \
-    --mount=type=cache,id=three-dgs-worker-ccache,target=/root/.cache/ccache,sharing=locked <<'EOF'
+  --mount=type=cache,id=three-dgs-worker-colmap-build-cache,target=/repo-cache/colmap/build,sharing=locked \
+  --mount=type=cache,id=three-dgs-worker-ccache,target=/root/.cache/ccache,sharing=locked <<'EOF'
 set -eu
 export CCACHE_DIR=/root/.cache/ccache
 retry_git() {
@@ -110,6 +112,7 @@ if [ "${COLMAP_SOURCE_INSTALL:-true}" = "true" ]; then
     -DBLA_VENDOR=OpenBLAS \
     -DCMAKE_C_COMPILER_LAUNCHER=ccache \
     -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+    -DCMAKE_CXX_FLAGS="-DBOOST_BIND_GLOBAL_PLACEHOLDERS" \
     -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
     -DCMAKE_CUDA_ARCHITECTURES="${COLMAP_CMAKE_CUDA_ARCHITECTURES}"
   cmake --build "$colmap_build" --target install
@@ -117,7 +120,7 @@ if [ "${COLMAP_SOURCE_INSTALL:-true}" = "true" ]; then
 fi
 help_text="$(colmap help 2>&1 || true)"
 printf '%s\n' "$help_text"
-for command in feature_extractor mapper global_mapper hierarchical_mapper image_undistorter model_analyzer model_clusterer model_splitter; do
+for command in feature_extractor exhaustive_matcher mapper image_undistorter point_triangulator global_mapper hierarchical_mapper model_analyzer model_clusterer model_splitter; do
   if ! printf '%s\n' "$help_text" | grep -Eq "(^|[[:space:]])${command}([[:space:]]|$)"; then
     echo "COLMAP source build missing required command: ${command}" >&2
     exit 1
@@ -170,7 +173,7 @@ RUN --mount=type=cache,id=three-dgs-worker-npm-cache,target=/root/.npm,sharing=l
     npm config set replace-registry-host always && \
     npm ci --omit=dev --cache /root/.npm --prefer-offline
 
-ARG TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
+ARG TORCH_CUDA_ARCH_LIST="8.9"
 ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
 ENV SPARK_SPZ_CLI=/opt/preview-tools/spark_transcode_spz.mjs
 
@@ -301,6 +304,22 @@ PY
   sleep $((attempt * 20))
   attempt=$((attempt + 1))
 done
+EOF
+
+RUN --mount=type=cache,id=three-dgs-worker-gsplat-torch-extensions,target=/root/.cache/gsplat_torch_extensions,sharing=locked \
+    --mount=type=cache,id=three-dgs-worker-ccache,target=/root/.cache/ccache,sharing=locked <<'EOF'
+set -eu
+export CCACHE_DIR=/root/.cache/ccache
+export TORCH_EXTENSIONS_DIR=/root/.cache/gsplat_torch_extensions
+python - <<'PY'
+from gsplat.cuda._backend import _C
+
+assert _C is not None, "gsplat CUDA extension did not compile"
+print("gsplat CUDA kernels precompiled")
+PY
+mkdir -p /opt/torch_extensions
+cp -a /root/.cache/gsplat_torch_extensions/. /opt/torch_extensions/
+printf 'TORCH_CUDA_ARCH_LIST=%s\n' "${TORCH_CUDA_ARCH_LIST:-}" > /opt/torch_extensions/.gsplat_precompiled
 EOF
 
 RUN --mount=type=cache,id=three-dgs-worker-runtime-extension-pip-cache,target=/root/.cache/pip,sharing=locked \

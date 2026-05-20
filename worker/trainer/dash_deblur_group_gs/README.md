@@ -96,10 +96,15 @@
 - `official_3dgs`：自动设为 `none`
 - `mlp_deblur`：若场景名包含 `synthetic`，自动设为 `synthetic_camera_motion`，否则 `real_camera_motion`
 
-3. `pts_iter`（训练中加点时机）
-- 由训练总轮次自动调度，不再固定写死
-- 计算规则：`pts_iter = clamp(iterations * 0.12, 800, 6000)`
-- 目的：短训练不加点过晚，长训练不加点过迟
+3. `pts_iter` / `pts_N_pts`（随机 add_points）
+- 默认关闭随机补点：`pts_iter=999999`, `pts_rate=0`, `pts_N_pts=0`
+- 若显式启用随机补点，训练器仍会按 `pts_iter = clamp(iterations * 0.12, 800, 6000)` 调整触发时机
+- 旧默认组合 `pts_iter=2500`, `pts_rate=1.1`, `pts_N_pts=200000` 会被视为历史默认并自动关闭
+
+4. `densify_until_iter`
+- 默认 5000 步训练只 densify/prune 到 3000 步
+- 训练器会把过大的值压到 `max(iterations * 0.6, densify_from_iter + densification_interval)`，且不超过总迭代数
+- 目的：避免后段训练持续做昂贵拓扑变化
 
 ---
 

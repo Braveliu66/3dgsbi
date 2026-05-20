@@ -26,7 +26,9 @@ The embedded trainer lives in `worker/trainer/dash_deblur_group_gs`.
 - Deblurring-3DGS is the training backbone. It owns GTnet, motion blur, defocus blur, point addition, and sharp canonical Gaussian rendering.
 - Speedy-Splat, FastGS pruning, SparseAdam, Dash antialiasing, and renderer replacement are not part of the default path.
 
-The default training preset follows the upstream real motion/defocus configs: motion deblur is enabled, `resolution=4`, `add_points()` triggers at iteration 2500 with the official `pts_N_pts=200000` default, and densification uses the Deblurring-3DGS path.
+The default training preset keeps the Deblurring-3DGS motion/defocus backbone with `resolution=-1`, but random `add_points()` is disabled by default. EAP provides the initial point-cloud boost, while the standard gradient-based densify/prune path handles local refinement. For 5000-iteration training, `densify_until_iter` defaults to 3000 so late training does not keep doing expensive topology changes.
+
+The embedded trainer also treats the old random-add default triplet (`pts_iter=2500`, `pts_rate=1.1`, `pts_N_pts=200000`) as disabled. This prevents stale saved presets from reintroducing the large random point burst that can stall training after the point cloud has already grown.
 
 The trainer is not a copied upstream repository. Only the used algorithmic pieces are integrated into this repo and shaped around the local fine worker contract.
 
@@ -70,7 +72,9 @@ The backend resolves those into scene-specific presets:
 - `outdoor_motion`
 - `outdoor_defocus`
 
-The removed `protect_new_points_iters` and `birth_iter` mechanism must not be reintroduced. It was a local helper, not part of the Deblurring-3DGS densification model, and it broke tensor-length invariants after `add_points()` and prune. New point survival is controlled by the original densify/prune thresholds and Group cache timing.
+The removed `protect_new_points_iters` and `birth_iter` mechanism must not be reintroduced as an ad hoc side tensor. It was a local helper, not part of the Deblurring-3DGS densification model, and it broke tensor-length invariants after `add_points()` and prune.
+
+The planned replacement for random `add_points()` is GDAGS-style density control from `final_mixed_blur_3dgs_codex_plan.md`. It must land in phases: stats-only first, then clone/split/prune decisions after canonical-gradient isolation and buffer synchronization tests pass. Any GDAGS age/protection state must be owned by the GDAGS manager and updated through the same clone/split/prune masks as GaussianModel.
 
 ## Runtime Layout
 
@@ -102,15 +106,15 @@ Do not rebuild for ordinary Python/TypeScript edits. Rebuild only when Dockerfil
 
 ## COLMAP
 
-`fine_sfm_backend=pycolmap` is the default. `fine_sfm_backend=colmap` is accepted as a PyCOLMAP compatibility alias. `fine_sfm_backend=colmap_cli` explicitly uses the command-line COLMAP path.
+`fine_sfm_backend=colmap_global` is the default and uses COLMAP 4.x `global_mapper`. `fine_sfm_backend=gcolmap` is accepted as an alias. `fine_sfm_backend=colmap_cli` keeps the incremental `mapper` path, and `pycolmap` remains available as an explicit backend.
 
-The optional COLMAP CLI path uses GPU feature extraction and matching when `prefer_gpu=true`. Mapper bundle adjustment also uses GPU when `prefer_gpu=true`.
+The COLMAP paths use GPU feature extraction and matching when `prefer_gpu=true`. Global mapper is required for `colmap_global`/`gcolmap`; if it is missing, the task fails instead of silently falling back to incremental mapping.
 
 Metrics include:
 
 ```json
 {
-  "sfm_backend": "pycolmap",
+  "sfm_backend": "colmap_global",
   "sfm_registered_images": 45,
   "sfm_sparse_points": 6830
 }

@@ -54,7 +54,7 @@ class Scene:
                     llffhold = int(l.split("=")[-1])
                     break
             print("TEST VIEW HOLD: ", llffhold)
-            scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval, llffhold)
+            scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval, llffhold, getattr(args, "pc_name", "points3D"))
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             # Blender 数据分支：走 transforms json 解析流程。
             print("Found transforms_train.json file, assuming Blender data set!")

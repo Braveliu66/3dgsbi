@@ -50,6 +50,7 @@ class ModelParams(ParamGroup):
         self._source_path = ""
         self._model_path = ""
         self._images = "images"
+        self.pc_name = "points3D"
         self._resolution = -1
         self._white_background = False
         self.data_device = "cuda"
@@ -67,6 +68,8 @@ class PipelineParams(ParamGroup):
         self.convert_SHs_python = False
         self.compute_cov3D_python = False
         self.debug = False
+        self.renderer_backend = "original"
+        self.renderer_backend_deblur = "original"
         super().__init__(parser, "Pipeline Parameters")
 
 class OptimizationParams(ParamGroup):
@@ -84,7 +87,7 @@ class OptimizationParams(ParamGroup):
         self.lambda_dssim = 0.2
         self.densification_interval = 100
         self.densify_from_iter = 500
-        self.densify_until_iter = 15_000
+        self.densify_until_iter = 3_000
         self.densify_grad_threshold = 0.0002
         self.densify_prune_threshold = 0.005
 
@@ -96,10 +99,10 @@ class OptimizationParams(ParamGroup):
         # 新增点参数
         self.pts_dist = 2
         self.pts_N_intpl = 4
-        self.pts_N_pts = 200_000
-        self.pts_iter = 2500
+        self.pts_N_pts = 0
+        self.pts_iter = 999_999
         self.pts_add_bound = 10
-        self.pts_rate=1.1
+        self.pts_rate=0.0
 
         # MLP 与渲染参数
         self.gtnet_lr = 1e-3

@@ -14,7 +14,7 @@ IMAGE_EXTS = {
     ".tif", ".tiff", ".webp"
 }
 
-BLUR_EFFECT_BLURRY_THRESHOLD = 0.33
+BLUR_EFFECT_BLURRY_THRESHOLD = 0.35
 BLUR_EFFECT_SHARP_THRESHOLD = 0.22
 
 
@@ -349,10 +349,14 @@ def normalize_detected_blur_type(row):
     return "motion"
 
 
-def apply_blur_effect_motion_policy_rows(rows):
+def apply_blur_effect_second_check_rows(rows):
     for row in rows:
-        row["original_label"] = row.get("label")
-        row["original_blur_type"] = row.get("blur_type")
+        row["label_before_blur_effect"] = row.get("label")
+        row["blur_type_before_blur_effect"] = row.get("blur_type")
+
+        blur_scores = row.get("blur_effect")
+        blur_effect_label = classify_blur_effect(blur_scores)
+        row["blur_effect_label"] = blur_effect_label
 
         blur_type = str(row.get("blur_type") or "").strip().lower()
         if blur_type in {"defocus", "defocus_blur"}:
@@ -360,9 +364,6 @@ def apply_blur_effect_motion_policy_rows(rows):
             row["blur_type"] = "defocus_blur"
             row["blur_policy"] = "preserve_defocus"
             continue
-
-        blur_effect_label = classify_blur_effect(row.get("blur_effect"))
-        row["blur_effect_label"] = blur_effect_label
 
         if blur_effect_label == "blurry":
             row["label"] = "blurry"
@@ -374,6 +375,10 @@ def apply_blur_effect_motion_policy_rows(rows):
             row["blur_policy"] = "blur_effect_clear"
 
     return rows
+
+
+def apply_blur_effect_motion_policy_rows(rows):
+    return apply_blur_effect_second_check_rows(rows)
 
 
 def analyze_image(path):
@@ -772,226 +777,6 @@ def classify_results(
         "blur_policy",
     ):
         df[key] = [row.get(key, np.nan) for row in rows]
-    return df
-
-    valid = df["raw_score"].notna()
-    scores = df.loc[valid, "raw_score"].values
-
-    if len(scores) == 0:
-        df["label"] = "uncertain"
-        df["blur_type"] = "uncertain"
-        df["blur_weight"] = 0.5
-        df["blurry_patch_ratio"] = np.nan
-        return df
-
-    score_min = float(np.min(scores))
-    score_max = float(np.max(scores))
-
-    median_fft = df["fft_high_ratio"].median(skipna=True)
-    median_power_fft = df["fft_power_high_ratio"].median(skipna=True)
-    median_lap = df["lap_p20"].median(skipna=True)
-    median_edge_width = df["edge_width_median"].median(skipna=True)
-
-    all_patch_laps = []
-    for v in df["lap_scores_list"]:
-        if isinstance(v, list):
-            all_patch_laps.extend(v)
-
-    if len(all_patch_laps) > 0:
-        patch_blur_th = float(np.percentile(all_patch_laps, blurry_patch_percentile))
-    else:
-        patch_blur_th = median_lap
-
-    labels = []
-    blur_types = []
-    weights = []
-    blurry_patch_ratios = []
-
-    for _, row in df.iterrows():
-        s = row.get("raw_score", np.nan)
-
-        if pd.isna(s):
-            labels.append("uncertain")
-            blur_types.append("uncertain")
-            weights.append(0.5)
-            blurry_patch_ratios.append(np.nan)
-            continue
-
-        blur_weight = (score_max - s) / max(score_max - score_min, 1e-6)
-        blur_weight = float(np.clip(blur_weight, 0.0, 1.0))
-        weights.append(blur_weight)
-
-        directionality = row.get("directionality", np.nan)
-        fft_high = row.get("fft_high_ratio", np.nan)
-        power_fft = row.get("fft_power_high_ratio", np.nan)
-        lap_p20 = row.get("lap_p20", np.nan)
-        edge_width = row.get("edge_width_median", np.nan)
-
-        patch_laps = row.get("lap_scores_list", [])
-
-        if isinstance(patch_laps, list) and len(patch_laps) > 0 and not pd.isna(patch_blur_th):
-            blurry_patch_ratio = float(np.mean(np.array(patch_laps) < patch_blur_th))
-        else:
-            blurry_patch_ratio = np.nan
-
-        blurry_patch_ratios.append(blurry_patch_ratio)
-
-        is_strong_directional = (
-            not pd.isna(directionality)
-            and directionality >= motion_directionality_threshold
-        )
-
-        is_soft_directional = (
-            not pd.isna(directionality)
-            and directionality >= motion_soft_directionality_threshold
-        )
-
-        low_freq_evidence = (
-            not pd.isna(fft_high)
-            and not pd.isna(median_fft)
-            and fft_high < median_fft
-        )
-
-        low_power_freq_evidence = (
-            not pd.isna(power_fft)
-            and not pd.isna(median_power_fft)
-            and power_fft < median_power_fft
-        )
-
-        low_lap_evidence = (
-            not pd.isna(lap_p20)
-            and not pd.isna(median_lap)
-            and lap_p20 < median_lap
-        )
-
-        patch_blur_evidence = (
-            not pd.isna(blurry_patch_ratio)
-            and blurry_patch_ratio >= blurry_patch_ratio_threshold
-        )
-
-        edge_width_absolute_evidence = (
-            not pd.isna(edge_width)
-            and edge_width >= edge_width_absolute_threshold
-        )
-
-        edge_width_relative_evidence = (
-            not pd.isna(edge_width)
-            and not pd.isna(median_edge_width)
-            and edge_width >= median_edge_width * 1.20
-        )
-
-        frequency_evidence = low_freq_evidence or low_power_freq_evidence
-
-        # 新增：强制保护清晰图
-        # 对应你这批 007/035/000/028/042/014/021 这种情况
-        clear_force_evidence = (
-            blur_weight <= clear_force_weight_threshold
-            and not pd.isna(lap_p20)
-            and lap_p20 >= clear_force_lap_p20_threshold
-            and not pd.isna(blurry_patch_ratio)
-            and blurry_patch_ratio <= clear_force_patch_ratio_threshold
-        )
-
-        if clear_force_evidence:
-            labels.append("sharp")
-            blur_types.append("none")
-            continue
-
-        strong_motion_blur_evidence = (
-            is_strong_directional
-            and (
-                edge_width_absolute_evidence
-                or (patch_blur_evidence and frequency_evidence)
-            )
-        )
-
-        # 004/005 主要靠这个判据识别
-        soft_motion_blur_evidence = (
-            is_soft_directional
-            and edge_width_absolute_evidence
-            and blur_weight >= motion_blur_weight_threshold
-            and low_lap_evidence
-        )
-
-        defocus_blur_evidence = (
-            patch_blur_evidence
-            and low_lap_evidence
-            and low_power_freq_evidence
-            and (edge_width_absolute_evidence or edge_width_relative_evidence)
-        )
-
-        strong_blur_evidence = (
-            edge_width_absolute_evidence
-            and blur_weight >= possible_to_blurry_weight_threshold
-            and (
-                low_power_freq_evidence
-                or patch_blur_evidence
-                or low_lap_evidence
-            )
-        )
-
-        # possible 不再单独把清晰图打成 blurry
-        # 必须 blur_weight 足够高，并且至少有低 Laplacian / 低频 / patch 证据
-        possible_motion_evidence = (
-            blur_weight >= possible_to_blurry_weight_threshold
-            and is_soft_directional
-            and edge_width_absolute_evidence
-            and (low_lap_evidence or patch_blur_evidence or frequency_evidence)
-        )
-
-        possible_defocus_evidence = (
-            blur_weight >= possible_to_blurry_weight_threshold
-            and (
-                low_lap_evidence
-                or low_freq_evidence
-                or low_power_freq_evidence
-            )
-            and (
-                patch_blur_evidence
-                or edge_width_absolute_evidence
-                or edge_width_relative_evidence
-            )
-        )
-
-        if strong_motion_blur_evidence or soft_motion_blur_evidence:
-            labels.append("blurry")
-            blur_types.append("motion_blur")
-
-        elif defocus_blur_evidence:
-            labels.append("blurry")
-            blur_types.append("defocus_blur")
-
-        elif strong_blur_evidence:
-            labels.append("blurry")
-
-            if possible_motion_evidence:
-                blur_types.append("motion_blur")
-            elif possible_defocus_evidence:
-                blur_types.append("defocus_blur")
-            else:
-                blur_types.append("blur_unknown")
-
-        elif possible_motion_evidence:
-            labels.append("blurry")
-            blur_types.append("motion_blur")
-
-        elif possible_defocus_evidence:
-            labels.append("blurry")
-            blur_types.append("defocus_blur")
-
-        else:
-            labels.append("sharp")
-            blur_types.append("none")
-
-    df["label"] = labels
-    df["blur_type"] = blur_types
-    df["blur_weight"] = weights
-    df["blurry_patch_ratio"] = blurry_patch_ratios
-    df["score_min"] = score_min
-    df["score_max"] = score_max
-    df["patch_blur_threshold"] = patch_blur_th
-    df["median_edge_width"] = median_edge_width
-
     return df
 
 def enforce_motion_blur_by_weight(df):

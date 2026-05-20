@@ -103,6 +103,7 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn('"Spark SPZ"', algorithms_source)
         self.assertIn('"node"', algorithms_source)
         self.assertIn('"DashDeblurGroupGS Fine"', algorithms_source)
+        self.assertIn('"gsplat"', algorithms_source)
         self.assertIn('"diff_gaussian_rasterization"', algorithms_source)
         self.assertIn('"simple_knn._C"', algorithms_source)
 
@@ -123,6 +124,13 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("ccache", dockerfile_source)
         self.assertNotIn("libimath-dev", dockerfile_source)
         self.assertIn("cmake --build", dockerfile_source)
+        self.assertRegex(
+            dockerfile_source,
+            r'-DCMAKE_CXX_FLAGS="-DBOOST_BIND_GLOBAL_PLACEHOLDERS" \\\s*\n\s*-DCMAKE_CUDA_COMPILER_LAUNCHER=ccache',
+        )
+        self.assertNotIn("-DBOOST_BIND_GLOBAL_PLACEHOLDERS=ON", dockerfile_source)
+        self.assertIn("exhaustive_matcher", dockerfile_source)
+        self.assertIn("point_triangulator", dockerfile_source)
         self.assertIn("global_mapper", dockerfile_source)
         self.assertIn("hierarchical_mapper", dockerfile_source)
         self.assertIn("model_clusterer", dockerfile_source)
@@ -137,6 +145,11 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("third_party/glm/glm/glm.hpp", dockerfile_source)
         self.assertIn("extension wheel cache hit", dockerfile_source)
         self.assertIn("extension wheel cache miss", dockerfile_source)
+        self.assertIn('ARG TORCH_CUDA_ARCH_LIST="8.9"', dockerfile_source)
+        self.assertIn("three-dgs-worker-gsplat-torch-extensions", dockerfile_source)
+        self.assertIn("from gsplat.cuda._backend import _C", dockerfile_source)
+        self.assertIn("gsplat CUDA kernels precompiled", dockerfile_source)
+        self.assertIn("GSPLAT_PRECOMPILED_MARKER=/opt/torch_extensions/.gsplat_precompiled", dockerfile_source)
         self.assertNotIn("rm -rf \"$source_dir/build\"", dockerfile_source)
         self.assertIn("diff_gaussian_rasterization", dockerfile_source)
         self.assertIn("simple_knn._C", dockerfile_source)
@@ -145,6 +158,8 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("3dgsbi-worker:local", compose_source)
         self.assertIn("BUILDKIT_INLINE_CACHE", compose_source)
         self.assertIn("DASH_DEBLUR_GROUP_REPO: /opt/dash_deblur_group_gs", compose_source)
+        self.assertIn("TORCH_EXTENSIONS_DIR: /opt/torch_extensions", compose_source)
+        self.assertIn("GSPLAT_PRECOMPILED_MARKER: /opt/torch_extensions/.gsplat_precompiled", compose_source)
         self.assertGreaterEqual(compose_source.count("./backend/app:/app/app"), 3)
         self.assertIn('"--reload"', compose_source)
         self.assertIn("./frontend:/app", compose_source)
@@ -215,13 +230,13 @@ class FineRuntimeTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "UNSUPPORTED_FINE_PIPELINE")
 
-    def test_sfm_defaults_to_colmap_cli(self) -> None:
+    def test_sfm_defaults_to_colmap_global(self) -> None:
         from app.fine.preprocess import SceneBuildResult
         from app.fine.runner import build_scene
 
-        expected = SceneBuildResult(Path("scene"), "colmap_cli", 8, 8, 2816, {"sfm_backend": "colmap_cli"})
+        expected = SceneBuildResult(Path("scene"), "colmap_global", 8, 8, 2816, {"sfm_backend": "colmap_global"})
         ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={}, progress=None)
-        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_colmap_cli_scene", return_value=expected) as colmap_cli:
+        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_colmap_global_scene", return_value=expected) as colmap_global:
             result = build_scene(
                 ctx,
                 Path(tmp),
@@ -232,10 +247,10 @@ class FineRuntimeTests(unittest.TestCase):
                 min_sparse_points=0,
             )
 
-        self.assertEqual(result.backend, "colmap_cli")
+        self.assertEqual(result.backend, "colmap_global")
         self.assertEqual(result.point_count, 2816)
         self.assertTrue(result.metrics["sfm_sparse_points_below_target"])
-        colmap_cli.assert_called_once()
+        colmap_global.assert_called_once()
 
     def test_sfm_colmap_alias_maps_to_colmap_cli(self) -> None:
         from app.fine.preprocess import SceneBuildResult
@@ -247,6 +262,18 @@ class FineRuntimeTests(unittest.TestCase):
             result = build_scene(ctx, Path(tmp), Path(tmp) / "scene", 8192, 1600, 8, min_sparse_points=0)
 
         self.assertEqual(result.backend, "colmap_cli")
+
+    def test_sfm_gcolmap_alias_maps_to_colmap_global(self) -> None:
+        from app.fine.preprocess import SceneBuildResult
+        from app.fine.runner import build_scene, normalize_fine_sfm_backend
+
+        expected = SceneBuildResult(Path("scene"), "colmap_global", 8, 8, 2816, {"sfm_backend": "colmap_global"})
+        ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={"fine_sfm_backend": "gcolmap"}, progress=None)
+        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_colmap_global_scene", return_value=expected):
+            result = build_scene(ctx, Path(tmp), Path(tmp) / "scene", 8192, 1600, 8, min_sparse_points=0)
+
+        self.assertEqual(normalize_fine_sfm_backend("gcolmap"), "colmap_global")
+        self.assertEqual(result.backend, "colmap_global")
 
     def test_sfm_explicit_colmap_cli_uses_cli_path(self) -> None:
         from app.fine.preprocess import SceneBuildResult
@@ -264,9 +291,9 @@ class FineRuntimeTests(unittest.TestCase):
         from app.fine.preprocess import SceneBuildResult
         from app.fine.runner import build_scene
 
-        expected = SceneBuildResult(Path("scene"), "colmap_cli", 8, 8, 2816, {"sfm_backend": "colmap_cli"})
+        expected = SceneBuildResult(Path("scene"), "colmap_global", 8, 8, 2816, {"sfm_backend": "colmap_global"})
         ctx = SimpleNamespace(model_cache_dir=Path("cache"), options={}, progress=None)
-        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_colmap_cli_scene", return_value=expected):
+        with tempfile.TemporaryDirectory() as tmp, patch("app.fine.runner.build_colmap_global_scene", return_value=expected):
             result = build_scene(ctx, Path(tmp), Path(tmp) / "scene", 8192, 1600, 8)
         self.assertEqual(result.point_count, 2816)
         self.assertEqual(result.metrics["sfm_min_sparse_points"], 0)

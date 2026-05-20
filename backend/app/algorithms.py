@@ -58,6 +58,7 @@ ALGORITHM_DEPENDENCIES: dict[str, dict[str, Any]] = {
             "lpips",
             "pytorch_msssim",
             "sklearn",
+            "gsplat",
             "diff_gaussian_rasterization",
             "simple_knn._C",
         ],
@@ -476,7 +477,7 @@ def colmap_cli_status() -> dict[str, Any]:
         return {"available": False, "path": executable, "error": str(exc)}
     help_text = completed.stdout or ""
     commands = {match.group(1) for match in re.finditer(r"^\s+([a-z_]+)(?:\s|$)", help_text, flags=re.MULTILINE)}
-    required = {"feature_extractor", "mapper", "image_undistorter", "model_analyzer"}
+    required = {"feature_extractor", "exhaustive_matcher", "mapper", "image_undistorter", "point_triangulator", "model_analyzer"}
     optional = {"global_mapper", "hierarchical_mapper", "view_graph_calibrator", "model_clusterer", "model_splitter"}
     missing = sorted(command for command in required if command not in commands and not colmap_help_contains_command(help_text, command))
     return {

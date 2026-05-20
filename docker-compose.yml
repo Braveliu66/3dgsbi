@@ -103,7 +103,8 @@ services:
       HF_HOME: /model-cache/huggingface
       HF_HUB_CACHE: /model-cache/huggingface/hub
       XDG_CACHE_HOME: /model-cache/xdg
-      TORCH_EXTENSIONS_DIR: /model-cache/torch_extensions
+      TORCH_EXTENSIONS_DIR: /opt/torch_extensions
+      GSPLAT_PRECOMPILED_MARKER: /opt/torch_extensions/.gsplat_precompiled
       TORCHINDUCTOR_CACHE_DIR: /model-cache/torchinductor
       TORCHINDUCTOR_FX_GRAPH_CACHE: "1"
       TORCHINDUCTOR_AUTOGRAD_CACHE: "1"
@@ -147,7 +148,8 @@ services:
       HF_HOME: /model-cache/huggingface
       HF_HUB_CACHE: /model-cache/huggingface/hub
       XDG_CACHE_HOME: /model-cache/xdg
-      TORCH_EXTENSIONS_DIR: /model-cache/torch_extensions
+      TORCH_EXTENSIONS_DIR: /opt/torch_extensions
+      GSPLAT_PRECOMPILED_MARKER: /opt/torch_extensions/.gsplat_precompiled
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
     depends_on:

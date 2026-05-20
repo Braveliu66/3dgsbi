@@ -73,18 +73,21 @@ INDOOR_MOTION = {
     "lambda_code": 0.0001,
     "lambda_delta": 0.001,
     "sharp_weight": 2.0,
+    "pc_name": "points3D",
+    "renderer_backend": "original",
+    "renderer_backend_deblur": "original",
     "densify_from_iter": 500,
-    "densify_until_iter": 15000,
+    "densify_until_iter": 3000,
     "densification_interval": 100,
     "densify_grad_threshold": 0.0005,
     "densify_prune_threshold": 0.01,
     "densify_with_depth": 1,
     "prune_range": 3,
-    "pts_iter": 2500,
-    "pts_rate": 1.1,
+    "pts_iter": 999999,
+    "pts_rate": 0.0,
     "pts_dist": 2,
     "pts_N_intpl": 4,
-    "pts_N_pts": 200000,
+    "pts_N_pts": 0,
     "pts_add_bound": 10,
 }
 
@@ -179,7 +182,7 @@ FLOAT_KEYS = {
     "pts_rate",
 }
 BOOL_KEYS = {"white_background", "eval"}
-STRING_KEYS: set[str] = {"blur_label_path"}
+STRING_KEYS: set[str] = {"blur_label_path", "pc_name", "renderer_backend", "renderer_backend_deblur"}
 
 
 def run_dash_deblur_group_training(
@@ -214,6 +217,14 @@ def run_dash_deblur_group_training(
     else:
         config["per_image_blur"] = 0
     write_training_config(config_path, config)
+    print(
+        "[dash_deblur_group] training config "
+        f"pc_name={config['pc_name']} renderer_backend={config['renderer_backend']} "
+        f"renderer_backend_deblur={config['renderer_backend_deblur']} iterations={config['iterations']}",
+        flush=True,
+    )
+    if config_uses_gsplat(config):
+        prewarm_gsplat_kernels(paths, progress=progress, label=paths.trainer_flavor)
 
     command = build_training_command(
         paths=paths,
@@ -280,7 +291,14 @@ def run_dash_deblur_group_training(
         "use_pos": int(config["use_pos"]),
         "num_moments": int(config["num_moments"]),
         "densify_with_depth": int(config["densify_with_depth"]),
+        "pc_name": str(config["pc_name"]),
+        "renderer_backend": str(config["renderer_backend"]),
+        "renderer_backend_deblur": str(config["renderer_backend_deblur"]),
+        "fine_eap_enabled": read_bool(options.get("fine_eap_enabled"), True),
+        "fine_gsplat_enabled": read_bool(options.get("fine_gsplat_enabled"), False),
+        "densify_until_iter": int(config["densify_until_iter"]),
         "pts_iter": int(config["pts_iter"]),
+        "pts_rate": float(config["pts_rate"]),
         "pts_N_pts": int(config["pts_N_pts"]),
         "iterations": int(config["iterations"]),
         "splat_count": splat_count,
@@ -418,7 +436,30 @@ def build_training_config(options: dict[str, Any], blur_analysis: Any | None = N
         elif key in STRING_KEYS:
             config[key] = str(options.get(key) or config[key]).strip()
     apply_mode_locked_config(config, scene_type, deblur_mode)
+    config["pc_name"] = "points3D_eap" if read_bool(options.get("fine_eap_enabled"), True) else "points3D"
+    config["renderer_backend"] = "gsplat" if read_bool(options.get("fine_gsplat_enabled"), False) else "original"
+    config["renderer_backend_deblur"] = "original"
+    apply_training_safety_caps(config)
     return config
+
+
+def apply_training_safety_caps(config: dict[str, Any]) -> None:
+    iterations = max(1, int(config.get("iterations", 1) or 1))
+    densify_from_iter = max(0, int(config.get("densify_from_iter", 0) or 0))
+    densification_interval = max(1, int(config.get("densification_interval", 1) or 1))
+    target_densify_until = min(iterations, max(int(iterations * 0.6), densify_from_iter + densification_interval))
+    if int(config.get("densify_until_iter", 0) or 0) > target_densify_until:
+        config["densify_until_iter"] = target_densify_until
+
+    pts_iter = int(config.get("pts_iter", 0) or 0)
+    pts_rate = float(config.get("pts_rate", 0.0) or 0.0)
+    pts_n_pts = int(config.get("pts_N_pts", 0) or 0)
+    if pts_iter == 2500 and abs(pts_rate - 1.1) < 1e-9 and pts_n_pts == 200000:
+        config["pts_iter"] = 999999
+        config["pts_rate"] = 0.0
+        config["pts_N_pts"] = 0
+    elif pts_rate <= 0.0 and pts_n_pts <= 0:
+        config["pts_iter"] = 999999
 
 
 def apply_mode_locked_config(config: dict[str, Any], scene_type: str, deblur_mode: str) -> None:
@@ -487,6 +528,94 @@ def build_training_command(
         "--test_iterations",
         str(iterations + 1),
     ]
+
+
+GSPLAT_PREWARM_SCRIPT = r"""
+import torch
+from gsplat import rasterization
+
+if not torch.cuda.is_available():
+    raise RuntimeError("CUDA is not available for gsplat precompile")
+
+device = torch.device("cuda")
+dtype = torch.float32
+means = torch.tensor([[0.0, 0.0, 2.0]], device=device, dtype=dtype)
+quats = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=device, dtype=dtype)
+scales = torch.full((1, 3), 0.01, device=device, dtype=dtype)
+opacities = torch.ones((1,), device=device, dtype=dtype)
+colors = torch.ones((1, 1, 3), device=device, dtype=dtype)
+viewmats = torch.eye(4, device=device, dtype=dtype).unsqueeze(0)
+Ks = torch.tensor([[[32.0, 0.0, 8.0], [0.0, 32.0, 8.0], [0.0, 0.0, 1.0]]], device=device, dtype=dtype)
+backgrounds = torch.zeros((1, 3), device=device, dtype=dtype)
+
+rasterization(
+    means=means,
+    quats=quats,
+    scales=scales,
+    opacities=opacities,
+    colors=colors,
+    viewmats=viewmats,
+    Ks=Ks,
+    width=16,
+    height=16,
+    sh_degree=0,
+    packed=False,
+    backgrounds=backgrounds,
+    camera_model="pinhole",
+)
+torch.cuda.synchronize()
+print("gsplat CUDA kernels ready", flush=True)
+"""
+
+
+def config_uses_gsplat(config: dict[str, Any]) -> bool:
+    return str(config.get("renderer_backend") or "").strip().lower() == "gsplat" or str(config.get("renderer_backend_deblur") or "").strip().lower() == "gsplat"
+
+
+def gsplat_kernels_are_precompiled() -> bool:
+    marker = Path(os.getenv("GSPLAT_PRECOMPILED_MARKER") or "/opt/torch_extensions/.gsplat_precompiled")
+    extension_dir = Path(os.getenv("TORCH_EXTENSIONS_DIR") or "")
+    try:
+        return marker.exists() and extension_dir.resolve() == marker.parent.resolve()
+    except OSError:
+        return False
+
+
+def prewarm_gsplat_kernels(paths: DashDeblurGroupPaths, *, progress: Progress | None = None, label: str = "dash_deblur_group") -> None:
+    if gsplat_kernels_are_precompiled():
+        print(f"[{label}] gsplat kernels ready (precompiled)", flush=True)
+        if progress:
+            progress("fine_training_preflight", 42, "gsplat kernels ready")
+        return
+    print(f"[{label}] precompiling gsplat CUDA kernels", flush=True)
+    if progress:
+        progress("fine_training_preflight", 42, "precompiling gsplat CUDA kernels")
+    command = [paths.python, "-u", "-c", GSPLAT_PREWARM_SCRIPT]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(paths.repo_dir),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=900,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise FineFailure("FINE_TRAINING_PYTHON_NOT_FOUND", f"fine training python not found: {paths.python}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise FineFailure("FINE_GSPLAT_PRECOMPILE_TIMEOUT", "gsplat CUDA kernel precompile timed out") from exc
+    output = (completed.stdout or "").strip()
+    if output:
+        for line in output.splitlines():
+            print(f"[{label}] gsplat precompile: {line}", flush=True)
+    if completed.returncode != 0:
+        raise FineFailure("FINE_GSPLAT_PRECOMPILE_FAILED", output or "gsplat CUDA kernel precompile failed")
+    print(f"[{label}] gsplat kernels ready", flush=True)
+    if progress:
+        progress("fine_training_preflight", 42, "gsplat kernels ready")
 
 
 def run_training_process(command: list[str], *, cwd: Path, iterations: int, progress: Progress | None, label: str = "dash_deblur_group") -> None:
