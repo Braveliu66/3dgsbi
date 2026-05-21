@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.fine.dash_deblur_group import (  # noqa: E402
     DashDeblurGroupPaths,
+    build_blur_label_records,
     build_blur_labels,
     build_training_command,
     build_training_config,
@@ -24,6 +25,8 @@ from app.fine.dash_deblur_group import (  # noqa: E402
     resolve_runtime_paths,
     resolve_effective_deblur_mode,
     run_dash_deblur_group_training,
+    training_metric_iterations,
+    training_save_iterations,
     write_training_config,
 )
 from app.fine.runner import remap_blur_registry_to_scene_images  # noqa: E402
@@ -263,6 +266,31 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
             },
         )
 
+    def test_blur_label_records_keep_detector_strengths(self) -> None:
+        blur = SimpleNamespace(
+            per_frame_blur={
+                "000000.jpg": {
+                    "rejected": False,
+                    "training_image": "000000.jpg",
+                    "blurred": True,
+                    "kind": "motion",
+                    "blur_weight": 0.7,
+                    "blurry_patch_ratio": 0.42,
+                    "raw_score": "12.5",
+                },
+            }
+        )
+
+        self.assertEqual(
+            build_blur_label_records(blur)["000000.jpg"],
+            {
+                "blur_type": "motion",
+                "blur_weight": 0.7,
+                "blurry_patch_ratio": 0.42,
+                "raw_score": 12.5,
+            },
+        )
+
     def test_detector_raw_label_is_trusted_before_normalized_label(self) -> None:
         self.assertEqual(
             normalize_detector_blur_type({"label": "sharp", "blur_type": "none", "normalized_blur_type": "motion"}),
@@ -326,7 +354,7 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         self.assertIn("pts_N_pts = 0", text)
         self.assertIn("pts_iter = 999999", text)
         self.assertIn("pts_rate = 0.0", text)
-        self.assertIn("blur_code_dim = 4", text)
+        self.assertIn("blur_code_dim = 8", text)
         self.assertIn("pre_deblur_warmup_enable = True", text)
         self.assertIn("pre_deblur_warmup_iters = 500", text)
         self.assertIn("luminance_enable = True", text)
@@ -368,8 +396,8 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         train_source = (trainer_root / "train.py").read_text(encoding="utf-8")
         blur_kernel_source = (trainer_root / "scene" / "blur_kernel.py").read_text(encoding="utf-8")
 
-        self.assertIn("sharp_camera_subset(scene.getTestCameras())", train_source)
-        self.assertIn("sharp_camera_subset(scene.getTrainCameras())[:5]", train_source)
+        self.assertIn("sharp_or_low_blur_weight_subset(scene.getTestCameras(), fallback_limit=5)", train_source)
+        self.assertIn("sharp_or_low_blur_weight_subset(scene.getTrainCameras(), fallback_limit=5)[:5]", train_source)
         self.assertIn("code_dim=opt.blur_code_dim", train_source)
         self.assertIn("nn.Embedding(num_images, blur_code_dim)", blur_kernel_source)
 
@@ -424,7 +452,15 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         self.assertIn(str(output_dir), command)
         self.assertIn("--config", command)
         self.assertIn("--test_iterations", command)
-        self.assertIn("3001", command)
+        self.assertIn("--save_iterations", command)
+        self.assertIn("500", command)
+        self.assertIn("30000", command)
+
+    def test_training_metric_iterations_include_final_iteration(self) -> None:
+        self.assertEqual(training_metric_iterations(1200, interval=500), [500, 1000, 1200])
+
+    def test_training_save_iterations_use_ten_thousand_interval_and_final_iteration(self) -> None:
+        self.assertEqual(training_save_iterations(25_000), [10_000, 20_000, 25_000])
 
     def test_training_exports_filtered_final_ply(self) -> None:
         try:

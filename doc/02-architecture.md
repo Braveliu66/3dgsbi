@@ -1,156 +1,121 @@
-yy# 系统架构设计
+# 系统架构设计
 
 ## 1. 总体结构
 
-系统采用前后端分离、任务异步化、GPU Worker 独立执行的架构。
+系统采用前后端分离、任务异步化、GPU Worker 独立执行的单机 Compose 架构。
 
 ```mermaid
 flowchart LR
-    Browser["浏览器 / 移动端 / VR"] --> Frontend["Next.js / React 前端"]
-    Frontend --> API["FastAPI 后端 API"]
-    Frontend --> Events["WebSocket / SSE 事件通道"]
-    Frontend --> Viewer["Spark 2.0 Viewer"]
+    Browser["浏览器"] --> Frontend["Next.js 前端"]
+    Frontend --> API["FastAPI 后端"]
+    Frontend --> Events["SSE 项目事件"]
+    Frontend --> Viewer["Spark Viewer / PLY fallback"]
 
-    API --> Postgres["PostgreSQL 元数据库"]
-    API --> Redis["Redis 队列 / 进度 / 限流"]
-    API --> ObjectStore["MinIO / S3 对象存储"]
+    API --> DB["PostgreSQL / SQLite 测试库"]
+    API --> Redis["Redis 队列"]
+    API --> Storage["Local Storage / S3"]
 
-    Redis --> Scheduler["自适应 GPU 调度器"]
-    Scheduler --> WorkerA["GPU Worker A"]
-    Scheduler --> WorkerB["GPU Worker B"]
-    Scheduler --> WorkerN["GPU Worker N"]
+    Redis --> PreviewWorker["worker-preview"]
+    Redis --> FineWorker["worker-fine"]
 
-    WorkerA --> Adapter["算法适配层"]
-    WorkerB --> Adapter
-    WorkerN --> Adapter
+    PreviewWorker --> LiteVGGT["LiteVGGT"]
+    PreviewWorker --> Spark["Spark SPZ 转码"]
+    FineWorker --> COLMAP["COLMAP global_mapper / CLI / PyCOLMAP"]
+    FineWorker --> EAP["EAP 点云增强"]
+    FineWorker --> Trainer["DashDeblurGroupGS"]
+    FineWorker --> Spark
 
-    Adapter --> Preview["极速预览管线"]
-    Adapter --> Fine["精细重建管线"]
-    Adapter --> Export["Mesh / 文件导出"]
-    Adapter --> LOD["LOD 生成"]
-
-    Preview --> ObjectStore
-    Fine --> ObjectStore
-    Export --> ObjectStore
-    LOD --> ObjectStore
-    Viewer --> ObjectStore
+    LiteVGGT --> Storage
+    Trainer --> Storage
+    Spark --> Storage
 ```
 
 ## 2. 前端模块
 
 | 模块 | 职责 |
 | --- | --- |
-| 首页 / 新建项目 | 默认入口，提供图片项目创建方式，显示系统资源和训练中项目 |
-| 项目列表 | 展示项目、状态、创建时间、主要产物 |
-| 项目详情 | 展示上传素材、任务进度、预览模型、导出入口 |
-| 完整素材上传页 | 支持图片多选、视频上传、分片上传、补传、删除素材、缩略图大图预览和素材统计 |
-| Viewer | 使用 Spark 2.0 加载 SPZ 或 RAD 模型，支持 LOD |
-| 任务进度 | 通过 WebSocket 或 SSE 接收任务状态和进度 |
-| 导出面板 | 发起 Mesh 导出，展示导出文件和下载链接 |
-| 用户总览 | 展示项目总数、训练中数量、已完成数量和总占用 |
-| 问题反馈 | 用户提交问题、截图、项目关联和联系方式 |
-| 管理面板 | 展示 GPU、队列、Worker、用户存储和任务日志 |
+| `AppShell` | 认证状态、资源状态、导航、任务弹层 |
+| 首页 `/` | 新建项目入口、系统资源和运行中任务入口 |
+| 上传页 `/upload` | 创建项目、分片上传、素材列表、预览、精细重建 |
+| 项目列表 `/projects` | 搜索、筛选、批量删除和项目卡片 |
+| 项目详情 `/projects/[id]` | Viewer、素材、任务、日志、下载、分享、删除 |
+| 分享页 `/share/[token]` | 公开 Viewer 和项目摘要 |
+| 参数页 `/pipeline-parameters` | 管理员编辑预览/fine 的 scene defaults |
+| 管理页 `/admin` | 资源、项目、用户、反馈、任务取消 |
+| 关于页 `/about` | 公开算法和许可证说明 |
+| 反馈页 `/feedback` | 提交问题反馈 |
 
+前端 API 封装位于 `frontend/lib/api.ts`。上传使用 XHR 分片以获得进度；下载大文件支持 Range 并发下载。
 
 ## 3. 后端模块
 
-| 模块 | 职责 |
-| --- | --- |
-| Auth | 用户认证和项目访问控制 |
-| Project API | 项目创建、查询、更新、删除 |
-| Upload API | 分片上传、合并、校验、对象存储写入 |
-| Task API | 创建预览、精细重建、LOD、Mesh 导出任务 |
-| Event API | 推送任务进度、状态变化和错误信息 |
-| Storage Service | 封装 MinIO/S3 路径、签名 URL、生命周期策略 |
-| Media Service | 管理项目原始图片、视频、缩略图、删除和补传 |
-| Statistics Service | 统计用户项目数、存储占用、训练占用和系统资源 |
-| Feedback Service | 保存用户反馈、附件和处理状态 |
-| Scheduler | 从 Redis 获取任务并分配 GPU Worker |
-| Worker Agent | 执行算法适配器、产物上传、日志回传 |
-| Resource Monitor | 采集 CPU、GPU、显存、队列和 Worker 心跳 |
+| 模块 | 代码位置 | 职责 |
+| --- | --- | --- |
+| API | `backend/app/main.py` | REST API、认证、权限、任务创建、SSE |
+| 配置 | `backend/app/config.py` | 环境变量、路径、队列、缓存、超时 |
+| 模型 | `backend/app/models.py` | SQLAlchemy 数据表 |
+| 存储 | `backend/app/storage.py` | local/S3 对象读写、token 下载、checksum |
+| 资源 | `backend/app/resources.py` | CPU/GPU/显存采集 |
+| 算法登记 | `backend/app/algorithms.py` | bundled 算法、预检、许可证说明 |
+| 预览 Worker | `backend/app/worker.py` | `preview_tasks` 消费、LiteVGGT、SPZ、日志 |
+| 精细 Worker | `backend/app/fine_worker.py` | `fine_tasks` 消费、输入准备、fine pipeline、日志 |
+| Fine pipeline | `backend/app/fine/*` | COLMAP、EAP、DashDeblurGroupGS、viewer meta |
+| Preview pipeline | `backend/app/preview/*` | 图像/视频预处理、LiteVGGT adapter、SPZ/PLY IO |
 
+## 4. 算法管线
 
-## 4. 算法适配层
+| 场景 | 当前管线 | 主要产物 |
+| --- | --- | --- |
+| 图片预览 | 图片归一化 -> LiteVGGT -> PLY -> Spark SPZ | `preview.spz`、`original.ply`、`preview_meta.json` |
+| 单视频预览 | ffmpeg 抽帧/筛帧 -> LiteVGGT speed defaults -> Spark SPZ | `preview.spz`、调试 PLY、视频预处理 metrics |
+| 图片精细重建 | 图片归一化 -> blur analysis -> COLMAP/EAP -> DashDeblurGroupGS -> PLY/SPZ | `final.ply`、`final_web.spz`、`metrics.json` |
+| 单视频精细重建 | ffmpeg 抽帧/过滤 -> 同图片 fine pipeline | 同上 |
+| Mesh 导出 | 未实现 | 无 |
+| RAD LOD | 未接入真实转换器 | 默认无 |
 
-算法适配层的目标是屏蔽各算法仓库的输入输出差异，让 Worker 只处理统一任务格式。
+## 5. Worker 与队列
 
-算法适配层必须调用真实算法代码。未安装算法、缺少权重、GPU 不满足要求，应返回明确错误，不能生成假产物标记任务成功。
+- `preview_tasks`：由 `worker-preview` 监听，默认任务优先级 90。
+- `fine_tasks`：由 `worker-fine` 监听，默认任务优先级 40。
+- Worker 通过 `worker_heartbeats` 上报 worker id、主机名、GPU、显存、CPU 和当前任务。
+- 服务启动时会恢复 interrupted fine tasks：数据库中 `queued/running` 但不在 Redis 队列的 fine task 会重新入队。
+- API 请求只创建任务和入队，不在请求线程执行算法。
 
-### 统一输入
+## 6. 存储布局
 
-- `project_id`
-- `task_id`
-- `input_type`: `images`、`video`、`camera`
-- `raw_uri`
-- `work_dir`
-- `pipeline`: `preview`、`fine`、`mesh_export`、`lod`
-- `options`: 系统自动生成的执行参数
-
-### 统一输出
-
-- `status`: `succeeded` 或 `failed`
-- `artifacts`: 产物清单
-- `metrics`: 耗时、点数、帧率、质量指标
-- `logs`: 关键日志路径
-- `error`: 失败原因
-- `suggestions`: 素材质量提示，例如建议补拍方向、模糊图片、覆盖不足区域
-
-## 5. 算法管线
-
-| 场景 | 管线 |
-| --- | --- |
-| 图片极速预览 | LiteVGGT → Spark-SPZ |
-| 视频极速预览 | 待重写 |
-| 实时摄像头 | 待重写 |
-| 稀疏视角 | FreeSplatter 初始化 → 精细合成引擎 |
-| 长视频精细重建 | 待重写 |
-| Mesh 导出 | MeshSplatting → `.ply` / `.obj` / `.glb` |
-| LOD 生成 |
-
-## 6. 调度策略
-
-- 预览任务优先于精细重建任务。
-- 轻量预览任务可以在同一 GPU 上并发执行。
-- 精细重建和 Mesh 导出默认独占 GPU。
-- 调度器每 1 秒读取 Worker 心跳、显存、利用率和任务状态。
-- 任务失败后可根据失败类型决定是否重试，算法执行失败默认不盲目重试。
-- 高并发场景下，上传、查询、事件推送和静态资源下载不能阻塞 GPU 任务调度。
-- 多 GPU 场景下，调度器应记录每张 GPU 的显存、利用率、当前任务、预计释放时间，并按任务类型分配。
-
-## 7. 部署建议
-
-毕业设计阶段建议先实现单机可运行版本：
+本地开发默认使用 `data/storage`，也可配置 S3/MinIO。主要路径：
 
 ```text
-frontend        Next.js / React
-backend         FastAPI
-database        PostgreSQL
-queue/cache     Redis
-object storage  MinIO
-worker          Python GPU Worker
-viewer          Spark 2.0
+users/{user_id}/projects/{project_id}/raw/images/{file_name}
+users/{user_id}/projects/{project_id}/raw/video/{file_name}
+users/{user_id}/projects/{project_id}/thumbs/{media_id}.jpg
+users/{user_id}/projects/{project_id}/preview/preview.spz
+users/{user_id}/projects/{project_id}/preview/{task_id}/original.ply
+users/{user_id}/projects/{project_id}/final/final.ply
+users/{user_id}/projects/{project_id}/final/final_web.spz
+users/{user_id}/projects/{project_id}/final/final_viewer_meta.json
+users/{user_id}/projects/{project_id}/final/metrics.json
+users/{user_id}/projects/{project_id}/logs/{task_id}.log
 ```
 
-后续扩展到多机时，只需要增加 GPU Worker 节点，并让 Worker 连接同一 Redis、PostgreSQL 和对象存储。
+## 7. 部署结构
 
+`docker-compose.yml` 当前服务：
 
-## 8. GPU 预览链路同步
+- `postgres`
+- `redis`
+- `backend`
+- `worker-preview`
+- `worker-fine`
+- `frontend`
 
-## 9. 渐进式渲染与 LOD 加载
+`worker-preview` 和 `worker-fine` 复用 `3dgsbi-worker:local` 镜像。Compose bind-mounts：
 
-- `GET /api/projects/{project_id}/viewer-config` 当前返回单个预览或最终模型；视频/实时视频渐进加载待新管线重新定义。
-- Viewer 以 800 万 Gaussians 为默认预算，根据 FPS、网络状况和时间线位置自动降低远处/旧片段的 LOD 质量，目标保持 90 FPS。
+- `./backend/app:/app/app`
+- `./worker/trainer/dash_deblur_group_gs:/opt/dash_deblur_group_gs`
+- `./frontend:/app`
+- `./model-cache:/model-cache`
+- `./data/storage:/app/data/storage`
+- `./data/work:/app/data/work`
 
-## 2026-05-18 Fine Pipeline Update
-
-- Fine reconstruction accepts ordinary JPG/PNG uploads. EXIF camera parameters are not required; EXIF is used only for orientation correction.
-- Preview LiteVGGT remains isolated under the preview vendor path. Fine SfM metrics include `sfm_backend=colmap_cli` or `pycolmap`, registered image count, and sparse point count.
-- The active fine pipeline is `dash_deblur_group_gs`: existing COLMAP scene construction feeds the embedded DashDeblurGroupGS trainer.
-- Deblurring-3DGS GTnet, motion/defocus blur, densification, and the disabled-by-default `add_points()` path live under `worker/trainer/dash_deblur_group_gs`; backend code defaults to motion deblur for all training images, generates scene-specific motion/defocus presets, runs `train.py`, validates `final.ply`, and converts `final_web.spz`.
-- The backend does not vendor Speedy-Splat, FastGS pruning, duplicate rasterizers, or `fused_ssim`.
-- Where earlier planning notes say "FastGS chunk training", this platform now means DashDeblurGroupGS chunk-compatible training on one global COLMAP `sparse/0` coordinate system.
-- Worker Docker builds upstream COLMAP with large-scene commands (`global_mapper`, `hierarchical_mapper`, `model_clusterer`, `model_splitter`) so large-scene behavior is an image guarantee, not a runtime surprise.
-- Local Docker Compose bind-mounts the trainer to `/opt/dash_deblur_group_gs`, so ordinary trainer Python edits are applied by recreating workers rather than rebuilding the image.
-- `birth_iter` and `protect_new_points_iters` are intentionally absent from the fused trainer. They are not part of Deblurring-3DGS/Dash/Group algorithm boundaries.
-
-- `colmap_sparse` is retained only as a legacy fine pipeline alias.
+普通源码修改后重建服务即可；依赖、Dockerfile、CUDA 扩展或 submodule 变化时才 rebuild。

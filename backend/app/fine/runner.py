@@ -23,7 +23,6 @@ from app.fine.colmap_defaults import (
     COLMAP_TARGET_SPARSE_POINTS,
     COLMAP_THREADS,
     DEFAULT_FINE_SCENE_PROFILE,
-    FINE_IMAGE_MAX_SIDE,
     FINE_PIPELINE_NAME,
     FINE_SCENE_PROFILE_MAX_SIDES,
     LEGACY_FINE_PIPELINE_ALIASES,
@@ -66,9 +65,7 @@ def run_fine_pipeline(ctx: FineContext) -> FineResult:
         raise FineFailure("INSUFFICIENT_IMAGES", "COLMAP fine reconstruction requires at least 3 images")
 
     fine_scene_profile = resolve_fine_scene_profile(ctx.options)
-    profile_image_max_side = FINE_SCENE_PROFILE_MAX_SIDES[fine_scene_profile]
-    default_image_max_side = min(profile_image_max_side, settings.fine_image_max_side, FINE_IMAGE_MAX_SIDE)
-    image_max_side = read_int(ctx.options.get("fine_image_max_side"), default_image_max_side, minimum=512, maximum=FINE_IMAGE_MAX_SIDE)
+    image_max_side = 0
     reject_ratio = read_float(ctx.options.get("fine_blur_reject_ratio"), 0.0, minimum=0.0, maximum=0.45)
     colmap_max_size = read_int(ctx.options.get("fine_colmap_max_image_size"), COLMAP_MAX_IMAGE_SIZE, minimum=512, maximum=4_096)
     colmap_max_matches = read_int(ctx.options.get("fine_colmap_max_num_matches"), COLMAP_MAX_NUM_MATCHES, minimum=1024, maximum=65_536)

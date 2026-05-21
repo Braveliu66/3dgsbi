@@ -11,6 +11,8 @@
 
 import os
 import json
+import csv
+import subprocess
 import torch
 import time
 from random import randint, choice
@@ -37,6 +39,155 @@ import torch.nn.functional as F
 from scene.blur_types import BLUR_SHARP, BLUR_MOTION, BLUR_DEFOCUS, normalize_blur_type
 from scene.gdags import SOURCE_EAP, SOURCE_SFM
 from scene.luminance_model import PerImageExposureModel
+
+EXPERIMENT_METRICS_FILE = "experiment_metrics.csv"
+FINAL_METRICS_FILE = "final_metrics.txt"
+EXPERIMENT_METRIC_FIELDS = [
+    "iteration",
+    "split",
+    "loss_total",
+    "loss_l1",
+    "loss_photo_raw",
+    "loss_photo_weighted",
+    "loss_reg",
+    "loss_code_reg",
+    "loss_delta_reg",
+    "loss_lum_reg",
+    "psnr",
+    "ssim",
+    "lpips",
+    "num_gaussians",
+    "vram_allocated_mb",
+    "vram_reserved_mb",
+    "iter_time_ms",
+    "fps",
+    "wall_seconds",
+    "blur_type",
+    "blur_weight",
+    "warmup",
+]
+
+
+def append_experiment_metric(savedir, row):
+    path = os.path.join(savedir, EXPERIMENT_METRICS_FILE)
+    exists = os.path.exists(path)
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=EXPERIMENT_METRIC_FIELDS)
+        if not exists:
+            writer.writeheader()
+        writer.writerow({field: row.get(field, "") for field in EXPERIMENT_METRIC_FIELDS})
+
+
+def cuda_memory_mb():
+    if not torch.cuda.is_available():
+        return 0.0, 0.0
+    return torch.cuda.memory_allocated() / (1024.0 * 1024.0), torch.cuda.memory_reserved() / (1024.0 * 1024.0)
+
+
+def scalar_value(value):
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().item()
+    return float(value)
+
+
+def format_metric_value(value, digits=6):
+    if value == "" or value is None:
+        return ""
+    try:
+        numeric_value = scalar_value(value)
+    except Exception:
+        return str(value)
+    return f"{numeric_value:.{digits}f}"
+
+
+def write_final_metrics_document(savedir, iteration, rows):
+    if not rows:
+        return
+
+    lines = [
+        "# Final Training Metrics",
+        "",
+        f"Iteration: {iteration}",
+        "",
+        "| Split | PSNR | SSIM | LPIPS | Gaussian Count | Training Seconds | FPS |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in rows:
+        lines.append(
+            "| {split} | {psnr} | {ssim} | {lpips} | {num_gaussians} | {train_seconds} | {fps} |".format(
+                **row
+            )
+        )
+
+    lines.extend(["", "Parse-compatible records:", ""])
+    for row in rows:
+        lines.extend(
+            [
+                f"FINAL ITERATION {iteration} - {row['split']}",
+                f"PSNR: {row['psnr']}",
+                f"SSIM: {row['ssim']}",
+                f"LPIPS: {row['lpips']}",
+                f"NUM_GAUSSIAN: {row['num_gaussians']}",
+                f"FPS: {row['fps']}",
+                f"TRAIN_SECONDS: {row['train_seconds']}",
+                "",
+            ]
+        )
+
+    path = os.path.join(savedir, FINAL_METRICS_FILE)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    print(f"\n[FinalMetrics] wrote {path}")
+
+
+def find_repo_script(script_name):
+    current = os.path.abspath(os.path.dirname(__file__))
+    for _ in range(8):
+        candidate = os.path.join(current, "scripts", script_name)
+        if os.path.exists(candidate):
+            return candidate
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return None
+
+
+def find_project_root():
+    current = os.path.abspath(os.path.dirname(__file__))
+    for _ in range(8):
+        if os.path.isdir(os.path.join(current, ".git")) or os.path.isdir(os.path.join(current, "scripts")):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return os.getcwd()
+
+
+def default_thesis_assets_path(model_path):
+    if model_path:
+        model_dir = os.path.abspath(model_path)
+        parent = os.path.dirname(model_dir)
+        if os.path.basename(model_dir) == "model" and os.path.basename(parent) == "dash_deblur_group":
+            return os.path.join(os.path.dirname(parent), "thesis_assets")
+    return os.path.join(find_project_root(), "thesis_assets")
+
+
+def export_thesis_assets(model_path, output_path=None):
+    script = find_repo_script("export_thesis_figures.py")
+    if script is None:
+        print("[ThesisExport] scripts/export_thesis_figures.py not found; skipped")
+        return
+    output_path = output_path or default_thesis_assets_path(model_path)
+    command = [sys.executable, script, os.path.abspath(model_path), "-o", os.path.abspath(output_path)]
+    try:
+        subprocess.run(command, check=True)
+    except Exception as exc:
+        print(f"[ThesisExport] failed: {exc}")
+    else:
+        print(f"[ThesisExport] wrote assets to {output_path}")
+
 
 def auto_point_addition_iter(total_iterations: int) -> int:
     """根据总训练轮次自适应计算加点时机。
@@ -85,16 +236,19 @@ def apply_blur_labels(cameras, blur_label_path):
 
     label_map = {}
     for name, value in labels.items():
-        label_value = value.get("blur_type") if isinstance(value, dict) else value
-        label_map[str(name)] = label_value
-        label_map[os.path.splitext(os.path.basename(str(name)))[0]] = label_value
+        label_record = value if isinstance(value, dict) else {"blur_type": value}
+        label_map[str(name)] = label_record
+        label_map[os.path.splitext(os.path.basename(str(name)))[0]] = label_record
 
     for image_id, camera in enumerate(sorted(cameras, key=lambda cam: cam.image_name)):
         camera.image_id = image_id
-        label_value = label_map.get(camera.image_name)
-        if label_value is None:
+        label_record = label_map.get(camera.image_name)
+        if label_record is None:
             raise RuntimeError(f"Missing blur label for training image: {camera.image_name}")
+        label_value = label_record.get("blur_type")
         camera.blur_type = normalize_blur_type(label_value)
+        blur_weight = label_record.get("deblur_weight", label_record.get("deblurweight", label_record.get("blur_weight")))
+        camera.blur_weight = float(blur_weight) if blur_weight is not None else 1.0
 
     counts = {0: 0, 1: 0, 2: 0}
     for camera in cameras:
@@ -114,6 +268,30 @@ def ensure_camera_image_ids(cameras):
 
 def sharp_camera_subset(cameras):
     return [camera for camera in cameras if getattr(camera, "blur_type", BLUR_SHARP) == BLUR_SHARP]
+
+
+def include_sharp_test_cameras_in_train(scene):
+    train_cameras = scene.getTrainCameras()
+    train_names = {camera.image_name for camera in train_cameras}
+    added = 0
+    for camera in scene.getTestCameras():
+        if getattr(camera, "blur_type", BLUR_SHARP) == BLUR_SHARP and camera.image_name not in train_names:
+            train_cameras.append(camera)
+            train_names.add(camera.image_name)
+            added += 1
+    if added:
+        print(f"[BlurLabel] added {added} sharp test cameras to training set")
+    return added
+
+
+def sharp_or_low_blur_weight_subset(cameras, fallback_limit=None):
+    sharp_cameras = sharp_camera_subset(cameras)
+    if sharp_cameras:
+        return sharp_cameras
+    sorted_cameras = sorted(cameras, key=lambda camera: getattr(camera, "blur_weight", 1.0))
+    if fallback_limit is None:
+        return sorted_cameras
+    return sorted_cameras[:fallback_limit]
 
 
 def compute_photo_loss(pred, gt, opt):
@@ -190,6 +368,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     per_image_blur = bool(opt.per_image_blur) and bool(opt.blur_label_path)
     if deblur and per_image_blur:
         num_images = apply_blur_labels(all_cameras, opt.blur_label_path)
+        include_sharp_test_cameras_in_train(scene)
         gaussians.create_conditional_GTnets(
             num_images=num_images,
             hidden=opt.hidden,
@@ -355,10 +534,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         with torch.no_grad():
             # 全部完成
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+            train_psnr = ""
             if iteration % 100 == 0:
                 Ll2 = l2_loss(image, gt_image)
-                psnr = (-10.0 * np.log(Ll2.cpu()) / np.log(10.0)).item()
-                progress_bar.set_postfix({"PSNR": f"{psnr:.{2}f}", "raw": f"{photo_loss_raw.item():.4f}", "reg": f"{reg_loss.item():.4f}"})
+                train_psnr = (-10.0 * np.log(Ll2.cpu()) / np.log(10.0)).item()
+                progress_bar.set_postfix({"PSNR": f"{train_psnr:.{2}f}", "raw": f"{photo_loss_raw.item():.4f}", "reg": f"{reg_loss.item():.4f}"})
                 progress_bar.update(100)
                 print(
                     f"\n[Loss] iter={iteration} warmup={int(warmup_active)} blur_type={int(current_blur_type)} "
@@ -375,6 +555,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 iteration,
                 Ll1,
                 loss,
+                photo_loss_raw,
+                photo_loss_weighted,
+                code_reg,
+                delta_reg,
+                lum_reg,
+                reg_loss,
                 l1_loss,
                 iter_start.elapsed_time(iter_end),
                 testing_iterations,
@@ -389,6 +575,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 lambda_p=opt.lambda_p,
                 max_clamp=opt.max_clamp,
                 final_iteration=(iteration == opt.iterations),
+                current_blur_type=current_blur_type,
+                blur_weight=weight,
+                warmup_active=warmup_active,
+                train_psnr=train_psnr,
             )
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
@@ -511,6 +701,12 @@ def training_report(
     iteration,
     Ll1,
     loss,
+    photo_loss_raw,
+    photo_loss_weighted,
+    code_reg,
+    delta_reg,
+    lum_reg,
+    reg_loss,
     l1_loss,
     elapsed,
     testing_iterations,
@@ -525,7 +721,40 @@ def training_report(
     lambda_p=0.01,
     max_clamp=1.1,
     final_iteration: bool = False,
+    current_blur_type=BLUR_SHARP,
+    blur_weight=1.0,
+    warmup_active=False,
+    train_psnr="",
 ):
+    train_start = globals().get('TRAIN_START_TIME')
+    wall_seconds = time.time() - train_start if train_start else ""
+    vram_allocated_mb, vram_reserved_mb = cuda_memory_mb()
+    fps = 1000.0 / elapsed if elapsed and elapsed > 0 else ""
+    append_experiment_metric(
+        savedir,
+        {
+            "iteration": iteration,
+            "split": "train",
+            "loss_total": loss.item(),
+            "loss_l1": Ll1.item(),
+            "loss_photo_raw": photo_loss_raw.item(),
+            "loss_photo_weighted": photo_loss_weighted.item(),
+            "loss_reg": reg_loss.item(),
+            "loss_code_reg": code_reg.item(),
+            "loss_delta_reg": delta_reg.item(),
+            "loss_lum_reg": lum_reg.item(),
+            "psnr": train_psnr,
+            "num_gaussians": int(scene.gaussians.get_xyz.shape[0]),
+            "vram_allocated_mb": vram_allocated_mb,
+            "vram_reserved_mb": vram_reserved_mb,
+            "iter_time_ms": elapsed,
+            "fps": fps,
+            "wall_seconds": wall_seconds,
+            "blur_type": int(current_blur_type),
+            "blur_weight": float(blur_weight),
+            "warmup": int(bool(warmup_active)),
+        },
+    )
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
@@ -537,13 +766,14 @@ def training_report(
         torch.cuda.empty_cache()
         if per_image_blur:
             validation_configs = (
-                {'name': 'test_sharp', 'cameras' : sharp_camera_subset(scene.getTestCameras())},
-                {'name': 'train_sharp', 'cameras' : sharp_camera_subset(scene.getTrainCameras())[:5]},
+                {'name': 'test', 'cameras' : sharp_or_low_blur_weight_subset(scene.getTestCameras(), fallback_limit=5)},
+                {'name': 'train', 'cameras' : sharp_or_low_blur_weight_subset(scene.getTrainCameras(), fallback_limit=5)[:5]},
             )
         else:
             validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()},
                                   {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]})
 
+        final_metric_rows = []
         for config in validation_configs:
             _type = config["name"].upper()
             os.makedirs(f"{savedir}/{_type}", exist_ok=True)
@@ -600,30 +830,43 @@ def training_report(
                     f.write("[ITER {}] Evaluating {}: L1 {} PSNR {}\n".format(iteration, config['name'], l1_test, psnr_test))
                     f.write("[ITER {}] Evaluating {}: SSIM {:.4f} LPIPS {:.4f}\n".format(iteration, config['name'], ssim_test, lpips_test))
                 # 如果这是最终迭代，写入一份 final_metrics.txt，包含训练耗时与高斯点数
+                append_experiment_metric(
+                    savedir,
+                    {
+                        "iteration": iteration,
+                        "split": config["name"],
+                        "loss_l1": scalar_value(l1_test),
+                        "psnr": scalar_value(psnr_test),
+                        "ssim": scalar_value(ssim_test),
+                        "lpips": scalar_value(lpips_test),
+                        "num_gaussians": int(scene.gaussians.get_xyz.shape[0]),
+                        "vram_allocated_mb": vram_allocated_mb,
+                        "vram_reserved_mb": vram_reserved_mb,
+                        "fps": fps,
+                        "wall_seconds": wall_seconds,
+                    },
+                )
                 if final_iteration:
                     total_points = int(scene.gaussians.get_xyz.shape[0])
-                    train_time = None
-                    try:
-                        if globals().get('TRAIN_START_TIME'):
-                            train_time = time.time() - globals().get('TRAIN_START_TIME')
-                    except Exception:
-                        train_time = None
-                    summary = (
-                        f"FINAL ITERATION {iteration} - {config['name']}\n"
-                        f"PSNR: {psnr_test}\n"
-                        f"SSIM: {ssim_test:.6f}\n"
-                        f"LPIPS: {lpips_test:.6f}\n"
-                        f"NUM_GAUSSIAN: {total_points}\n"
-                        f"TRAIN_SECONDS: {train_time if train_time is not None else 'unknown'}\n"
+                    final_metric_rows.append(
+                        {
+                            "split": config["name"],
+                            "psnr": format_metric_value(psnr_test),
+                            "ssim": format_metric_value(ssim_test),
+                            "lpips": format_metric_value(lpips_test),
+                            "num_gaussians": str(total_points),
+                            "fps": format_metric_value(fps, digits=3) if fps != "" else "",
+                            "train_seconds": format_metric_value(wall_seconds, digits=3) if wall_seconds != "" else "unknown",
+                        }
                     )
-                    with open(f"{savedir}/final_metrics.txt", "a") as ff:
-                        ff.write(summary)
-                    print("\n" + summary)
                     
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
 
+
+        if final_iteration:
+            write_final_metrics_document(savedir, iteration, final_metric_rows)
 
         if tb_writer:
             tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
@@ -642,11 +885,13 @@ if __name__ == "__main__":
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[3_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[3_000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[10_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[3_000])
     parser.add_argument("--start_checkpoint", type=str, default = None)
     parser.add_argument('--deblur', type=int, default=1)
+    parser.add_argument("--skip_thesis_export", action="store_true")
+    parser.add_argument("--thesis_assets_path", type=str, default=None)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
@@ -657,7 +902,10 @@ if __name__ == "__main__":
     # 启动 GUI 服务并开始训练（当前默认关闭）
     # network_gui.init(args.ip, args.port)  # 如需 GUI 交互可取消注释
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.deblur)
+    model_params = lp.extract(args)
+    training(model_params, op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.deblur)
+    if not args.skip_thesis_export:
+        export_thesis_assets(model_params.model_path, args.thesis_assets_path)
 
     # 初始化命令行参数解析器
     print("\nTraining complete.")

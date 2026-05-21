@@ -1,138 +1,210 @@
 # Fine Reconstruction Pipeline
 
-This document is the authoritative description of the current fine reconstruction path.
+This document is the source of truth for the current fine reconstruction path.
 
-## Pipeline
+## 1. Pipeline
 
-The default fine pipeline is `dash_deblur_group_gs`.
+The only active fine pipeline is:
 
 ```text
-uploaded images / extracted frames
-  -> RGB JPEG normalization and optional quality filtering
-  -> blur analysis
-  -> PyCOLMAP scene construction (COLMAP CLI optional)
-  -> DashDeblurGroupGS training
-  -> final.ply
-  -> Spark SPZ final_web.spz
-  -> metrics.json and final_viewer_meta.json
+dash_deblur_group_gs
 ```
 
-`colmap_sparse` is only a legacy alias. Preview LiteVGGT is separate from this path.
+`colmap_sparse` is accepted only as a legacy alias.
 
-## Algorithm Fusion
+```text
+uploaded images or extracted video frames
+  -> RGB JPEG normalization
+  -> blur analysis and optional low-quality frame filtering
+  -> COLMAP scene construction
+  -> optional EAP point-cloud augmentation
+  -> DashDeblurGroupGS training
+  -> far-noise filtered final.ply
+  -> Spark SPZ final_web.spz
+  -> final_viewer_meta.json and metrics.json
+```
 
-The embedded trainer lives in `worker/trainer/dash_deblur_group_gs`.
+Preview LiteVGGT is separate from this path.
 
-- Deblurring-3DGS is the training backbone. It owns GTnet, motion blur, defocus blur, point addition, and sharp canonical Gaussian rendering.
-- Speedy-Splat, FastGS pruning, SparseAdam, Dash antialiasing, and renderer replacement are not part of the default path.
+## 2. Inputs
 
-The default training preset keeps the Deblurring-3DGS motion/defocus backbone with `resolution=-1`, but random `add_points()` is disabled by default. EAP provides the initial point-cloud boost, while the standard gradient-based densify/prune path handles local refinement. For 5000-iteration training, `densify_until_iter` defaults to 3000 so late training does not keep doing expensive topology changes.
+Image projects:
 
-The embedded trainer also treats the old random-add default triplet (`pts_iter=2500`, `pts_rate=1.1`, `pts_N_pts=200000`) as disabled. This prevents stale saved presets from reintroducing the large random point burst that can stall training after the point cloud has already grown.
+- Require at least 3 images.
+- Accept ordinary JPG/PNG and other image formats handled by Pillow/HEIF registration.
+- EXIF is not required; orientation may be used as a pixel rotation hint during preprocessing.
 
-The trainer is not a copied upstream repository. Only the used algorithmic pieces are integrated into this repo and shaped around the local fine worker contract.
+Video projects:
 
-## Deblur Mode
+- Require exactly one video file.
+- Fine worker extracts frames, removes duplicate/low-quality frames, then feeds frames to the same image fine pipeline.
 
-The public option is:
+## 3. SfM Backend
+
+Default:
+
+```text
+fine_sfm_backend = colmap_global
+```
+
+Backend normalization:
+
+| Requested | Effective |
+| --- | --- |
+| `colmap_global` | COLMAP CLI `global_mapper` |
+| `gcolmap`, `global`, `global_mapper`, `colmap_glomap` | `colmap_global` |
+| `colmap_cli` | COLMAP CLI incremental `mapper` |
+| `colmap` | COLMAP CLI incremental `mapper` |
+| `pycolmap` | PyCOLMAP incremental path |
+
+`colmap_global` requires the `global_mapper` command. If it is missing, the task fails instead of falling back silently.
+
+Default COLMAP-related values:
+
+- `fine_colmap_max_image_size=1080`
+- `fine_colmap_matcher=exhaustive`
+- `fine_colmap_threads=16`
+- `fine_sift_max_num_features_auto=true`
+- `fine_min_registered_ratio=null`
+- `sfm_target_sparse_points=30000` is recorded as a metric target, not a hard failure.
+
+## 4. EAP
+
+`fine_eap_enabled=true` by default.
+
+When enabled, EAP reads the COLMAP sparse model with pycolmap, augments dense projection regions, and writes `points3D_eap`. The trainer config uses:
+
+```text
+pc_name = points3D_eap
+```
+
+When disabled:
+
+```text
+pc_name = points3D
+```
+
+Safety metrics include original point count, augmented point count, multiplier, augmented images, and configured multiplier cap.
+
+## 5. Deblur Mode
+
+Public option:
 
 ```text
 fine_deblur_mode = motion | defocus | sharp
 ```
 
-Default is `motion`. When deblur is enabled, GTnet deblur rendering is applied to every training image, not only frames classified as blurred by preprocessing.
+Normalization:
 
-The upstream Deblurring-3DGS trainer selects the physical branch through `use_pos`: motion blur uses position deltas, while defocus blur disables them. The default no longer uses blur analysis to auto-switch branches. Legacy `mix`, `auto`, and `automatic` requests are accepted as aliases for `motion`.
+- `mix`, `auto`, `automatic` -> `motion`
+- `fine_deblur_enabled=false` -> `sharp`
 
-- `motion` -> trainer config `deblur = 1`
-- `defocus` -> trainer config `deblur = 1` with position deltas disabled
-- `sharp` -> trainer config `deblur = 0`
+The trainer writes per-image blur labels when blur analysis produced labels. In that case `per_image_blur=1`, motion/defocus images use the deblur branch, and sharp images are treated as sharp. If no blur labels exist, the requested mode drives the scene-level branch.
 
-Metrics record both requested and effective modes:
+Mode effects:
 
-```json
-{
-  "fine_deblur_mode_requested": "motion",
-  "fine_deblur_mode_effective": "motion",
-  "deblur_auto_confidence": "explicit"
-}
+| Mode | Config behavior |
+| --- | --- |
+| `motion` | `deblur=1`, `use_pos=1` |
+| `defocus` | `deblur=1`, `use_pos=0` |
+| `sharp` | `deblur=0`, deblur regularizers disabled |
+
+Metrics record requested/effective mode, label counts, deblur strategy, and applied image count.
+
+## 6. Training Config
+
+Default trainer preset highlights:
+
+- `iterations=30000`
+- `resolution=-1`
+- `fine_image_max_side=0`, so training keeps original resolution unless trainer policy changes it.
+- `fine_gsplat_enabled=true` from API defaults; deblur render path still uses original backend.
+- `fine_spz_enabled=true`
+- `densify_from_iter=500`
+- `densify_until_iter` is capped to about 60% of total iterations by safety logic.
+- Random `add_points()` is disabled by default: `pts_iter=999999`, `pts_rate=0`, `pts_N_pts=0`.
+
+The stale Deblurring-3DGS random-add triplet:
+
+```text
+pts_iter=2500
+pts_rate=1.1
+pts_N_pts=200000
 ```
 
-## Parameter Layers
+is treated as disabled to prevent old presets from reintroducing large random point bursts.
 
-The UI/API exposes only:
+## 7. Removed / Rejected Options
 
-- `scene_type=indoor|outdoor`
-- `fine_deblur_mode=motion|defocus|sharp`
+These are not part of the current contract:
 
-The backend resolves those into scene-specific presets:
+- `birth_iter`
+- `protect_new_points_iters`
+- `fine_edgs_enabled=true`
+- Speedy-Splat / FastGS pruning default path
+- LiteVGGT as a fine backend
+- EDGS/RoMA dense initialization
 
-- `indoor_motion`
-- `indoor_defocus`
-- `outdoor_motion`
-- `outdoor_defocus`
+`fine_edgs_enabled=true` raises `UNSUPPORTED_FINE_OPTION`.
 
-The removed `protect_new_points_iters` and `birth_iter` mechanism must not be reintroduced as an ad hoc side tensor. It was a local helper, not part of the Deblurring-3DGS densification model, and it broke tensor-length invariants after `add_points()` and prune.
+## 8. Runtime Layout
 
-The planned replacement for random `add_points()` is GDAGS-style density control from `final_mixed_blur_3dgs_codex_plan.md`. It must land in phases: stats-only first, then clone/split/prune decisions after canonical-gradient isolation and buffer synchronization tests pass. Any GDAGS age/protection state must be owned by the GDAGS manager and updated through the same clone/split/prune masks as GaussianModel.
-
-## Runtime Layout
-
-Docker images still include the trainer so CUDA extensions can be built during image creation:
+Default trainer path in containers:
 
 ```text
 /opt/dash_deblur_group_gs
 ```
 
-For local development, Docker Compose bind-mounts the working tree trainer over that path:
+Local Compose bind mount:
 
 ```yaml
 ./worker/trainer/dash_deblur_group_gs:/opt/dash_deblur_group_gs
 ```
 
-The backend, preview worker, fine worker, and frontend are also mounted for source updates:
+Runtime override:
 
-- `./backend/app:/app/app`
-- `./worker/trainer/dash_deblur_group_gs:/opt/dash_deblur_group_gs`
-- `./frontend:/app`
+- Environment: `DASH_DEBLUR_GROUP_REPO`
+- Task option: `fine_trainer_repo`
 
-After Python or frontend source changes, use:
+Overrides must point to a compatible DashDeblurGroupGS-style repo with `train.py --config`.
 
-```powershell
-docker compose up -d --force-recreate backend worker-preview worker-fine frontend
-```
+## 9. Outputs
 
-Do not rebuild for ordinary Python/TypeScript edits. Rebuild only when Dockerfile, requirements, CUDA extensions, system packages, base images, or submodules change.
+Fine tasks upload:
 
-## COLMAP
+- `final_ply` -> `final.ply`
+- `final_spz` -> `final_web.spz` when enabled
+- `metrics_json` -> `metrics.json`
+- `viewer_meta_json` -> `final_viewer_meta.json`
+- task log artifact
 
-`fine_sfm_backend=colmap_global` is the default and uses COLMAP 4.x `global_mapper`. `fine_sfm_backend=gcolmap` is accepted as an alias. `fine_sfm_backend=colmap_cli` keeps the incremental `mapper` path, and `pycolmap` remains available as an explicit backend.
+The task fails if required outputs are missing or empty. `final_lod.rad` is not generated by default.
 
-The COLMAP paths use GPU feature extraction and matching when `prefer_gpu=true`. Global mapper is required for `colmap_global`/`gcolmap`; if it is missing, the task fails instead of silently falling back to incremental mapping.
+## 10. Metrics
 
-Metrics include:
+Representative fields:
 
 ```json
 {
+  "pipeline": "dash_deblur_group_gs",
+  "algorithm": "dash_deblur_group_gs",
   "sfm_backend": "colmap_global",
   "sfm_registered_images": 45,
-  "sfm_sparse_points": 6830
+  "sfm_sparse_points": 6830,
+  "fine_eap_enabled": true,
+  "fine_training_backend": "dash_deblur_group_gs",
+  "fine_deblur_mode_requested": "motion",
+  "fine_deblur_mode_effective": "motion",
+  "deblur_strategy": "per_image_blur_type",
+  "deblur_label_motion_images": 10,
+  "deblur_label_defocus_images": 0,
+  "deblur_label_sharp_images": 35,
+  "splat_count": 1200000,
+  "final_spz_enabled": true
 }
 ```
 
-## Outputs
-
-Fine tasks produce:
-
-- `final.ply`
-- `final_web.spz`
-- `final_viewer_meta.json`
-- `metrics.json`
-- task log files
-
-The pipeline must fail instead of creating fake artifacts when COLMAP, CUDA extensions, trainer dependencies, or output validation fail.
-
-## Development Checks
+## 11. Development Checks
 
 Useful local checks:
 
@@ -141,14 +213,14 @@ python -m unittest backend.tests.test_colmap_cli_policy backend.tests.test_dash_
 python -m compileall -q backend/app/fine worker/trainer/dash_deblur_group_gs
 ```
 
-Confirm the running fine worker sees the mounted trainer:
+Confirm the running fine worker sees the mounted trainer and does not contain removed fields:
 
 ```powershell
-docker compose exec worker-fine python -c "from pathlib import Path; s=Path('/opt/dash_deblur_group_gs/scene/gaussian_model.py').read_text(encoding='utf-8'); print('birth_iter' in s)"
+docker compose exec worker-fine python -c "from pathlib import Path; s=Path('/opt/dash_deblur_group_gs/scene/gaussian_model.py').read_text(encoding='utf-8'); print('birth_iter' in s, 'protect_new_points_iters' in s)"
 ```
 
-Expected output:
+Expected:
 
 ```text
-False
+False False
 ```

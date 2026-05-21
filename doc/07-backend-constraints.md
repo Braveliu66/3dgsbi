@@ -2,117 +2,106 @@
 
 ## 1. 真实算法约束
 
-后端算法任务必须调用真实算法代码，不能使用占位函数、假文件或固定假结果冒充成功。
+允许：
 
-允许的行为：
+- 缺少算法环境时任务失败。
+- 缺少权重时任务失败或按配置下载权重。
+- GPU、CUDA、COLMAP、ffmpeg、Spark、pycolmap 或 CUDA 扩展不可用时返回明确错误。
+- 上传任务日志 artifact 帮助诊断。
 
-- 未接入算法时返回 `ALGORITHM_NOT_CONFIGURED`。
-- 缺少权重时返回 `WEIGHTS_NOT_FOUND`。
-- GPU 不满足要求时返回 `GPU_RESOURCE_UNAVAILABLE`。
-- 许可证未登记时返回 `LICENSE_NOT_REGISTERED`。
-- 使用真实算法仓库中的最小样例验证环境。
+禁止：
 
-不允许的行为：
+- 生成空 `preview.spz` 或 `final.ply` 并标记成功。
+- 写固定假 `metrics.json` 作为训练结果。
+- 用 `sleep` 模拟算法成功。
+- 在 API 请求线程里执行长算法。
+- 引入与当前主线无关的训练器、重复 CUDA/Torch 环境或假兼容层。
 
-- 生成空的 `preview.spz` 并标记成功。
-- 写一个固定假 `metrics.json` 当作真实训练结果。
-- 用 `sleep` 模拟训练后返回成功。
-- 测试只验证状态变成成功，却不验证真实产物。
+## 2. 当前算法边界
+
+| 算法 | 当前状态 |
+| --- | --- |
+| LiteVGGT | bundled preview vendor，必须有 `model-cache/litevggt/te_dict.pt` |
+| Spark SPZ | worker 内 Node 22 + `@sparkjsdev/spark` 转码 |
+| DashDeblurGroupGS Fine | bundled trainer，Compose 挂载到 `/opt/dash_deblur_group_gs` |
+| COLMAP | worker Dockerfile 从 upstream 构建，默认 fine 使用 `global_mapper` |
+| PyCOLMAP | 显式 fine backend 和 EAP/metadata 读取依赖 |
+| LingBot 视频预览 | 已不属于当前算法 registry |
+| EDGS/RoMA dense initialization | 后端显式拒绝 |
+| Speedy-Splat/FastGS | 不属于默认 fine 主线 |
 
 ## 3. 模型权重缓存
 
-所有第三方模型权重必须先进入项目根目录的本地缓存，再通过 Docker Compose 挂载给 worker 使用。后续接入任何新模型都按这个规则处理。
+- 权重统一放在 `model-cache/`，通过 Compose 挂载给 worker。
+- 当前预览权重：`model-cache/litevggt/te_dict.pt`。
+- 权重不提交 Git。
+- `MODEL_AUTO_DOWNLOAD=true` 时 worker 可下载缺失权重。
+- 下载优先 `https://hf-mirror.com`，但 fallback 必须可配置。
+- 下载必须使用 `.part`、lock 和 Range 续传，不能只写容器临时目录。
 
-- 本地缓存路径统一为 `model-cache/<model-name>/...`。
-- 当前 LiteVGGT preview 权重路径为 `model-cache/litevggt/te_dict.pt`；图片 fine SfM 使用 pycolmap，不再需要 AMB3R checkpoint。
-- Docker build 不再远端下载大权重；worker 启动预检必须先检查共享 `model-cache`，缺失时使用 `.part` 文件和 HTTP Range 断点续传下载。
-- 大权重文件不得提交 Git；只保留目录占位或说明文件，权重扩展名由 `.gitignore` 忽略。
-- 新增模型时必须同步更新下载脚本、构建脚本、Dockerfile/Compose 挂载路径和 `algorithm_registry` 的 `weight_source`/`weight_path`。
-- 不允许只把权重下载到容器临时目录却不回写项目缓存，否则下次启动会重复下载。
+## 4. 任务与队列
 
-## 4. 多 GPU 与高并发
-
-后端需要支持单 GPU 和多 GPU。
-
-调度器必须考虑：
-
-- GPU 总显存。
-- GPU 已用显存。
-- GPU 利用率。
-- 当前任务类型。
-- 任务优先级。
-- 用户并发限制。
-- 预计任务时长。
-
-推荐策略：
-
-| 任务 | 策略 |
-| --- | --- |
-| 实时摄像头 | 优先低延迟，固定 Worker 或高优先级队列 |
-| 极速预览 | 高优先级，可在显存允许时并发 |
-| 精细重建 | 默认独占 GPU |
-| LOD 生成 | 中优先级，可错峰执行 |
-| Mesh 导出 | 中优先级，按显存需求调度 |
-
-高并发要求：
-
-- 上传和下载不占用 GPU Worker。
-- API 请求不能直接执行长任务。
-- 长任务必须进入队列。
-- Worker 通过心跳上报状态。
-- 任务状态必须持久化，服务重启后可恢复或标记失败。
+- `POST /tasks/preview` 只创建 task 并推入 `preview_tasks`。
+- `POST /tasks/fine` 只创建 task 并推入 `fine_tasks`。
+- Worker 更新 `running/succeeded/failed/canceled`、阶段、进度、ETA 和 metrics。
+- fine worker 启动时恢复中断的 `queued/running` fine task。
+- 任务失败后不盲目重试；具体重试策略后续再设计。
 
 ## 5. 存储要求
 
-存储必须按用户和项目隔离。
-
-基本要求：
-
-- 原始素材、缩略图、预览产物、最终产物、导出包和日志分目录保存。
-- 大文件上传使用分片上传。
-- 下载使用签名 URL。
-- 删除项目时应删除对应对象存储文件或进入异步清理任务。
-- 用户总占用需要可统计。
-
-对象存储推荐使用 MinIO 或 S3。
+- 存储路径必须按 `users/{user_id}/projects/{project_id}` 隔离。
+- 大文件上传使用分片上传，分片大小上限 64MB。
+- 删除项目时要删除数据库记录；对象清理策略可异步增强。
+- 本地下载 token 默认 1 小时过期。
+- artifact 必须记录大小、checksum、kind、source_version 和 metadata。
 
 ## 6. 权限要求
 
-- 用户只能查看和操作自己的项目。
-- 管理员可以查看所有用户的项目统计和训练占用。
-- 分享链接只能访问被分享的模型和必要元信息。
-- 导出下载链接需要过期时间。
+- 普通用户只能访问自己的项目、素材、任务和产物。
+- 管理员可访问管理 API。
+- 分享链接只返回公开项目摘要和 Viewer 配置。
+- `/api/algorithms` 和 `/api/pipeline-parameters/schema` 可公开读取。
 
-## 7. 任务日志与可观测性
+## 7. 可观测性
 
-每个任务都要记录：
+每个任务应记录：
 
-- 当前阶段。
-- 进度。
-- 预计剩余时间。
-- Worker ID。
-- GPU ID。
-- 开始时间。
-- 结束时间。
-- 标准输出和错误日志路径。
-- 失败错误码和错误信息。
-- 产物清单。
+- `current_stage`
+- `progress`
+- `eta_seconds`
+- `worker_id`
+- `started_at` / `finished_at`
+- `error_code` / `error_message`
+- `logs`
+- `metrics`
+- 任务日志 artifact
 
-管理员面板应能查看：
+管理员运行时预检应覆盖：
 
-- 队列长度。
-- 任务耗时。
-- 失败率。
-- GPU 占用。
-- 用户存储占用。
-- 用户训练占用。
+- Python。
+- GPU。
+- torch/CUDA。
+- Transformer Engine。
+- preview worker。
+- fine worker。
+- LiteVGGT 权重。
+- Spark SPZ。
+- DashDeblurGroupGS trainer。
+- ffmpeg、git、node、COLMAP、pycolmap。
 
+## 8. Fine 参数安全
 
-- 构建期默认使用 `hf-mirror.com`、清华 PyPI 镜像和 `registry.npmmirror.com`，但必须可通过 build args 覆盖。
+- 默认 `fine_sfm_backend=colmap_global`。
+- `gcolmap/global/global_mapper/colmap_glomap` 归一化到 `colmap_global`。
+- `colmap` 和 `colmap_cli` 使用 CLI incremental mapper；`pycolmap` 显式走 PyCOLMAP。
+- `fine_deblur_mode` 只接受 `motion|defocus|sharp`；旧 `mix/auto/automatic` 视为 `motion`。
+- `fine_edgs_enabled=true` 必须失败。
+- `birth_iter` 和 `protect_new_points_iters` 不能重新进入 trainer contract。
+- `add_points()` 默认禁用：`pts_iter=999999`、`pts_rate=0`、`pts_N_pts=0`。
 
+## 9. 构建与镜像
 
-
-```text
-```
-
-- Docker and task-specific downloads must prefer `https://hf-mirror.com`; fallback sources must remain configurable rather than hard-coded as the only path.
+- Worker 镜像需要构建 COLMAP，并检查 `feature_extractor`、`mapper`、`global_mapper`、`hierarchical_mapper`、`image_undistorter`、`model_analyzer`、`model_clusterer`、`model_splitter`。
+- 普通源码修改使用 `docker compose up -d --force-recreate ...`。
+- 依赖、Dockerfile、CUDA 扩展、系统包、基础镜像或 submodule 变化才 rebuild。
+- 不要随意清理 `.docker-build-cache/`、Docker builder cache 或 `3dgsbi-worker:local`，否则 COLMAP/CUDA 扩展会重新编译。

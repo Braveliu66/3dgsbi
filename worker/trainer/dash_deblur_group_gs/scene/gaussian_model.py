@@ -68,7 +68,7 @@ class GaussianModel:
     def create_GTnet(self, hidden=2, width=64, pos_delta=0, num_moments=4):
         self.GTnet = GTnet(num_hidden=hidden, width=width, pos_delta=pos_delta, num_moments=num_moments)
 
-    def create_conditional_GTnets(self, num_images, hidden=2, width=64, code_dim=16, num_moments=4):
+    def create_conditional_GTnets(self, num_images, hidden=2, width=64, code_dim=8, num_moments=4):
         self.motion_GTnet = ConditionalGTnet(
             num_images=num_images,
             blur_code_dim=code_dim,

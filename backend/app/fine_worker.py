@@ -32,7 +32,6 @@ from app.worker import (
     format_options,
     heartbeat,
     media_summary,
-    read_positive_int,
     run_task_in_subprocess,
     task_log_path,
     task_work_dir,
@@ -354,7 +353,7 @@ def prepare_fine_inputs(db, task: Task, project: Project, work_dir: Path, starte
             raise FineFailure("INSUFFICIENT_IMAGES", "COLMAP fine reconstruction requires an image project with at least 3 images")
         input_dir = download_media(project, work_dir)
         update_task(db, task, project, "input_downloaded", 12, started, f"downloaded {len(project.media)} media files")
-        max_side = read_positive_int(options.get("fine_image_max_side"), settings.fine_image_max_side)
+        max_side = 0
         normalized = normalize_image_directory(input_dir, work_dir / "input_normalized", max_side=max_side, jpeg_quality=92)
         print(
             "[fine-worker] normalized fine image input "
@@ -368,7 +367,7 @@ def prepare_fine_inputs(db, task: Task, project: Project, work_dir: Path, starte
             "input_ready",
             16,
             started,
-            f"normalized {normalized.output_count} images to RGB JPEG, max side {normalized.max_side}px",
+            f"normalized {normalized.output_count} images to RGB JPEG at original resolution",
         )
         return pipeline, normalized.output_dir, None, {**normalized.metrics(), "fine_input_type": "images"}, "checking COLMAP runtime"
 

@@ -1,170 +1,157 @@
 # 核心流程与状态机
 
-## 1. 项目状态机
+## 1. 项目状态
+
+当前前端类型定义包含以下项目状态：
 
 ```text
 CREATED
-  -> UPLOADING
-  -> PREPROCESSING
-  -> PREVIEW_RUNNING
-  -> PREVIEW_READY
-  -> FINE_QUEUED
-  -> GLOBAL_OPTIMIZING
-  -> FINE_RUNNING
-  -> COMPLETED
-
-任意运行中状态
-  -> FAILED
-  -> CANCELED
-
+UPLOADING
+PREPROCESSING
+PREVIEW_RUNNING
+PREVIEW_READY
+FINE_QUEUED
+GLOBAL_OPTIMIZING
+FINE_RUNNING
 COMPLETED
-  -> MESH_EXPORT_RUNNING
-  -> MESH_EXPORT_READY
+FAILED
+CANCELED
 ```
 
-`GLOBAL_OPTIMIZING` 只在长视频精细重建且开启全局优化时出现。
+当前代码实际主要使用：
 
-## 2. 图片极速预览流程
+- `CREATED`：项目创建完成。
+- `UPLOADING`：上传或补传素材后。
+- `PREVIEW_RUNNING`：预览任务入队或运行。
+- `PREVIEW_READY`：当前 source version 的预览产物可用。
+- `FINE_QUEUED`：精细重建任务入队。
+- `FINE_RUNNING`：精细重建 worker 已接手。
+- `COMPLETED`：精细重建成功。
+- `FAILED`：任务失败并写入错误信息。
+- `CANCELED`：任务取消接口持久化任务取消状态。
+
+`GLOBAL_OPTIMIZING`、Mesh 导出相关状态和实时摄像头状态仍是规划或遗留类型，不是当前主线。
+
+## 2. 上传流程
 
 ```mermaid
 sequenceDiagram
-    participant U as 用户
     participant FE as 前端
-    participant API as 后端
-    participant S3 as 对象存储
-    participant Q as Redis 队列
-    participant W as GPU Worker
-    participant V as Viewer
+    participant API as FastAPI
+    participant DB as 数据库
+    participant FS as 对象存储
 
-    U->>FE: 创建项目并选择图片
-    FE->>API: 创建项目
-    API-->>FE: 返回 project_id
-    FE->>API: 分片上传图片
-    API->>S3: 保存 raw/images
-    API->>Q: 创建 preview 任务
-    API-->>FE: 返回 task_id
-    W->>Q: 拉取 preview 任务
-    W->>W: 分析图片数量和质量
-    W->>W: LiteVGGT 获取位姿和点云
-    W->>W: Spark 转码生成 preview.spz
-    W->>S3: 上传 preview.spz 和 preview_lod1.rad
-    W->>API: 回写任务完成
-    API-->>FE: 推送 PREVIEW_READY
-    FE->>V: 加载预览模型
+    FE->>API: POST /api/projects
+    API->>DB: 创建 Project
+    FE->>API: POST /api/projects/{id}/uploads/check
+    API->>DB: 创建或复用 UploadSession
+    FE->>API: PUT /api/uploads/{upload_id}/chunks/{index}/raw
+    API->>FS: 保存 .part 分片
+    FE->>API: POST /api/uploads/{upload_id}/complete
+    API->>FS: 合并 raw file 并生成缩略图
+    API->>DB: 创建 MediaAsset，递增 project.source_version
 ```
 
-## 3. 视频极速预览流程
+补充规则：
 
-视频极速预览管线已清理，待重新设计与实现。当前系统可以保存视频素材，但不会创建视频预览任务或生成视频预览 artifact。
+- 前端默认分片大小为 `NEXT_PUBLIC_UPLOAD_CHUNK_SIZE`，默认 16MB。
+- 后端单分片上限 64MB。
+- `uploads/check` 会返回已上传分片；若同一文件已完成，会直接返回 media。
+- 图片项目不能上传视频，视频项目不能上传图片。
+- 删除素材会更新 `source_version`，若删除当前封面则选择下一个缩略图。
 
-## 4. 实时摄像头粗重建流程
+## 3. 预览流程
 
-实时摄像头采集页面、分片上传 API 和实时预览管线已清理。新管线实现后再定义录制素材、任务队列、artifact 和 Viewer 加载流程。
+```mermaid
+sequenceDiagram
+    participant FE as 前端
+    participant API as FastAPI
+    participant Q as Redis preview_tasks
+    participant W as worker-preview
+    participant A as LiteVGGT / Spark
+    participant DB as 数据库
+    participant FS as 对象存储
 
-## 5. 精细重建流程
+    FE->>API: POST /api/projects/{id}/tasks/preview
+    API->>DB: Task queued, Project PREVIEW_RUNNING
+    API->>Q: rpush task_id
+    W->>Q: blpop task_id
+    W->>FS: 下载图片或单视频
+    W->>W: 图片归一化；视频先 ffmpeg 抽帧
+    W->>A: LiteVGGT 推理并生成 PLY/SPZ
+    W->>FS: 上传 preview.spz、original.ply、meta、log
+    W->>DB: Task succeeded, Project PREVIEW_READY
+    API-->>FE: SSE task_succeeded / artifact_created
+```
+
+预览失败规则：
+
+- GPU 不可用、权重缺失、Spark 转码失败或产物为空时任务失败。
+- 失败任务会上传日志 artifact，但不会创建成功模型 artifact。
+- Viewer 只加载与当前 `project.source_version` 一致的预览 artifact；旧 artifact 返回 stale。
+
+## 4. 精细重建流程
 
 ```mermaid
 flowchart TD
-    Start["用户点击精细重建"] --> Queue["创建 fine 任务"]
-    Queue --> Input["图片/视频帧归一化与低质量过滤"]
-    Input --> Colmap["现有 COLMAP CLI / pycolmap 生成 images + sparse/0"]
-    Colmap --> Config["生成 DashDeblurGroupGS 配置"]
-    Config --> Train["Deblur + Dash + Group 训练"]
-    Train --> Export["导出 final.ply 并转码 final_web.spz"]
-    Export --> LOD
-    LOD --> Save["保存 final 产物和 metrics.json"]
+    Start["创建 fine task"] --> Input["下载素材并准备输入"]
+    Input --> Video{"video?"}
+    Video -->|是| Frames["抽帧、去重、质量过滤"]
+    Video -->|否| Images["RGB JPEG 归一化"]
+    Frames --> Blur["blur analysis"]
+    Images --> Blur
+    Blur --> SFM["COLMAP global_mapper / CLI / PyCOLMAP"]
+    SFM --> EAP["可选 EAP 点云增强"]
+    EAP --> Config["生成 DashDeblurGroupGS 配置"]
+    Config --> Train["训练并解析日志进度"]
+    Train --> Filter["final.ply 远端噪声过滤"]
+    Filter --> SPZ["转码 final_web.spz"]
+    SPZ --> Save["上传 final artifacts、metrics、log"]
 ```
 
-## 6. Mesh 导出流程
+关键规则：
 
-1. 用户在项目详情页选择导出格式。
-2. 后端创建 `mesh_export` 任务。
-3. Worker 读取 `final.ply`。
-4. Worker 使用 MeshSplatting 生成 `.ply`、`.obj`、`.glb`。
-5. 产物上传到对象存储。
-6. 后端生成签名 URL 并返回前端。
+- 图片项目至少 3 张图。
+- 视频 fine 要求 exactly one video。
+- 默认 `fine_sfm_backend=colmap_global`；`gcolmap/global/global_mapper/colmap_glomap` 归一化为 `colmap_global`。
+- `colmap` 和 `colmap_cli` 使用 CLI incremental mapper；`pycolmap` 使用 PyCOLMAP incremental path。
+- `fine_deblur_mode` 为 `motion|defocus|sharp`；旧 `mix/auto/automatic` 归一化为 `motion`。
+- 运行时拒绝 `fine_edgs_enabled=true`。
+- `final_web.spz` 默认必需；显式 `fine_spz_enabled=false` 仅用于离线/调试。
 
-## 7. 任务优先级
+## 5. Viewer 配置流程
 
-| 任务类型 | 优先级 | GPU 策略 |
-| --- | --- | --- |
-| 实时摄像头 | 待重写 | 新管线实现后重新定义 |
-| 极速预览 | 高 | 可并发，快速返回 |
-| LOD 生成 | 中 | 可与部分轻量任务错峰 |
-| Mesh 导出 | 中 | 默认独占 GPU |
-| 精细重建 | 低 | 默认独占 GPU，长任务 |
+`GET /api/projects/{project_id}/viewer-config` 返回：
 
-## 8. 失败处理
+- 有当前版本 final SPZ 时：`status=ready`、`source=final`、`mode=single`。
+- 无 final 但有当前版本 preview SPZ/PLY 时：`status=ready`、`source=preview`。
+- 只有旧版本 preview 时：`status=unavailable`、`stale=true`。
+- 无模型时：`status=unavailable`。
 
-- 上传失败：允许用户重新上传失败分片。
-- 预处理失败：项目进入 `FAILED`，保留错误日志。
-- 预览失败：允许重新发起预览任务。
-- 精细重建失败：保留预览结果，不删除已有产物。
-- 导出失败：不影响项目最终重建结果。
-- 用户取消：任务进入 `CANCELED`，Worker 应尽快停止并清理临时目录。
+分享页使用 `GET /api/shared-projects/{share_token}` 返回项目摘要和同一 Viewer 配置。
 
-## 9. 当前实现同步
+## 6. 事件通道
 
-当前预览任务的真实执行路径如下：
+前端通过 SSE 订阅：
 
-```mermaid
-sequenceDiagram
-    participant U as 用户
-    participant FE as Next.js 前端
-    participant API as FastAPI API
-    participant DB as PostgreSQL
-    participant S as MinIO
-    participant Q as Redis
-    participant W as Preview Worker
-    participant A as 真实算法适配层
-
-    U->>FE: 登录并上传图片
-    FE->>API: Authorization: Bearer token
-    API->>DB: 校验用户和项目归属
-    API->>S: 保存真实上传文件
-    API->>DB: 写入 media_assets
-    FE->>API: 创建 preview task
-    API->>DB: tasks.status = queued
-    API->>Q: rpush preview task id
-    W->>Q: blpop preview task id
-    W->>DB: tasks.status = running
-    W->>S: 下载真实上传文件到 work_dir
-    W->>A: LiteVGGT -> Spark-SPZ
-    alt 成功且 preview.spz 非空
-        W->>S: 上传 preview/preview.spz
-        W->>DB: 创建 preview_spz artifact
-        W->>DB: tasks.status = succeeded, projects.status = PREVIEW_READY
-    else 算法未配置或产物无效
-        W->>DB: tasks.status = failed, error_code/error_message
-        W->>DB: 不创建 artifact
-    end
+```text
+GET /api/projects/{project_id}/events?token=...
 ```
 
-当前状态规则：
+常见事件：
 
-- API 创建预览任务后只允许进入 `queued`；不得在请求线程内直接执行算法。
-- worker 接手后进入 `running`，并写入 `worker_id`、`current_stage`、`started_at`。
-- 算法环境失败时进入 `failed`，项目进入 `FAILED`，`artifacts` 表不新增成功产物。
-- 只有真实非空 `preview.spz` 上传成功后，任务才进入 `succeeded`，项目进入 `PREVIEW_READY`。
-- viewer config 存在 `preview_spz` 时返回 `mode=single`；不存在时返回 `unavailable`。视频/实时视频加载语义待新管线重新定义。
-- 当前取消接口只持久化 `canceled` 状态；正在执行的外部算法进程中断和临时目录清理属于后续增强。
+- `task_started`
+- `task_progress`
+- `task_succeeded`
+- `task_failed`
+- `artifact_created`
+- `heartbeat`
 
-## 2026-05-18 Fine Workflow Update
+事件来源是 `task_events` 表。SSE 会先推送最近事件，再持续轮询新事件。
 
-Fine workflow now runs:
+## 7. 取消与失败处理
 
-1. Frontend sends `scene_type=indoor|outdoor`; backend does not run a scene-classification model.
-2. Normalize uploaded JPG/PNG or extracted video frames into RGB JPEG. Missing EXIF is valid; EXIF orientation is only a pixel-rotation hint.
-3. Analyze blur and keep at least 3 real images.
-4. Run the PyCOLMAP path by default. The worker image still builds upstream COLMAP for explicit `fine_sfm_backend=colmap_cli` runs.
-5. Select indoor/outdoor PyCOLMAP matching policy by image count and capture order. Explicit CLI runs still use the COLMAP CLI policy code.
-6. Write a COLMAP-compatible scene with `images/` and `sparse/0`.
-7. Use `fine_deblur_mode=motion` by default and apply the deblur branch to all training images; legacy `mix` requests are treated as `motion`.
-8. Generate a scene-specific DashDeblurGroupGS config for `motion`, `defocus`, or `sharp`.
-9. Train DashDeblurGroupGS from the COLMAP scene and surface progress from training logs.
-10. Export standard `final.ply`, transcode `final_web.spz`, write `final_viewer_meta.json`, and write `metrics.json`.
-
-`colmap_sparse` is now only a legacy fine pipeline alias. The default fine pipeline is `dash_deblur_group_gs`. The deprecated `fine_sfm_backend=litevggt` fine option remains unsupported; preview LiteVGGT is unchanged.
-
-The trainer is mounted at `/opt/dash_deblur_group_gs` in local Docker Compose, so Python trainer edits are picked up after recreating the workers. The removed `protect_new_points_iters` and `birth_iter` fields are not part of the workflow.
-
+- 取消接口：`POST /api/tasks/{task_id}/cancel`，会把 queued/running task 标记为 `canceled`。
+- worker 在关键节点检查 canceled 状态；已启动的外部训练进程中断仍属于后续增强。
+- 失败时任务写入 `error_code`、`error_message`、日志和事件；项目进入 `FAILED`。
+- 精细重建失败不删除已有预览 artifact。

@@ -1,44 +1,32 @@
 # 3DGS 重建系统文档索引
 
-本文档目录由根目录 `system.md` v2.1 拆解而来，目的是让后续新窗口编写代码时能快速获得稳定上下文。
+本文档目录描述当前代码库的真实系统边界。阅读顺序建议如下：
 
-## 使用方式
+1. `01-requirements.md`：系统定位、已实现能力、规划能力和验收口径。
+2. `02-architecture.md`：前端、后端、Worker、存储和算法适配层结构。
+3. `03-workflows-state.md`：项目状态、上传、预览、精细重建和事件流。
+4. `04-data-api.md`：数据库模型、对象路径、REST API、SSE 和任务消息。
+5. `05-implementation-plan.md`：当前里程碑完成情况和后续工作。
+6. `06-frontend-pages.md`：Next.js 页面与前端交互规格。
+7. `07-backend-constraints.md`：真实算法、权重缓存、队列、权限和可观测性约束。
+8. `08-progress.md`：截至 2026-05-21 的工程状态。
+9. `09-deployment.md`：Docker Compose、本地开发、缓存和重建规则。
+10. `10-fine-pipeline.md`：当前精细重建主线的权威说明。
 
-如果新建窗口后需要让 Codex 编写代码，可以先让它读取：
+## 当前系统主线
 
-```text
-请先阅读 Q:\3dgsbi\doc\README.md，并按其中的文档顺序理解项目，然后根据我的具体需求编写代码。
-```
-
-建议阅读顺序：
-
-1. `01-requirements.md`：系统目标、用户角色、功能需求、非功能需求、验收标准。
-2. `02-architecture.md`：整体架构、模块职责、算法适配层、部署结构。
-3. `03-workflows-state.md`：上传、预览、精细重建、导出、状态机与任务规则。
-4. `04-data-api.md`：数据模型、对象存储路径、后端 API 与事件通道草案。
-5. `05-implementation-plan.md`：推荐开发顺序、里程碑、验证方法和风险项。
-6. `06-frontend-pages.md`：首页、上传页、项目管理页和详情页的页面规格。
-7. `07-backend-constraints.md`：真实算法接入、高并发、多 GPU、存储、权限和禁止占位实现的约束。
-8. `08-progress.md`：当前工程实现进度、已验证项、未接入项和下一步。
-9. `09-deployment.md`：Docker/WSL 启动方式、环境变量、迁移、种子账号和运行验证。
+- 前端：Next.js / React / TypeScript，运行端口由 Compose 暴露为 `3001`。
+- 后端：FastAPI，提供认证、项目、上传、任务、产物、分享、反馈、管理和参数默认值 API。
+- 数据层：PostgreSQL 目标部署；本机测试可用 SQLite。Redis 用于任务队列。
+- 存储：支持本地对象存储和 S3/MinIO 风格配置，路径按用户和项目隔离。
+- 预览：图片和单视频项目均走 LiteVGGT，视频先抽帧，再生成 Spark SPZ。
+- 精细重建：默认 `dash_deblur_group_gs`，SfM 默认 `colmap_global`，再经 EAP、DashDeblurGroupGS 训练、PLY 过滤和 SPZ 转码。
+- Worker：`worker-preview` 和 `worker-fine` 使用同一个 CUDA worker 镜像，但监听不同队列。
 
 ## 重要约束
 
-- 系统定位为非商业研究、毕业设计和实验室内部使用。
-- 前端不暴露算法选择，用户只选择操作意图，后端按规则自动选择管线。
-- 代码实现算法流程未接入真实实现前，必须明确返回不可用或失败。
-- 后端算法能力不能用占位函数、假文件、固定假结果冒充通过；未接入真实算法时必须返回明确的不可用状态。
-- 所有第三方算法源码都先放入项目根目录 `repo-cache/<repo-name>`；Docker 构建必须优先复用本地缓存，缺失时先尝试国内镜像源再回退官方源。
-- 源码、配置和文档统一使用 UTF-8 编码；Windows PowerShell 若显示乱码，应先切换终端编码或使用 UTF-8 读取。
-
-## 2026-05-18 Image Fine COLMAP/DashDeblurGroup Notes
-
-- `10-fine-pipeline.md` is the source of truth for the current fine reconstruction implementation.
-- Image fine `dash_deblur_group_gs` defaults to PyCOLMAP initialization, writes a COLMAP-compatible `images/` and `sparse/0` scene, then runs the embedded trainer from `worker/trainer/dash_deblur_group_gs` mounted at `/opt/dash_deblur_group_gs` in local Docker Compose. `DASH_DEBLUR_GROUP_REPO` is only for explicit compatible trainer overrides.
-- `fine_sfm_backend=pycolmap` is the implementation default; `fine_sfm_backend=colmap` is accepted as a PyCOLMAP alias and `colmap_cli` remains available for explicit CLI runs.
-- `colmap_sparse` is only a legacy fine pipeline alias.
-- Preview LiteVGGT keeps separate speed-oriented defaults with fewer frames and points.
-- Docker and task-specific downloads must prefer `https://hf-mirror.com`.
-- `birth_iter` and `protect_new_points_iters` were removed from the fused trainer and must not appear in generated configs.
-
-
+- 算法任务必须调用真实代码。缺权重、缺 CUDA、缺命令或产物无效时任务失败，不能创建假产物。
+- `model-cache/` 存放模型权重，`repo-cache/` 只用于显式外部仓库缓存或兼容覆盖。
+- 默认精细重建训练器位于 `worker/trainer/dash_deblur_group_gs`，Compose 挂载到 `/opt/dash_deblur_group_gs`。
+- 普通 Python、TypeScript 或 trainer 源码修改后重建服务即可；只有依赖、Dockerfile、CUDA 扩展、系统包或 submodule 变化才需要重新 build。
+- `birth_iter`、`protect_new_points_iters`、EDGS/RoMA dense initialization、LingBot 视频预览、Speedy-Splat/FastGS 默认路径均不属于当前主线。

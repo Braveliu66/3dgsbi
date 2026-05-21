@@ -139,7 +139,7 @@ class GTnet(nn.Module):
 
 
 class ConditionalGTnet(nn.Module):
-    def __init__(self, num_images, blur_code_dim=16, res_pos=3, res_view=10, num_hidden=3, width=64, pos_delta=False, num_moments=4):
+    def __init__(self, num_images, blur_code_dim=8, res_pos=3, res_view=10, num_hidden=3, width=64, pos_delta=False, num_moments=4):
         super().__init__()
         self.pos_delta = pos_delta
         self.num_moments = num_moments

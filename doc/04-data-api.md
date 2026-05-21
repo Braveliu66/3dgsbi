@@ -1,371 +1,278 @@
-# 数据模型与接口草案
+# 数据模型与接口
 
-本文件是面向后续编码的草案，用于统一前后端和 Worker 的数据边界。字段可在实现时按实际框架调整。
+本文档按当前 SQLAlchemy 模型和 `backend/app/main.py` 的 API 实现整理。
 
-## 1. 核心数据表
+## 1. 数据表
 
 ### 1.1 users
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| id | uuid | 用户 ID |
-| username | varchar | 用户名 |
-| email | varchar | 邮箱 |
-| role | varchar | `user` 或 `admin` |
-| created_at | timestamp | 创建时间 |
+| id | string uuid | 用户 ID |
+| username | string | 唯一用户名 |
+| email | string nullable | 邮箱 |
+| password_hash | string | 密码哈希 |
+| role | string | `user` 或 `admin` |
+| created_at | datetime | 创建时间 |
 
 ### 1.2 projects
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| id | uuid | 项目 ID |
-| owner_id | uuid | 所属用户 |
-| name | varchar | 项目名称 |
-| input_type | varchar | `images`、`video`；`camera` 待新管线重新定义 |
-| status | varchar | 项目状态 |
-| cover_artifact_id | uuid | 封面或默认预览产物 |
-| error_message | text | 最近一次失败原因 |
-| tags | text[] | 项目标签 |
-| total_size_bytes | bigint | 项目总占用 |
-| preview_image_uri | text | 卡片预览图，训练中可使用原始素材缩略图 |
-| created_at | timestamp | 创建时间 |
-| updated_at | timestamp | 更新时间 |
+| id | string uuid | 项目 ID |
+| owner_id | string uuid | 所属用户 |
+| name | string | 项目名称 |
+| input_type | string | `images` 或 `video` |
+| status | string | 项目状态 |
+| tags | json list | 标签 |
+| total_size_bytes | int | 素材总大小 |
+| preview_image_uri | text nullable | 卡片封面 |
+| share_token | string nullable | 分享 token |
+| error_message | text nullable | 最近错误 |
+| source_version | int | 素材版本 |
+| preview_source_version | int nullable | 当前预览对应素材版本 |
+| created_at / updated_at | datetime | 时间戳 |
 
 ### 1.3 media_assets
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| id | uuid | 素材 ID |
-| project_id | uuid | 项目 ID |
-| kind | varchar | `image` 或 `video` |
-| object_uri | text | 原始文件路径 |
-| thumbnail_uri | text | 缩略图路径 |
-| file_name | varchar | 文件名 |
-| file_size | bigint | 文件大小 |
-| width | int | 宽度 |
-| height | int | 高度 |
-| duration_seconds | numeric | 视频时长 |
-| quality_flags | jsonb | 模糊、曝光、覆盖不足等质量标记 |
-| created_at | timestamp | 创建时间 |
+| id | string uuid | 素材 ID |
+| project_id | string uuid | 项目 ID |
+| kind | string | `image` 或 `video` |
+| object_uri | text | 原始文件 URI |
+| thumbnail_uri | text nullable | 缩略图/封面 URI |
+| file_name | string | 原文件名 |
+| file_size | int | 文件大小 |
+| width / height | int nullable | 尺寸 |
+| duration_seconds | int nullable | 视频时长 |
+| quality_flags | json | 质量标记 |
+| source_version | int | 创建时的素材版本 |
+| client_order | int | 前端排序 |
+| created_at | datetime | 创建时间 |
 
 ### 1.4 upload_sessions
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| id | uuid | 上传会话 ID |
-| project_id | uuid | 项目 ID |
-| file_name | varchar | 文件名 |
-| file_size | bigint | 文件大小 |
-| chunk_size | bigint | 分片大小 |
-| total_chunks | int | 分片总数 |
-| uploaded_chunks | int | 已上传分片数 |
-| status | varchar | `uploading`、`completed`、`failed` |
-| object_uri | text | 合并后的对象存储路径 |
+| id | string uuid | 上传会话 ID |
+| project_id / user_id | string uuid | 归属 |
+| file_hash | string | 文件签名哈希 |
+| file_name / file_size | string / bigint | 文件信息 |
+| chunk_size / total_chunks | bigint / int | 分片配置 |
+| content_type | string nullable | MIME |
+| kind | string | `image` 或 `video` |
+| client_order | int | 前端排序 |
+| status | string | `uploading`、`completed`、`failed` |
+| object_uri | text nullable | 合并后 URI |
+| media_id | string nullable | 完成后的素材 ID |
+| error_message | text nullable | 错误 |
+| created_at / updated_at | datetime | 时间戳 |
 
 ### 1.5 tasks
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| id | uuid | 任务 ID |
-| project_id | uuid | 项目 ID |
-| type | varchar | `preview`、`fine`、`lod`、`mesh_export` |
-| status | varchar | `queued`、`running`、`succeeded`、`failed`、`canceled` |
-| priority | int | 数值越大优先级越高 |
-| progress | int | 0 到 100 |
-| worker_id | varchar | 执行 Worker |
-| options | jsonb | 系统生成的执行参数 |
-| metrics | jsonb | 任务指标 |
-| current_stage | varchar | 当前阶段，例如 `pose_estimation`、`training`、`lod_generation` |
-| eta_seconds | int | 预计剩余时间 |
-| error_message | text | 失败原因 |
-| created_at | timestamp | 创建时间 |
-| started_at | timestamp | 开始时间 |
-| finished_at | timestamp | 结束时间 |
+| id | string uuid | 任务 ID |
+| project_id | string uuid | 项目 ID |
+| type | string | `preview`、`fine`、`lod`、`mesh_export` |
+| status | string | `queued`、`running`、`succeeded`、`failed`、`canceled` |
+| priority | int | 优先级 |
+| progress | int | 0-100 |
+| worker_id | string nullable | Worker ID |
+| options | json | 任务参数 |
+| metrics | json | 运行指标 |
+| current_stage | string | 当前阶段 |
+| eta_seconds | int nullable | 预计剩余秒数 |
+| error_code / error_message | string/text nullable | 错误 |
+| logs | json list | 日志摘要 |
+| started_at / finished_at | datetime nullable | 时间戳 |
 
 ### 1.6 artifacts
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| id | uuid | 产物 ID |
-| project_id | uuid | 项目 ID |
-| task_id | uuid | 任务 ID |
-| kind | varchar | `preview_spz`、`final_ply`、`lod_rad`、`mesh_glb` 等 |
-| object_uri | text | 对象存储路径 |
-| file_name | varchar | 文件名 |
-| file_size | bigint | 文件大小 |
-| checksum | varchar | 校验值 |
-| metadata | jsonb | 额外信息 |
-| created_at | timestamp | 创建时间 |
+| id | string uuid | 产物 ID |
+| project_id / task_id | string uuid | 归属 |
+| kind | string | `preview_spz`、`original_ply`、`final_spz`、`final_ply`、`metrics_json` 等 |
+| object_uri | text | 存储 URI |
+| file_name | string | 文件名 |
+| file_size | int | 字节数 |
+| checksum | string nullable | sha256 |
+| metadata | json | 额外元数据 |
+| source_version | int | 对应素材版本 |
+| created_at | datetime | 创建时间 |
 
-### 1.7 feedback
+### 1.7 其他表
 
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| id | uuid | 反馈 ID |
-| user_id | uuid | 提交用户 |
-| project_id | uuid | 可选关联项目 |
-| title | varchar | 标题 |
-| content | text | 描述 |
-| attachment_uri | text | 截图或附件 |
-| status | varchar | `open`、`processing`、`closed` |
-| created_at | timestamp | 创建时间 |
+| 表 | 用途 |
+| --- | --- |
+| `stored_objects` / `stored_object_chunks` | 本地对象存储索引和分块 |
+| `feedback` | 用户反馈 |
+| `worker_heartbeats` | worker 心跳和资源状态 |
+| `algorithm_registry` | bundled 算法、许可证、权重和命令登记 |
+| `pipeline_parameter_defaults` | 管线 scene 默认参数 |
+| `task_events` | SSE 事件持久化 |
 
-### 1.8 worker_heartbeats
+## 2. API
 
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| worker_id | varchar | Worker ID |
-| hostname | varchar | 主机名 |
-| gpu_index | int | GPU 序号 |
-| gpu_name | varchar | GPU 名称 |
-| gpu_memory_total | bigint | 总显存 |
-| gpu_memory_used | bigint | 已用显存 |
-| gpu_utilization | numeric | GPU 利用率 |
-| current_task_id | uuid | 当前任务 |
-| last_seen_at | timestamp | 最近心跳 |
-
-### 1.9 algorithm_registry
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| id | uuid | 记录 ID |
-| name | varchar | 算法名称 |
-| repo_url | text | 仓库地址 |
-| license | varchar | 许可证 |
-| commit_hash | varchar | 集成版本 |
-| weight_source | text | 权重来源 |
-| enabled | boolean | 是否启用 |
-| notes | text | 合规备注 |
-
-## 2. 对象存储路径
-
-```text
-users/{user_id}/projects/{project_id}/raw/images/{file_name}
-users/{user_id}/projects/{project_id}/raw/video/{file_name}
-users/{user_id}/projects/{project_id}/thumbs/{media_id}.jpg
-users/{user_id}/projects/{project_id}/preview/preview.spz
-users/{user_id}/projects/{project_id}/preview/preview_lod1.rad
-users/{user_id}/projects/{project_id}/final/final.ply
-users/{user_id}/projects/{project_id}/final/final_web.spz
-users/{user_id}/projects/{project_id}/final/metrics.json
-users/{user_id}/projects/{project_id}/final/lod/final_lod.rad
-users/{user_id}/projects/{project_id}/exports/final_mesh.glb
-users/{user_id}/projects/{project_id}/logs/{task_id}.log
-users/{user_id}/projects/{project_id}/metrics/{task_id}.json
-```
-
-## 3. REST API 草案
-
-### 3.1 项目
+### 2.1 健康与认证
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/projects` | 获取当前用户项目列表 |
-| POST | `/api/projects` | 创建项目 |
-| GET | `/api/projects/{project_id}` | 获取项目详情 |
-| PATCH | `/api/projects/{project_id}` | 更新项目名称等信息 |
+| GET | `/health` | 健康检查 |
+| POST | `/api/auth/register` | 注册 |
+| POST | `/api/auth/login` | 登录，返回 Bearer token |
+| POST | `/api/auth/logout` | 前端清 token |
+| GET | `/api/me` | 当前用户 |
+
+### 2.2 项目
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/projects/summary` | 当前用户项目摘要 |
+| GET | `/api/projects` | 当前用户项目列表 |
+| POST | `/api/projects` | 创建项目，`input_type=images|video` |
+| GET | `/api/projects/{project_id}` | 项目详情 |
 | DELETE | `/api/projects/{project_id}` | 删除项目 |
-| GET | `/api/projects/summary` | 当前用户项目总览、总数、训练中数量、总占用 |
+| POST | `/api/projects/bulk-delete` | 批量删除 |
 
-### 3.2 上传
+当前没有 PATCH 项目更新接口。
 
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| POST | `/api/projects/{project_id}/uploads` | 创建上传会话 |
-| PUT | `/api/uploads/{upload_id}/chunks/{chunk_index}` | 上传分片 |
-| POST | `/api/uploads/{upload_id}/complete` | 合并分片并入队预处理 |
-| GET | `/api/uploads/{upload_id}` | 查询上传状态 |
-| GET | `/api/projects/{project_id}/media` | 查询项目素材列表 |
-| DELETE | `/api/projects/{project_id}/media/{media_id}` | 删除某个原始素材 |
-| GET | `/api/projects/{project_id}/media/stats` | 查询图片数量、视频大小、分辨率、时长等统计 |
-
-### 3.3 任务
+### 2.3 上传与素材
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/api/projects/{project_id}/tasks/preview` | 创建极速预览任务 |
+| POST | `/api/projects/{project_id}/media` | 直接上传单文件 |
+| POST | `/api/projects/{project_id}/uploads/check` | 创建/检查分片上传会话 |
+| PUT | `/api/uploads/{upload_id}/chunks/{chunk_index}` | multipart 分片上传 |
+| PUT | `/api/uploads/{upload_id}/chunks/{chunk_index}/raw` | octet-stream 原始分片上传 |
+| POST | `/api/uploads/{upload_id}/complete` | 合并分片并创建 media |
+| GET | `/api/projects/{project_id}/media` | 素材列表 |
+| GET | `/api/projects/{project_id}/media/stats` | 素材统计 |
+| DELETE | `/api/projects/{project_id}/media/{media_id}` | 删除素材 |
+| GET | `/api/media/{media_id}/thumbnail` | 缩略图 |
+| GET | `/api/media/{media_id}/file` | 原始素材文件 |
+
+### 2.4 任务
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/projects/{project_id}/tasks/preview` | 创建预览任务 |
 | POST | `/api/projects/{project_id}/tasks/fine` | 创建精细重建任务 |
-| POST | `/api/projects/{project_id}/tasks/mesh-export` | 创建 Mesh 导出任务 |
-| GET | `/api/tasks/{task_id}` | 查询任务状态 |
+| GET | `/api/tasks/{task_id}` | 查询任务 |
 | POST | `/api/tasks/{task_id}/cancel` | 取消任务 |
+| GET | `/api/tasks/{task_id}/log` | 下载任务日志文本 |
 
-### 3.4 产物
+当前没有 Mesh export 任务创建接口。
 
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| GET | `/api/projects/{project_id}/artifacts` | 获取项目产物列表 |
-| GET | `/api/artifacts/{artifact_id}/download-url` | 获取签名下载链接 |
-| GET | `/api/projects/{project_id}/viewer-config` | 获取 Viewer 加载配置 |
-
-### 3.5 用户与反馈
+### 2.5 产物、Viewer 与分享
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/api/auth/login` | 登录 |
-| POST | `/api/auth/logout` | 退出 |
-| GET | `/api/me` | 当前用户信息 |
-| POST | `/api/feedback` | 提交问题反馈 |
-| GET | `/api/feedback` | 当前用户反馈列表 |
+| GET | `/api/projects/{project_id}/artifacts` | 项目产物 |
+| GET | `/api/artifacts/{artifact_id}/download-url` | 下载 URL |
+| GET | `/api/artifacts/{artifact_id}/original-ply/download-url` | 预览原始 PLY 下载 URL |
+| GET | `/api/artifacts/{artifact_id}/file` | token 下载 |
+| GET | `/api/artifacts/{artifact_id}/original-ply/file` | token 下载原始 PLY |
+| GET | `/api/projects/{project_id}/viewer-config` | Viewer 配置 |
+| POST | `/api/projects/{project_id}/share` | 创建分享 |
+| DELETE | `/api/projects/{project_id}/share` | 删除分享 |
+| GET | `/api/shared-projects/{share_token}` | 公开分享项目 |
 
-### 3.6 管理
+### 2.6 反馈、算法和参数
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/admin/workers` | Worker 状态 |
-| GET | `/api/admin/gpus` | GPU 使用情况 |
-| GET | `/api/admin/tasks` | 任务列表 |
-| GET | `/api/admin/storage` | 用户存储统计 |
-| GET | `/api/admin/users/{user_id}/usage` | 单个用户项目数、存储占用和训练占用 |
-| GET | `/api/admin/system/resources` | 首页和管理端使用的 CPU、GPU、显存占用 |
-| GET | `/api/admin/algorithms` | 算法许可证登记 |
-| POST | `/api/admin/algorithms` | 新增算法登记 |
+| POST | `/api/feedback` | 提交反馈 |
+| GET | `/api/algorithms` | 公开算法列表 |
+| GET | `/api/pipeline-parameters/schema` | 参数 schema，公开读取 |
+| GET | `/api/admin/pipeline-parameter-defaults` | 管线默认参数 |
+| PUT | `/api/admin/pipeline-parameter-defaults/{pipeline}/{scene_type}` | 保存默认参数 |
 
-## 4. 事件通道草案
+### 2.7 管理
 
-前端可以使用 WebSocket 或 SSE 订阅项目和任务事件。
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/system/resources` | 当前用户可读资源摘要 |
+| GET | `/api/admin/system/resources` | 管理资源摘要 |
+| GET | `/api/admin/runtime/preflight` | 运行时预检 |
+| GET | `/api/admin/tasks` | 所有任务 |
+| GET | `/api/admin/projects` | 所有项目统计 |
+| GET | `/api/admin/users` | 用户统计 |
+| GET | `/api/admin/feedback` | 反馈列表 |
+| GET | `/api/admin/workers` | Worker 心跳 |
+| GET | `/api/admin/algorithms` | 管理算法登记 |
 
-```text
-GET /api/projects/{project_id}/events
+## 3. 任务 options
+
+### 3.1 Preview
+
+核心字段：
+
+```json
+{
+  "pipeline": "litevggt_spz",
+  "preview_pipeline": "litevggt_spz",
+  "input_type": "images",
+  "scene_type": "indoor",
+  "preview_scene_profile": "indoor_full",
+  "litevggt_target_size": 420,
+  "preview_max_points": 3200000
+}
 ```
 
-事件格式：
+视频预览会额外写入 LiteVGGT video speed defaults，例如 `preview_video_fps`、`preview_video_max_frames`、`litevggt_max_input_frames`、`litevggt_inference_mode`。
+
+### 3.2 Fine
+
+核心字段：
+
+```json
+{
+  "fine_pipeline": "dash_deblur_group_gs",
+  "input_type": "images",
+  "scene_type": "indoor",
+  "fine_scene_type": "indoor",
+  "fine_scene_profile": "indoor_full",
+  "fine_sfm_backend": "colmap_global",
+  "fine_eap_enabled": true,
+  "fine_deblur_enabled": true,
+  "fine_deblur_mode": "motion",
+  "fine_gsplat_enabled": true,
+  "fine_spz_enabled": true
+}
+```
+
+Fine metrics 包含输入、blur、COLMAP、EAP、训练、SPZ、bbox、source commits 和最终点数。
+
+## 4. 事件通道
+
+```text
+GET /api/projects/{project_id}/events?token=<bearer-token>
+```
+
+事件示例：
 
 ```json
 {
   "event": "task_progress",
   "project_id": "project-id",
   "task_id": "task-id",
-  "task_type": "preview",
   "status": "running",
   "progress": 42,
-  "message": "LiteVGGT direct SPZ preview",
-  "created_at": "2026-04-25T20:00:00+08:00"
+  "current_stage": "fine_training",
+  "eta_seconds": 3600
 }
 ```
 
-常见事件：
+## 5. Worker 消息
 
-| event | 说明 |
-| --- | --- |
-| `project_status_changed` | 项目状态变化 |
-| `task_queued` | 任务已入队 |
-| `task_started` | 任务开始执行 |
-| `task_progress` | 任务进度变化 |
-| `task_succeeded` | 任务成功 |
-| `task_failed` | 任务失败 |
-| `artifact_created` | 新产物已生成 |
-| `resource_usage` | CPU、GPU、显存占用变化 |
-| `capture_suggestion` | 补拍建议或素材质量提示 |
+Redis 队列当前只存 task id。Worker 根据 task id 从数据库读取项目、素材和 options。
 
-## 5. Worker 任务消息草案
-
-```json
-{
-  "task_id": "task-id",
-  "project_id": "project-id",
-  "user_id": "user-id",
-  "type": "preview",
-  "input_type": "images",
-  "raw_uri": "s3://bucket/users/user-id/projects/project-id/raw/images/",
-  "output_prefix": "s3://bucket/users/user-id/projects/project-id/preview/",
-  "options": {
-    "pipeline": "litevggt_spz",
-    "timeout_seconds": 300
-  },
-  "real_algorithm_required": true
-}
+```text
+preview_tasks: task_id
+fine_tasks: task_id
 ```
 
-Worker 返回结果：
-
-```json
-{
-  "task_id": "task-id",
-  "status": "succeeded",
-  "artifacts": [
-    {
-      "kind": "preview_spz",
-      "object_uri": "s3://bucket/users/user-id/projects/project-id/preview/preview.spz"
-    }
-  ],
-  "metrics": {
-    "duration_seconds": 120,
-    "splat_count": 500000
-  },
-  "suggestions": [
-    {
-      "type": "missing_view",
-      "message": "建议补拍物体背面和右侧视角"
-    }
-  ]
-}
-```
-
-如果真实算法环境不可用，Worker 必须返回失败或不可用状态，不能创建假产物：
-
-```json
-{
-  "task_id": "task-id",
-  "status": "failed",
-  "error": {
-    "code": "ALGORITHM_NOT_CONFIGURED",
-    "message": "LiteVGGT weights are not configured"
-  }
-}
-```
-
-## 6. 当前实现同步
-
-截至 2026-04-25，后端实现已采用工程化数据层：
-
-- 数据库模型已覆盖 `users`、`projects`、`media_assets`、`tasks`、`artifacts`、`feedback`、`worker_heartbeats`、`algorithm_registry`。
-- 当前已实现的认证接口为 `POST /api/auth/register`、`POST /api/auth/login`、`POST /api/auth/logout`、`GET /api/me`，使用 JWT Bearer token。
-- 当前上传接口为 `POST /api/projects/{project_id}/media`，直接写入对象存储并记录真实文件大小；分片上传接口仍是后续项。
-- `POST /api/projects/{project_id}/tasks/preview` 只创建 task 并入 Redis 队列，不在 API 请求内运行算法。
-- `GET /api/projects/{project_id}/viewer-config` 存在真实 `preview_spz` artifact 时返回 `mode=single`；否则返回 unavailable。视频和实时视频加载语义待新管线重新定义。
-- `GET /api/algorithms` 为公开算法合规信息；`GET /api/admin/algorithms`、`GET /api/admin/tasks`、`GET /api/admin/workers`、`GET /api/admin/system/resources` 需要管理员角色。
-- artifact 下载优先使用 MinIO presigned URL；本地开发后端会发放 1 小时 artifact token 访问 `/api/artifacts/{artifact_id}/file`。
-
-## 7. Runtime Preflight 与预览输入规则
-
-- 管理员接口 `GET /api/admin/runtime/preflight` 返回 Python、CUDA、torch、GPU、算法仓库、权重、命令和 commit 检查结果。
-- 图片预览任务创建前要求至少 1 张图片；超过 800 张时任务 options 中记录采样上限。
-- 视频预览任务和实时摄像头分片预览已清理，待新管线重新定义 API 与 artifact 语义。
-- `Task.options.input_frame_policy` 记录 `min_input_frames`、`max_input_frames`、`available_input_frames` 和 `selected_input_frames`。
-
-## 8. 2026-05-18 Fine API Metrics
-
-Fine tasks accept uploaded JPG/PNG images without EXIF camera metadata. Valid task options include:
-
-- `fine_pipeline=dash_deblur_group_gs` by default. Legacy `colmap_sparse` is accepted as an alias.
-- `fine_sfm_backend=pycolmap` by default. `fine_sfm_backend=colmap` is accepted as a PyCOLMAP alias. `fine_sfm_backend=colmap_cli` explicitly uses the command-line COLMAP path. The deprecated fine value `litevggt` is unsupported; preview still uses LiteVGGT.
-- `fine_training_flavor=auto|dash_deblur_group`. `auto` uses the embedded trainer or an explicitly configured compatible `train.py --config` repo.
-- `fine_data_device=cpu|cuda`.
-- `fine_deblur_enabled=true|false`. `false` writes `deblur=0` for sharp canonical training.
-- `fine_deblur_mode=motion|defocus|sharp`. Default is `motion`; legacy `mix`, `auto`, and `automatic` requests are accepted as aliases for `motion`. Deblur is applied to every training image when enabled.
-- `num_moments` controls the GTnet motion branch moment count.
-- `resolution` controls trainer image downsampling. Default `resolution=-1` uses the trainer's automatic image-resolution policy.
-- `pts_iter`, `pts_rate`, `pts_N_pts`, `pts_N_intpl`, and `pts_add_bound` control Deblurring-3DGS `add_points()`. Defaults disable random point addition (`pts_iter=999999`, `pts_rate=0`, `pts_N_pts=0`); `pts_rate` is only used for volume-based sizing when random point addition is explicitly re-enabled.
-- `fine_trainer_repo` can point at a compatible DashDeblurGroupGS checkout; empty uses the embedded trainer or `DASH_DEBLUR_GROUP_REPO`.
-- `protect_new_points_iters` is removed and must not be sent by the UI/API. It is not part of the fused trainer contract.
-
-Fine `metrics.json` now includes:
-
-```json
-{
-  "pipeline": "dash_deblur_group_gs",
-  "sfm_backend": "pycolmap",
-  "sfm_registered_images": 6,
-  "sfm_sparse_points": 250000,
-  "fine_training_backend": "dash_deblur_group_gs",
-  "fine_training_flavor": "dash_deblur_group",
-  "fine_deblur_mode": "motion",
-  "fine_deblur_mode_requested": "motion",
-  "fine_deblur_mode_effective": "motion",
-  "deblur_auto_confidence": "explicit",
-  "deblur": 1,
-  "splat_count": 1200000
-}
-```
-
-Fine output artifacts are `final.ply`, `final_web.spz`, `final_viewer_meta.json`, `metrics.json`, and task logs. `final_web.spz` is required for the default web viewer path unless `fine_spz_enabled=false` is explicitly set for an offline/debug run.
+Worker 成功后写入 artifacts、task metrics、task events 和 project status；失败后写入错误码、错误信息和日志 artifact。

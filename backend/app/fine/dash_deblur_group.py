@@ -51,7 +51,7 @@ class EffectiveDeblurMode:
 
 
 INDOOR_MOTION = {
-    "iterations": 3000,
+    "iterations": 30_000,
     "resolution": -1,
     "white_background": False,
     "eval": True,
@@ -69,7 +69,7 @@ INDOOR_MOTION = {
     "max_clamp": 1.10,
     "per_image_blur": 0,
     "blur_label_path": "",
-    "blur_code_dim": 4,
+    "blur_code_dim": 8,
     "lambda_code": 0.0001,
     "lambda_delta": 0.001,
     "sharp_weight": 1.0,
@@ -320,6 +320,9 @@ def run_dash_deblur_group_training(
         "fine_train_entrypoint": str(paths.train_py),
         "fine_train_output_dir": str(output_dir),
         "fine_train_config": str(config_path),
+        "fine_train_metrics_csv": str(output_dir / "experiment_metrics.csv"),
+        "fine_train_psnr_log": str(output_dir / "psnr.txt"),
+        "fine_train_final_metrics": str(output_dir / "final_metrics.txt"),
         "fine_deblur_mode": deblur_mode.effective,
         "fine_deblur_mode_requested": deblur_mode.requested,
         "fine_deblur_mode_effective": deblur_mode.effective,
@@ -379,29 +382,62 @@ def _deblur_strategy(config: dict[str, Any]) -> str:
 
 
 def write_blur_label_file(path: Path, blur_analysis: Any | None) -> tuple[dict[str, str], dict[str, int]]:
-    labels = build_blur_labels(blur_analysis)
+    label_records = build_blur_label_records(blur_analysis)
+    labels = {name: str(record["blur_type"]) for name, record in label_records.items()}
     counts = {"motion": 0, "defocus": 0, "sharp": 0}
     for value in labels.values():
         counts[value] += 1
     if labels:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"version": 1, "labels": labels}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        path.write_text(json.dumps({"version": 1, "labels": label_records}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return labels, counts
 
 
-def build_blur_labels(blur_analysis: Any | None) -> dict[str, str]:
+def build_blur_label_records(blur_analysis: Any | None) -> dict[str, dict[str, Any]]:
     registry = getattr(blur_analysis, "per_frame_blur", None)
     if not isinstance(registry, dict):
         return {}
-    labels: dict[str, str] = {}
+    labels: dict[str, dict[str, Any]] = {}
+    numeric_keys = (
+        "deblurweight",
+        "deblur_weight",
+        "blur_weight",
+        "blurry_patch_ratio",
+        "raw_score",
+        "sharp_score",
+        "laplacian",
+        "gradient",
+        "fft_high_ratio",
+    )
     for key, item in registry.items():
         if not isinstance(item, dict) or item.get("rejected"):
             continue
         training_image = item.get("training_image") or key
         if training_image is None or str(training_image).startswith("rejected:"):
             continue
-        labels[str(training_image)] = normalize_blur_label(item)
+        record = {"blur_type": normalize_blur_label(item)}
+        for numeric_key in numeric_keys:
+            value = _finite_float_or_none(item.get(numeric_key))
+            if value is not None:
+                record[numeric_key] = value
+        labels[str(training_image)] = record
     return labels
+
+
+def build_blur_labels(blur_analysis: Any | None) -> dict[str, str]:
+    return {name: str(record["blur_type"]) for name, record in build_blur_label_records(blur_analysis).items()}
+
+
+def _finite_float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if result != result or result in (float("inf"), float("-inf")):
+        return None
+    return result
 
 
 def normalize_blur_label(item: dict[str, Any]) -> str:
@@ -567,6 +603,8 @@ def build_training_command(
     config: dict[str, Any],
 ) -> list[str]:
     iterations = int(config["iterations"])
+    test_iterations = training_metric_iterations(iterations)
+    save_iterations = training_save_iterations(iterations)
     return [
         paths.python,
         "-u",
@@ -580,8 +618,28 @@ def build_training_command(
         "--config",
         str(config_path),
         "--test_iterations",
-        str(iterations + 1),
+        *[str(iteration) for iteration in test_iterations],
+        "--save_iterations",
+        *[str(iteration) for iteration in save_iterations],
     ]
+
+
+def training_metric_iterations(iterations: int, interval: int = 500) -> list[int]:
+    iterations = max(1, int(iterations))
+    interval = max(1, int(interval))
+    values = list(range(interval, iterations + 1, interval))
+    if iterations not in values:
+        values.append(iterations)
+    return values
+
+
+def training_save_iterations(iterations: int, interval: int = 10_000) -> list[int]:
+    iterations = max(1, int(iterations))
+    interval = max(1, int(interval))
+    values = list(range(interval, iterations + 1, interval))
+    if iterations not in values:
+        values.append(iterations)
+    return values
 
 
 GSPLAT_PREWARM_SCRIPT = r"""

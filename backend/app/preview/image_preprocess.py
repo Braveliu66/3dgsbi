@@ -42,7 +42,10 @@ def normalize_image_directory(
     if not files:
         raise PreviewFailure("IMAGE_INPUT_NOT_FOUND", f"no supported image files found in {input_dir}")
 
-    max_side = max(224, int(max_side))
+    max_side = int(max_side)
+    resize_enabled = max_side > 0
+    if resize_enabled:
+        max_side = max(224, max_side)
     jpeg_quality = max(60, min(95, int(jpeg_quality)))
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -58,7 +61,7 @@ def normalize_image_directory(
                     exif_transposed_count += 1
                 image = convert_to_rgb(image)
                 width, height = image.size
-                if max(width, height) > max_side:
+                if resize_enabled and max(width, height) > max_side:
                     image = resize_preserving_aspect_ratio(image, max_side=max_side)
                     resized_count += 1
                 image.save(output_dir / f"{index:06d}.jpg", format="JPEG", quality=jpeg_quality, optimize=True)

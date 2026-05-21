@@ -29,11 +29,11 @@ class FineRuntimeTests(unittest.TestCase):
         self.assertIn("dependencies", fine_status_block)
         self.assertIn("ffmpeg", fine_status_block)
 
-    def test_fine_defaults_use_1080p_colmap_and_1500p_training_inputs(self) -> None:
+    def test_fine_defaults_use_1080p_colmap_and_original_training_inputs(self) -> None:
         from app.fine.colmap_defaults import COLMAP_MAX_IMAGE_SIZE, FINE_DEFAULT_IMAGE_MAX_SIDE
 
         self.assertEqual(COLMAP_MAX_IMAGE_SIZE, 1080)
-        self.assertEqual(FINE_DEFAULT_IMAGE_MAX_SIDE, 1500)
+        self.assertEqual(FINE_DEFAULT_IMAGE_MAX_SIDE, 0)
         self.assertEqual(COLMAP_MIN_SPARSE_POINTS, 0)
 
     def test_fine_viewer_meta_starts_from_first_training_camera(self) -> None:
