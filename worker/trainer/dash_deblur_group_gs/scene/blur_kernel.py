@@ -144,8 +144,10 @@ class ConditionalGTnet(nn.Module):
         self.pos_delta = pos_delta
         self.num_moments = num_moments
 
-        self.blur_codes = nn.Embedding(num_images, blur_code_dim)
-        nn.init.normal_(self.blur_codes.weight, mean=0.0, std=0.01)
+        self.blur_codes = None
+        if blur_code_dim > 0:
+            self.blur_codes = nn.Embedding(num_images, blur_code_dim)
+            nn.init.normal_(self.blur_codes.weight, mean=0.0, std=0.01)
 
         self.embed_pos, self.embed_pos_cnl = get_embedder(res_pos, 3)
         self.embed_view, self.embed_view_cnl = get_embedder(res_view, 3)
@@ -179,13 +181,15 @@ class ConditionalGTnet(nn.Module):
         pos = self.embed_pos(pos)
         viewdirs = self.embed_view(viewdirs)
 
-        if not torch.is_tensor(image_id):
-            image_id = torch.tensor(image_id, device=pos.device, dtype=torch.long)
+        if self.blur_codes is None:
+            z = pos.new_empty((num_gaussians, 0))
         else:
-            image_id = image_id.to(device=pos.device, dtype=torch.long)
-        image_id = image_id.view(-1)[0]
-
-        z = self.blur_codes(image_id).view(1, -1).expand(num_gaussians, -1)
+            if not torch.is_tensor(image_id):
+                image_id = torch.tensor(image_id, device=pos.device, dtype=torch.long)
+            else:
+                image_id = image_id.to(device=pos.device, dtype=torch.long)
+            image_id = image_id.view(-1)[0]
+            z = self.blur_codes(image_id).view(1, -1).expand(num_gaussians, -1)
         x = torch.cat([pos, viewdirs, scales, rotations, z], dim=-1)
         x1 = self.linears(x)
 

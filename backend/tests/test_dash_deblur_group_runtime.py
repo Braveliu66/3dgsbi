@@ -399,12 +399,16 @@ class DashDeblurGroupRuntimeTests(unittest.TestCase):
         self.assertIn("sharp_or_low_blur_weight_subset(scene.getTestCameras(), fallback_limit=5)", train_source)
         self.assertIn("sharp_or_low_blur_weight_subset(scene.getTrainCameras(), fallback_limit=5)[:5]", train_source)
         self.assertIn("code_dim=opt.blur_code_dim", train_source)
+        self.assertIn('render_pkg["blur_code"].numel() > 0', train_source)
+        self.assertIn("self.blur_codes = None", blur_kernel_source)
+        self.assertIn("if blur_code_dim > 0:", blur_kernel_source)
+        self.assertIn("pos.new_empty((num_gaussians, 0))", blur_kernel_source)
         self.assertIn("nn.Embedding(num_images, blur_code_dim)", blur_kernel_source)
 
-    def test_blur_code_dim_can_be_set_to_four_eight_or_sixteen(self) -> None:
-        self.assertEqual(build_training_config({"blur_code_dim": 4})["blur_code_dim"], 4)
-        self.assertEqual(build_training_config({"blur_code_dim": 8})["blur_code_dim"], 8)
-        self.assertEqual(build_training_config({"blur_code_dim": 16})["blur_code_dim"], 16)
+    def test_blur_code_dim_is_fixed_to_eight(self) -> None:
+        self.assertEqual(build_training_config({"blur_code_dim": 0})["blur_code_dim"], 8)
+        self.assertEqual(build_training_config({"blur_code_dim": 4})["blur_code_dim"], 8)
+        self.assertEqual(build_training_config({"blur_code_dim": 16})["blur_code_dim"], 8)
 
     def test_trainer_accepts_eap_pointcloud_and_lazy_gsplat_backend(self) -> None:
         trainer_root = Path(__file__).resolve().parents[2] / "worker" / "trainer" / "dash_deblur_group_gs"

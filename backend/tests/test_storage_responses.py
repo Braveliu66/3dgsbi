@@ -174,7 +174,7 @@ class StorageResponseTests(unittest.TestCase):
             self.assertEqual(colmap_fields["fine_eap_dbscan_eps"]["type"], "number")
             self.assertEqual(colmap_fields["fine_gsplat_enabled"]["type"], "boolean")
             self.assertEqual(colmap_fields["blur_code_dim"]["type"], "select")
-            self.assertEqual(colmap_fields["blur_code_dim"]["options"], ["4", "8", "16"])
+            self.assertEqual(colmap_fields["blur_code_dim"]["options"], ["8"])
             self.assertEqual(colmap_fields["fine_deblur_mode"]["option_labels"]["motion"], "运动模糊")
             self.assertEqual(colmap_fields["fine_deblur_mode"]["options"], ["motion", "defocus", "sharp"])
             self.assertEqual(pipelines[FINE_PIPELINE_NAME]["defaults"]["indoor"]["pts_N_pts"], 0)

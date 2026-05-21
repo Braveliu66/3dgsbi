@@ -17,6 +17,7 @@ from app.preview.types import PreviewFailure
 
 
 Progress = Callable[[str, int, str], None]
+BLUR_CODE_DIM = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,7 +70,7 @@ INDOOR_MOTION = {
     "max_clamp": 1.10,
     "per_image_blur": 0,
     "blur_label_path": "",
-    "blur_code_dim": 8,
+    "blur_code_dim": BLUR_CODE_DIM,
     "lambda_code": 0.0001,
     "lambda_delta": 0.001,
     "sharp_weight": 1.0,
@@ -526,6 +527,7 @@ def build_training_config(options: dict[str, Any], blur_analysis: Any | None = N
         elif key in STRING_KEYS:
             config[key] = str(options.get(key) or config[key]).strip()
     apply_mode_locked_config(config, scene_type, deblur_mode)
+    config["blur_code_dim"] = BLUR_CODE_DIM
     config["pc_name"] = "points3D_eap" if read_bool(options.get("fine_eap_enabled"), True) else "points3D"
     config["renderer_backend"] = "gsplat" if read_bool(options.get("fine_gsplat_enabled"), False) else "original"
     config["renderer_backend_deblur"] = "original"

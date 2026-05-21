@@ -313,7 +313,7 @@ def compute_regularization_loss(render_pkg, opt, luminance_model=None, luminance
     code_reg = torch.zeros((), device=ref.device)
     delta_reg = torch.zeros((), device=ref.device)
     lum_reg = torch.zeros((), device=ref.device)
-    if "blur_code" in render_pkg:
+    if "blur_code" in render_pkg and render_pkg["blur_code"].numel() > 0:
         code_reg = opt.lambda_code * (render_pkg["blur_code"] ** 2).mean()
     if "delta_reg" in render_pkg:
         delta_reg = opt.lambda_delta * render_pkg["delta_reg"]

@@ -38,6 +38,7 @@ VALID_PIPELINES = {"litevggt_spz", FINE_PIPELINE_NAME}
 VALID_SCENE_TYPES = {"indoor", "outdoor"}
 PIPELINE_DEFAULTS_PRESET_KEY = "_pipeline_defaults_preset"
 COLMAP_DEFAULTS_PRESET = "dash_deblur_group_eap_gsplat_stable_density_2026_05_20_v2"
+BLUR_CODE_DIM = 8
 
 SCENE_PROFILES = {
     "indoor": {"preview_scene_profile": "indoor_full", "fine_scene_profile": "indoor_full"},
@@ -92,7 +93,7 @@ COLMAP_DEFAULTS: dict[str, dict[str, Any]] = {
         "fine_trainer_repo": "",
         "fine_data_device": "cpu",
         "use_pos": True,
-        "blur_code_dim": 8,
+        "blur_code_dim": BLUR_CODE_DIM,
         "num_moments": 4,
         "hidden": 3,
         "width": 64,
@@ -247,7 +248,7 @@ def colmap_fields() -> list[dict[str, Any]]:
         field("resolution", "训练下采样倍率", "number", "去模糊训练", "输入图像进入 trainer 的下采样倍率；-1 使用训练器默认策略。", min=-1, max=8, step=1),
         field("fine_deblur_enabled", "启用去模糊", "boolean", "去模糊训练", "启用 Deblurring-3DGS 的 GTnet 训练分支。"),
         field("fine_deblur_mode", "去模糊模式", "select", "去模糊训练", "训练使用的去模糊物理分支；默认使用 motion，不再根据模糊分析自动切换。", options=["motion", "defocus", "sharp"], option_labels={"motion": "运动模糊", "defocus": "失焦模糊", "sharp": "清晰"}),
-        field("blur_code_dim", "每图模糊向量维度", "select", "去模糊训练", "每张图的 blur embedding 维度；默认 8，可用 4/8/16 做论文实验。", options=["4", "8", "16"], option_labels={"4": "4", "8": "8", "16": "16"}),
+        field("blur_code_dim", "每图模糊向量维度", "select", "去模糊训练", "每张图的 blur embedding 维度；当前固定为 8。", options=["8"], option_labels={"8": "8"}),
         field("use_pos", "启用位置偏移", "boolean", "去模糊训练", "启用 GTnet 的位置偏移分支。"),
         field("num_moments", "运动矩数量", "number", "去模糊训练", "运动模糊渲染使用的虚拟时刻数量。", min=1, max=16, step=1),
         field("hidden", "GTnet 隐藏层数", "number", "去模糊训练", "GTnet 网络深度。", min=1, max=8, step=1),
@@ -318,7 +319,9 @@ def stored_defaults_for(pipeline: str, options: dict[str, Any]) -> dict[str, Any
     if pipeline == "litevggt_spz":
         return litevggt_stored_defaults(options)
     if pipeline == FINE_PIPELINE_NAME:
-        return {**dict(options or {}), PIPELINE_DEFAULTS_PRESET_KEY: COLMAP_DEFAULTS_PRESET}
+        stored = {**dict(options or {}), PIPELINE_DEFAULTS_PRESET_KEY: COLMAP_DEFAULTS_PRESET}
+        stored["blur_code_dim"] = BLUR_CODE_DIM
+        return stored
     return dict(options or {})
 
 
@@ -331,6 +334,7 @@ def effective_saved_defaults_for(pipeline: str, options: dict[str, Any] | None) 
             return {}
         stored.pop(PIPELINE_DEFAULTS_PRESET_KEY, None)
         stored = normalize_fine_legacy_options(stored)
+        stored["blur_code_dim"] = BLUR_CODE_DIM
     return stored
 
 
@@ -360,6 +364,8 @@ def merged_task_options_with_sources(
     if pipeline == FINE_PIPELINE_NAME:
         payload = normalize_fine_legacy_options(payload)
     merged = {**system, **saved, **payload}
+    if pipeline == FINE_PIPELINE_NAME:
+        merged["blur_code_dim"] = BLUR_CODE_DIM
     sources = {
         key: ("request" if key in payload else "admin_saved" if key in saved else "system_default")
         for key in merged
