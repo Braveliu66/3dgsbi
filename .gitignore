@@ -16,3 +16,4 @@ model-cache/*
 __pycache__/
 *.part
 model-cache/amb3r/amb3r.pt
+.tmp/
