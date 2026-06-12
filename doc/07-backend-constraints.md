@@ -101,7 +101,7 @@
 
 ## 9. 构建与镜像
 
-- Worker 镜像需要构建 COLMAP，并检查 `feature_extractor`、`mapper`、`global_mapper`、`hierarchical_mapper`、`image_undistorter`、`model_analyzer`、`model_clusterer`、`model_splitter`。
+- Worker 镜像需要构建 COLMAP，并检查 `feature_extractor`、`mapper`、`hierarchical_mapper`、`image_undistorter`、`model_analyzer`、`model_splitter`。
 - 普通源码修改使用 `docker compose up -d --force-recreate ...`。
 - 依赖、Dockerfile、CUDA 扩展、系统包、基础镜像或 submodule 变化才 rebuild。
 - 不要随意清理 `.docker-build-cache/`、Docker builder cache 或 `3dgsbi-worker:local`，否则 COLMAP/CUDA 扩展会重新编译。

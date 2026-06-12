@@ -56,10 +56,10 @@ RUN --mount=type=cache,id=three-dgs-worker-apt-cache,target=/var/cache/apt,shari
     git ca-certificates curl gnupg xz-utils build-essential cmake ninja-build pkg-config \
     ccache \
     libglm-dev \
-    libboost-program-options-dev libboost-graph-dev libboost-system-dev libeigen3-dev \
+    libboost-all-dev libeigen3-dev \
     libopenimageio-dev openimageio-tools libopenexr-dev libopencv-dev libmetis-dev libgoogle-glog-dev libgtest-dev libgmock-dev \
     libsqlite3-dev libglew-dev qtbase5-dev libqt5opengl5-dev libcgal-dev libceres-dev libsuitesparse-dev \
-    libcurl4-openssl-dev libssl-dev libopenblas-openmp-dev ffmpeg libgl1 libglib2.0-0 libsm6 libxrender1 libxext6 && \
+    libcurl4-openssl-dev libssl-dev libopenblas-openmp-dev ffmpeg libflann-dev libfreeimage-dev libgl1 libglib2.0-0 libsm6 libxrender1 libxext6 && \
     if ! find /usr/local/cuda/include /usr/include /usr -path '*/cudnn.h' -print -quit 2>/dev/null | grep -q .; then \
       apt-get update && apt-get install -y --no-install-recommends libcudnn9-dev-cuda-12; \
     fi && \
@@ -120,7 +120,7 @@ if [ "${COLMAP_SOURCE_INSTALL:-true}" = "true" ]; then
 fi
 help_text="$(colmap help 2>&1 || true)"
 printf '%s\n' "$help_text"
-for command in feature_extractor exhaustive_matcher mapper image_undistorter point_triangulator global_mapper hierarchical_mapper model_analyzer model_clusterer model_splitter; do
+for command in feature_extractor exhaustive_matcher mapper image_undistorter point_triangulator hierarchical_mapper model_analyzer model_splitter; do
   if ! printf '%s\n' "$help_text" | grep -Eq "(^|[[:space:]])${command}([[:space:]]|$)"; then
     echo "COLMAP source build missing required command: ${command}" >&2
     exit 1
@@ -305,6 +305,29 @@ PY
   attempt=$((attempt + 1))
 done
 EOF
+
+RUN apt-get update && apt-get install -y \
+    git \
+    cmake \
+    ninja-build \
+    build-essential \
+    libboost-program-options-dev \
+    libboost-filesystem-dev \
+    libboost-graph-dev \
+    libboost-system-dev \
+    libboost-test-dev \
+    libeigen3-dev \
+    libflann-dev \
+    libmetis-dev \
+    libgoogle-glog-dev \
+    libgflags-dev \
+    libsqlite3-dev \
+    libglew-dev \
+    qtbase5-dev \
+    libqt5opengl5-dev \
+    libcgal-dev \
+    libceres-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN --mount=type=cache,id=three-dgs-worker-gsplat-torch-extensions,target=/root/.cache/gsplat_torch_extensions,sharing=locked \
     --mount=type=cache,id=three-dgs-worker-ccache,target=/root/.cache/ccache,sharing=locked <<'EOF'

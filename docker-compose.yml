@@ -78,7 +78,7 @@ services:
       args:
         WORKER_BASE_IMAGE: ${WORKER_BASE_IMAGE:-docker.m.daocloud.io/pytorch/pytorch:2.8.0-cuda12.8-cudnn9-devel}
         COLMAP_REPO_URL: ${COLMAP_REPO_URL:-https://github.com/colmap/colmap.git}
-        COLMAP_REPO_COMMIT: ${COLMAP_REPO_COMMIT:-4.0.4}
+        COLMAP_REPO_COMMIT: ${COLMAP_REPO_COMMIT:-3.9.1}
         COLMAP_SOURCE_INSTALL: ${COLMAP_SOURCE_INSTALL:-true}
         BUILDKIT_INLINE_CACHE: "1"
         DASH_DEBLUR_GROUP_INSTALL_EXTENSIONS: ${DASH_DEBLUR_GROUP_INSTALL_EXTENSIONS:-true}
